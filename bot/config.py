@@ -100,6 +100,11 @@ class Settings:
     telegram_chat_id: str = ""
     telegram_api_base: str = "https://api.telegram.org"
     telegram_proxy: str = ""
+    # 远程发布（分体部署）：VPS 跑 API，家庭端跑发布 worker
+    remote_api_token: str = ""          # Bearer token；空 = 不起 API 服务
+    remote_api_bind: str = "127.0.0.1"  # 绑定地址：Tailscale IP（100.x）或 127.0.0.1
+    remote_api_port: int = 8765
+    remote_api_url: str = ""            # 家庭端填：http://<VPS的Tailscale IP>:8765
     # 行为
     poll_interval_min: int = 5
     subtitle: SubtitleConfig = field(default_factory=SubtitleConfig)
@@ -186,6 +191,10 @@ def load_settings() -> Settings:
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip(),
         telegram_api_base=os.getenv("TELEGRAM_API_BASE", "https://api.telegram.org").strip().rstrip("/"),
         telegram_proxy=os.getenv("TELEGRAM_PROXY", "").strip(),
+        remote_api_token=os.getenv("REMOTE_API_TOKEN", "").strip(),
+        remote_api_bind=os.getenv("REMOTE_API_BIND", "127.0.0.1").strip(),
+        remote_api_port=int(os.getenv("REMOTE_API_PORT", "8765").strip() or "8765"),
+        remote_api_url=os.getenv("REMOTE_API_URL", "").strip(),
         poll_interval_min=int(raw.get("poll_interval_min", 5) or 5),
     )
     if s.asr_language.lower() in ("auto", "none", ""):

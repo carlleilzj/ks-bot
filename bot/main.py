@@ -346,7 +346,7 @@ def _window_only_gate(s: Settings, db: Database) -> str | None:
 # ---------- 状态机推进 ----------
 
 def advance_task(s: Settings, db: Database, task_id: int,
-                 dry_run: bool, headed: bool) -> None:
+                 dry_run: bool, headed: bool, stage: str = "all") -> None:
     for _ in range(12):  # 单个任务一轮最多推进 12 步，防异常死循环
         task = db.get(task_id)
         if task is None:
@@ -381,6 +381,13 @@ def advance_task(s: Settings, db: Database, task_id: int,
                         db.update(task_id, state=State.READY)
                         log.info("[dry-run] %s 已就绪，停在发布前：%s", task["shortcode"], task["final_path"])
                     return
+                if stage == "process":
+                    # 分体部署 VPS 端：推进到 READY 即止，发布由家庭端 worker 认领
+                    if st == State.SUBTITLED:
+                        db.update(task_id, state=State.READY)
+                        log.info("[stage=process] %s 处理完成，等待远程发布端领取：%s",
+                                 task["shortcode"], task["final_path"])
+                    return
                 # 发布窗口是全局的（夜间不发），平台间隔/限额在 step_publish 内按平台独立判断
                 window_reason = _window_only_gate(s, db)
                 if window_reason:
@@ -413,10 +420,11 @@ def advance_task(s: Settings, db: Database, task_id: int,
 _last_cleanup_date: str | None = None
 
 
-def cycle(s: Settings, db: Database, dry_run: bool, headed: bool) -> None:
+def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "all") -> None:
     """每轮：自愈滞留任务 + 推进流水线 + 每日清理。
 
     新作品发现已改为 TG 投链驱动（TelegramListener 线程），不再自动监控 IG。
+    stage="process" 时推进到 READY 即止（分体部署 VPS 端）。
     """
     global _last_cleanup_date
     today = datetime.now().strftime("%Y-%m-%d")
@@ -439,7 +447,7 @@ def cycle(s: Settings, db: Database, dry_run: bool, headed: bool) -> None:
 
     # 2) 推进流水线
     for task in db.pending():
-        advance_task(s, db, task["id"], dry_run, headed)
+        advance_task(s, db, task["id"], dry_run, headed, stage)
 
 
 # ---------- 子命令 ----------
@@ -573,6 +581,11 @@ def main() -> None:
     parser.add_argument("--abandon-unpublished", action="store_true",
                         help="放弃积压未发（流水线中任务 + PENDING/FAILED 平台 job），不补发")
     parser.add_argument("--dry-run", action="store_true", help="只处理不发布（停在发布前，检查 media/final/）")
+    parser.add_argument("--stage", choices=("all", "process"), default="all",
+                        help="all=完整流程（默认）；process=只采集处理到 READY（分体部署 VPS 端，"
+                             "发布由家庭端 worker 通过 Remote API 认领）")
+    parser.add_argument("--serve-api", action="store_true",
+                        help="同时启动 Remote API 服务（分体部署 VPS 端；需 .env 配 REMOTE_API_TOKEN/BIND）")
     parser.add_argument("--once", action="store_true", help="只跑一轮就退出（调试用）")
     parser.add_argument("--headed", action="store_true", help="发布时显示浏览器窗口（调试发布流程）")
     args = parser.parse_args()
@@ -615,12 +628,24 @@ def main() -> None:
     if not (s.telegram_bot_token and s.telegram_chat_id):
         log.warning("Telegram 未配置完整，将跳过通知和投链监听")
 
-    log.info("bot 启动（dry_run=%s，轮询间隔 %d 分钟，投链驱动模式）", args.dry_run, s.poll_interval_min)
-    telegram.notify_info(s, f"🟢 bot 已启动（投链驱动模式）\n"
+    log.info("bot 启动（stage=%s，dry_run=%s，轮询间隔 %d 分钟）",
+             args.stage, args.dry_run, s.poll_interval_min)
+    telegram.notify_info(s, f"🟢 bot 已启动（stage={args.stage}）\n"
                             f"直接发视频链接给 bot 即可（IG/YouTube/Facebook/TikTok 等）\n"
                             f"轮询间隔 {s.poll_interval_min} 分钟")
     # 被外部 kill（SIGTERM，如 launchd 停止）时也要发通知，否则进程会被无声终止
     signal.signal(signal.SIGTERM, _sigterm_handler(s))
+
+    # 分体部署：--serve-api 或 --stage=process 时起 Remote API（家庭发布端访问）
+    api_thread = None
+    if args.serve_api or args.stage == "process":
+        if s.remote_api_token and s.remote_api_bind:
+            from .remote_api import start_api_thread
+            api_thread = start_api_thread(s, db, gate_fn=lambda p: publish_gate(s, db, p))
+            log.info("Remote API 已启动（%s:%d，家庭端发布 worker 接入点）",
+                     s.remote_api_bind, s.remote_api_port)
+        else:
+            log.warning("REMOTE_API_TOKEN/REMOTE_API_BIND 未配置，Remote API 未启动")
 
     # 启动 TG 消息监听线程（收到链接 → 入库 → 立刻唤醒主循环）
     pipeline_wakeup = threading.Event()
@@ -636,7 +661,7 @@ def main() -> None:
     try:
         while True:
             try:
-                cycle(s, db, args.dry_run, args.headed)
+                cycle(s, db, args.dry_run, args.headed, args.stage)
             except Exception as e:
                 log.exception("主循环异常")
                 telegram.notify_info(s, f"🔴 主循环异常（已自动恢复）\n{str(e)[:300]}")
