@@ -1,5 +1,7 @@
 # ks-bot：投链/发现层 → 多平台自动发布（快手 / 抖音 / 小红书 / 视频号）
 
+[![CI](https://github.com/carlleilzj/ks-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/carlleilzj/ks-bot/actions/workflows/ci.yml)
+
 两种采集方式：
 1. **被动投链**：Telegram 给 bot 发视频链接，自动处理发布
 2. **主动发现**（可选）：发现层周期去 YouTube 搜索/RSS 订阅采集热门动画短视频 → 发 TG 审核卡片 → 你点按钮通过后才进流水线
