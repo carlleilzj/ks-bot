@@ -15,11 +15,15 @@ import pytest
 # 让 pytest 能 import bot 包（无 __init__.py 在 tests/ 时）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bot.source.discovery import Candidate, YouTubeSearchAdapter, RSSAdapter, build_adapters
-from bot.source.filter import FilterChain, FilterRules
 from bot.config import DiscoveryConfig
 from bot.db import Database, State
-
+from bot.source.discovery import (
+    Candidate,
+    RSSAdapter,
+    YouTubeSearchAdapter,
+    build_adapters,
+)
+from bot.source.filter import FilterChain, FilterRules
 
 # ============================================================
 # FilterChain 单测

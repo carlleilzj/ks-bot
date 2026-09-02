@@ -10,11 +10,8 @@ DiscoveryScheduler 周期调用各适配器 → FilterChain 过滤 → 入库 CA
 from __future__ import annotations
 
 import logging
-import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass
 
 import httpx
 import yt_dlp

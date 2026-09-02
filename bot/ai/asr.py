@@ -21,7 +21,7 @@ class ASRError(RuntimeError):
 _NOISE_RE = re.compile(
     r"(字幕\s*by|字幕制作|索兰娅|请不吝点赞|订阅频道|谢谢观看|"
     r"点个关注|关注我吧|制作字幕)",
-    re.I,
+    re.IGNORECASE,
 )
 
 

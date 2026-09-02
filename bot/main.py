@@ -26,19 +26,25 @@ from .ai.asr import transcribe
 from .ai.copywriter import generate_copy
 from .ai.vision import check_real_person
 from .config import (
-    ENV_PATH, FINAL_DIR, LOGS_DIR, RAW_DIR, WORK_DIR,
-    Settings, ensure_dirs, load_settings,
+    ENV_PATH,
+    FINAL_DIR,
+    LOGS_DIR,
+    RAW_DIR,
+    WORK_DIR,
+    Settings,
+    ensure_dirs,
+    load_settings,
 )
-from .db import Database, JobState, JOB_FINAL_STATES, State, now_iso
+from .db import JOB_FINAL_STATES, Database, JobState, State, now_iso
+from .maintenance.cleanup import purge_orphans, purge_task_media, run_cleanup
 from .media import ffmpeg
 from .media.subtitles import write_ass, write_srt
 from .notify import telegram
 from .publish import all_publishers, enabled_publishers, get_publisher
 from .publish.base import LoginExpired
 from .source import downloader
-from .source.telegram_listener import TelegramListener
 from .source.scheduler import DiscoveryScheduler
-from .maintenance.cleanup import purge_orphans, purge_task_media, run_cleanup
+from .source.telegram_listener import TelegramListener
 
 log = logging.getLogger("bot")
 
@@ -549,7 +555,7 @@ def _sigterm_handler(s: Settings):
     def handler(signum, frame):
         log.info("收到信号 %d，正在停止 bot", signum)
         try:
-            telegram.notify_info(s, f"🟠 bot 收到终止信号 (SIGTERM)，正在停止运行")
+            telegram.notify_info(s, "🟠 bot 收到终止信号 (SIGTERM)，正在停止运行")
         except Exception:
             pass
         raise KeyboardInterrupt

@@ -16,7 +16,7 @@ import httpx
 from ..config import Settings
 from ..db import Database, State
 from ..notify import telegram
-from .downloader import VideoMeta, extract_meta, parse_url
+from .downloader import extract_meta, parse_url
 
 log = logging.getLogger(__name__)
 

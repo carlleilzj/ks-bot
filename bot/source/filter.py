@@ -26,7 +26,7 @@ class FilterRules:
     reject_real_person: bool = False   # 可选：真人检测反向过滤（动画号开启）
 
     @classmethod
-    def from_dict(cls, d: dict | None) -> "FilterRules":
+    def from_dict(cls, d: dict | None) -> FilterRules:
         d = d or {}
         wl = d.get("keyword_whitelist")
         bl = d.get("keyword_blacklist")

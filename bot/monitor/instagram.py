@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import instaloader
 
-from ..config import RAW_DIR, Settings
+from ..config import Settings
 
 log = logging.getLogger(__name__)
 

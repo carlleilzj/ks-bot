@@ -66,7 +66,8 @@ def _check_via_vision_api(image: Path, s: Settings) -> bool:
             )
             content = resp.choices[0].message.content or ""
             # 解析 JSON
-            import json, re
+            import json
+            import re
             content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
             m = re.search(r'\{.*\}', content, re.DOTALL)
             if not m:

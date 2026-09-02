@@ -17,9 +17,9 @@ from playwright.sync_api import Page, sync_playwright
 
 from ..config import DATA_DIR
 from .base import (
+    UA,
     LoginExpired,
     PublishError,
-    UA,
     dismiss_dialogs,
     fill_editor,
     launch_chromium,
@@ -236,6 +236,7 @@ def _find_publish_button_px(page: Page) -> tuple[int, int] | None:
     """像素分析定位底部蓝色/绿色发表按钮（视频号按钮可能也在 Shadow DOM 里）。"""
     try:
         import io
+
         from PIL import Image
         png = page.screenshot()
         img = Image.open(io.BytesIO(png)).convert("RGB")

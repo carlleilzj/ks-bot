@@ -1,0 +1,30 @@
+# ruff 配置：宽松规则，只拦真正有价值的错误，不阻断 CI
+# 详见 https://docs.astral.sh/ruff/configuration/
+
+target-version = "py311"
+line-length = 120
+
+[lint]
+# 启用的规则组：
+# F   = pyflakes（真实错误：未用 import、未用变量等）
+# E4  = 行尾/缩进等基础格式
+# I   = import 排序（可自动修）
+select = ["F", "E4", "I"]
+
+# 显式忽略：这些规则在 bot 里是故意的容错模式，不算问题
+ignore = [
+  "BLE001",  # bare except：bot 大量用 except Exception 做容错（网络/平台失败），符合预期
+  "S110",    # try-except-pass：同上，容错场景
+  "S112",    # try-except-continue：同上
+  "DTZ005",  # datetime.now() 无 tzinfo：bot 用本地时间（发布窗口判断），无需 tz
+  "DTZ006",  # datetime.fromtimestamp() 无 tzinfo：同上
+  "TRY004",  # type-check-without-type-error：风格偏好
+  "TRY401",  # verbose-log-message：log.exception 自带 traceback，显式写 %s 更清楚
+  "C408",    # dict() call：测试里用 dict(**kw) 更可读
+  "SIM102",  # collapsible-if：嵌套 if 更清楚
+  "RUF059",  # unused-unpacked-variable：有时只为占位
+  "F841",    # unused-variable：极少数场景保留
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["F841", "C408"]  # 测试里允许未用变量和 dict() 构造

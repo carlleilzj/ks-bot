@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from pathlib import Path
 
@@ -17,9 +16,9 @@ from playwright.sync_api import Page, sync_playwright
 
 from ..config import DATA_DIR
 from .base import (
+    UA,
     LoginExpired,
     PublishError,
-    UA,
     dismiss_dialogs,
     fill_editor,
     launch_chromium,
@@ -95,6 +94,7 @@ def _has_login_cookies(context) -> bool:
 def login_interactive(state_path: Path = STATE_PATH) -> bool:
     """打开有头浏览器扫码登录，保存登录态。持久化 profile（中途崩溃 cookie 不丢）。"""
     from playwright.sync_api import sync_playwright
+
     from ..config import DATA_DIR as _DATA
     profile = _DATA / "xhs_profile"
     profile.mkdir(parents=True, exist_ok=True)
@@ -244,6 +244,7 @@ def _find_publish_button_px(page: Page) -> tuple[int, int] | None:
     改用截图 + 像素分析定位（底部区域的红色大按钮），返回视口坐标。"""
     try:
         import io
+
         from PIL import Image
         png = page.screenshot()
         img = Image.open(io.BytesIO(png)).convert("RGB")

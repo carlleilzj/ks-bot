@@ -8,16 +8,15 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from pathlib import Path
 
 import httpx
 
-from ..config import Settings, WORK_DIR
+from ..config import WORK_DIR, Settings
 from ..db import Database, State
 from ..notify import telegram
 from .discovery import Candidate, SourceAdapter, build_adapters
-from .downloader import VideoMeta, extract_meta, parse_url
+from .downloader import extract_meta, parse_url
 from .filter import FilterChain, FilterRules
 
 log = logging.getLogger(__name__)
