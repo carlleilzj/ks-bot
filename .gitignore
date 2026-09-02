@@ -5,6 +5,6 @@
 __pycache__/
 *.pyc
 data/
-media/
+/media/
 logs/
 .DS_Store
