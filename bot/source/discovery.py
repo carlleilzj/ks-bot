@@ -104,7 +104,73 @@ class YouTubeSearchAdapter(SourceAdapter):
 
 
 # ============================================================
-# YouTube 频道 RSS 适配器
+# YouTube 频道适配器（走 yt-dlp 频道页，推荐）
+# ============================================================
+
+class ChannelAdapter(SourceAdapter):
+    """订阅 YouTube 频道，用 yt-dlp 频道页增量发现新视频。
+
+    页面类型：tab="shorts"（短视频，默认）或 tab="videos"（长视频）。
+    背景：Google 对部分代理出口 IP 封了 feeds/videos.xml（404），但 yt-dlp
+    走主站接口正常，故用频道页代替 RSS。channel_id 与 @handle 均可。
+    """
+
+    name = "youtube_channel"
+
+    def __init__(self, channels: list[str], tab: str = "shorts"):
+        # channels: channel_id（UC 开头）或 @handle
+        self.channels = channels
+        self.tab = tab if tab in ("shorts", "videos") else "shorts"
+
+    def discover(self, limit: int = 20) -> list[Candidate]:
+        cands: list[Candidate] = []
+        per_channel = max(1, limit // max(1, len(self.channels))) if self.channels else limit
+        for ch in self.channels:
+            ch = ch.strip()
+            if not ch:
+                continue
+            # UC 开头视为 channel_id，否则当 @handle
+            ident = f"channel/{ch}" if ch.startswith("UC") else ch
+            page_url = f"https://www.youtube.com/{ident}/{self.tab}"
+            opts = {
+                "quiet": True, "no_warnings": True,
+                "extract_flat": "in_playlist", "skip_download": True,
+                "playlistend": per_channel,
+            }
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(page_url, download=False)
+            except Exception as e:
+                log.warning("频道页 %s 获取失败：%s", page_url, str(e)[:100])
+                continue
+            channel_name = info.get("uploader") or info.get("channel") or ch
+            for idx, e in enumerate(info.get("entries", []) or []):
+                if not e:
+                    continue
+                vid = str(e.get("id") or "")
+                if not vid:
+                    continue
+                # /shorts 页面 extract_flat 拿不到 duration，交给 FilterChain 放行
+                cands.append(Candidate(
+                    url=e.get("url") or f"https://www.youtube.com/watch?v={vid}",
+                    platform="youtube",
+                    video_id=vid,
+                    title=e.get("title") or "",
+                    uploader=channel_name,
+                    duration=float(e.get("duration") or 0),
+                    thumbnail=(e.get("thumbnails") or [{}])[-1].get("url", "")
+                    if e.get("thumbnails") else "",
+                    # 频道页按最新在前排序：负数序数=新旧标记（不参与热度阈值）
+                    score=float(-idx),
+                    reason=f"YouTube 频道: {channel_name}",
+                    source_tag=f"yt_channel:{ch}",
+                    trusted_source=True,  # 人工筛选的订阅频道，跳过关键词白名单
+                ))
+        return cands
+
+
+# ============================================================
+# YouTube 频道 RSS 适配器（备用：当前部分网络出口下 Google feeds 404）
 # ============================================================
 
 class RSSAdapter(SourceAdapter):
@@ -198,12 +264,13 @@ def build_adapters(s) -> list[SourceAdapter]:
                 min_duration=disc.filters_min_duration,
                 max_duration=disc.filters_max_duration,
             ))
-        elif t == "youtube_rss" or t == "rss":
-            cids = spec.get("channel_ids") or []
-            adapters.append(RSSAdapter(
-                channel_ids=[c.strip() for c in cids if c.strip()],
-                min_duration=disc.filters_min_duration,
-                max_duration=disc.filters_max_duration,
+        elif t == "youtube_channel" or t == "youtube_rss" or t == "rss":
+            # youtube_channel 走 yt-dlp 频道页（推荐，channels/channel_ids 均可）；
+            # 旧类型名 youtube_rss/rss 自动升级为 channel 适配器（RSS 端点被部分出口 404）
+            channels = spec.get("channels") or spec.get("channel_ids") or []
+            adapters.append(ChannelAdapter(
+                channels=[c.strip() for c in channels if c.strip()],
+                tab=spec.get("tab", "shorts"),
             ))
         elif t == "youtube_playlist":
             adapters.append(YouTubePlaylistAdapter(

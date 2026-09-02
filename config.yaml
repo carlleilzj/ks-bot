@@ -76,24 +76,30 @@ discovery:
 
   filters:
     min_duration: 5       # 短视频最短时长（秒）
-    max_duration: 120     # 动画短视频最长时长（秒）
-    min_score: 1000       # 热度阈值（YouTube view_count；RSS 用发布顺序近似）
-    keyword_whitelist: ["anime", "animation", "动画", "manga", "amv"]
-    keyword_blacklist: ["reaction", "recap", "compilation", "full episode"]
-    # 真人检测反向过滤：封面用 AI 视觉判断，检测到真人镜头直接丢弃（动画号推荐开）
-    # 每次检测消耗一次 vision API 调用；检测异常时放行进人工审核，不误杀
+    max_duration: 320     # AI 动物剧情动画多为 1-5 分钟；>320s 是长合集，排除
+    min_score: 1000       # 热度阈值（YouTube view_count；频道页/RSS 用发布顺序近似）
+    keyword_whitelist: ["ai", "animal", "cat", "dog", "puppy", "kitten", "animated", "animation", "3d", "cgi", "pixar", "story"]
+    keyword_blacklist: ["reaction", "recap", "compilation", "full episode", "how to make", "tutorial", "podcast", "mukbang"]
+    # 封面 AI 质检（推荐开）：一次 vision 调用判三项——真人/水印/是否动画，
+    # 动物动画赛道三项全过才进审核；检测异常放行进人工审核，不误杀
     # 需在 .env 配 VISION_MODEL（gemini-2.5-flash 已实测可用；grok 全系不支持图片输入）
+    # 注：键名沿用 reject_real_person（历史原因），实际含义见上
     reject_real_person: true
 
   sources:
-    # YouTube 关键词搜索（yt-dlp ytsearch，最稳）
+    # YouTube 关键词搜索：对准「AI 生成 3D 动物剧情/搞笑动画」赛道
     - type: youtube_search
-      queries: ["anime short", "anime clip", "anime ed", "amv short"]
-    # YouTube 频道 RSS 订阅（增量推送，不限流）
-    # channel_id 在频道首页查看源代码搜 channel_id=，或用在线工具获取
-    - type: youtube_rss
-      channel_ids:
-        - UCBSs9x2KzSLhyyA9IKyt4YA   # Netflix Anime 官方
-        - UC6pGDc4bFGD1_36IKv3FnYg   # Crunchyroll 官方
-        - UCGbshtvS9t-8CW11W7TooQg   # Muse Asia（木棉花，中文字幕）
-        - UCrWNiNprIWU1nj0Zm6t1IWg   # Ani-One Asia 官方
+      queries:
+        - "ai cats story animation"
+        - "ai animal rescue story animated"
+        - "funny animal ai animation short"
+        - "ai generated animal short film"
+    # YouTube 频道订阅：AI 动物剧情动画高产频道（走 yt-dlp 频道页，tab=shorts 取短视频）
+    - type: youtube_channel
+      tab: shorts
+      channels:
+        - UC3HP8a40b5n_WXot8qAHe5w   # mini meownmeow（AI 猫咪变装/剧情，11万粉）
+        - UC-T_MoYrpZt-qwn2vFK81uQ   # Meow Patrol Force（AI 猫咪剧情，2.3万粉）
+        - UCV17hLOXd76ovdaYClpUd_A   # Ginger's Daily Meow（AI 猫妈妈故事）
+        - UC20ckSa1wPc8alZYqkt9muA   # Mama Cat Story（AI 猫咪旅行/剧情）
+        - UCNrt_21RJZw1EPxRpNBvt8w   # Cozy Catmeow（AI 猫狗暖心故事）

@@ -19,7 +19,7 @@ from bot.config import DiscoveryConfig, Settings
 from bot.db import Database, State
 from bot.source.discovery import (
     Candidate,
-    RSSAdapter,
+    ChannelAdapter,
     YouTubeSearchAdapter,
     build_adapters,
 )
@@ -141,12 +141,29 @@ def test_build_adapters_youtube_search():
 
 
 def test_build_adapters_rss():
+    """youtube_rss 旧类型名自动升级为 ChannelAdapter（RSS 端点被部分出口 404）。"""
     disc = DiscoveryConfig(enabled=True,
                             sources=[{"type": "youtube_rss", "channel_ids": ["UCxxx"]}])
     s = _FakeSettings(disc)
     adapters = build_adapters(s)
     assert len(adapters) == 1
-    assert isinstance(adapters[0], RSSAdapter)
+    assert isinstance(adapters[0], ChannelAdapter)
+    assert adapters[0].channels == ["UCxxx"]
+    assert adapters[0].tab == "shorts"
+
+
+def test_build_adapters_channel():
+    """youtube_channel 新类型：channels + tab 参数。"""
+    disc = DiscoveryConfig(enabled=True,
+                            sources=[{"type": "youtube_channel",
+                                      "channels": ["UCabc", "@somechannel"],
+                                      "tab": "videos"}])
+    s = _FakeSettings(disc)
+    adapters = build_adapters(s)
+    assert len(adapters) == 1
+    assert isinstance(adapters[0], ChannelAdapter)
+    assert adapters[0].channels == ["UCabc", "@somechannel"]
+    assert adapters[0].tab == "videos"
 
 
 def test_build_adapters_mixed():
@@ -297,9 +314,11 @@ def _cand(vid="v1", title="anime short", score=5000) -> Candidate:
 
 @pytest.fixture()
 def patches(monkeypatch):
-    """mock extract_meta / telegram / check_real_person，按需调整返回值。"""
+    """mock extract_meta / telegram / inspect_cover，按需调整返回值。"""
     import bot.source.scheduler as sched_mod
-    state = {"verdict": False}
+    from bot.ai.vision import CoverVerdict
+    state = {"real_person": False, "watermark": False, "is_animation": True,
+             "raise_error": False}
 
     monkeypatch.setattr(sched_mod, "extract_meta",
                         lambda url: _FakeMeta(shortcode=f"yt_{abs(hash(url)) % 100000}",
@@ -307,16 +326,24 @@ def patches(monkeypatch):
     monkeypatch.setattr(sched_mod.telegram, "send_review_card", lambda s, task: None)
     monkeypatch.setattr(sched_mod.telegram, "notify_info", lambda s, text: None)
 
-    def fake_check(video, cover, settings):
-        return state["verdict"]
+    def fake_inspect(cover, settings):
+        if state.get("raise_error"):
+            raise RuntimeError("AI 接口超时")
+        return CoverVerdict(
+            is_animation=state["is_animation"],
+            has_real_person=state["real_person"],
+            has_watermark=state["watermark"],
+            watermark_desc="右下角 TikTok logo" if state["watermark"] else "",
+            reason="mock",
+        )
 
-    monkeypatch.setattr("bot.ai.vision.check_real_person", fake_check)
+    monkeypatch.setattr("bot.ai.vision.inspect_cover", fake_inspect)
     return state
 
 
 def test_real_person_rejected(db, patches):
     """封面检测到真人 → 直接 SKIPPED，不发审核卡片。"""
-    patches["verdict"] = True  # 检测到真人
+    patches["real_person"] = True  # 检测到真人
     sched = _sched(db, [_cand("v1")])
     sched._cycle()
     assert db.pending_review_count() == 0
@@ -325,9 +352,30 @@ def test_real_person_rejected(db, patches):
     assert "真人" in (tasks[0]["error"] or "")
 
 
+def test_watermark_rejected(db, patches):
+    """封面检测到水印 → SKIPPED（动物动画赛道要求无水印）。"""
+    patches["watermark"] = True
+    sched = _sched(db, [_cand("v1")])
+    sched._cycle()
+    assert db.pending_review_count() == 0
+    tasks = db.recent(1)
+    assert tasks[0]["state"] == State.SKIPPED
+    assert "水印" in (tasks[0]["error"] or "")
+
+
+def test_not_animation_rejected(db, patches):
+    """封面明确非动画（真人实拍等）→ SKIPPED。"""
+    patches["is_animation"] = False
+    sched = _sched(db, [_cand("v1")])
+    sched._cycle()
+    assert db.pending_review_count() == 0
+    tasks = db.recent(1)
+    assert tasks[0]["state"] == State.SKIPPED
+    assert "动画" in (tasks[0]["error"] or "")
+
+
 def test_anime_passed_to_review(db, patches):
-    """封面非真人 → 正常进入 PENDING_REVIEW。"""
-    patches["verdict"] = False
+    """封面干净（动画+非真人+无水印）→ 正常进入 PENDING_REVIEW。"""
     sched = _sched(db, [_cand("v1")])
     sched._cycle()
     assert db.pending_review_count() == 1
@@ -335,24 +383,17 @@ def test_anime_passed_to_review(db, patches):
 
 def test_check_error_passes_through(db, patches):
     """检测抛异常 → 不误杀，放行进入审核。"""
+    patches["raise_error"] = True
     sched = _sched(db, [_cand("v1")])
-    # 把 patches fixture 注册的 mock 换成抛异常版本
-    from _pytest.monkeypatch import MonkeyPatch
-    mp = MonkeyPatch()
-    mp.setattr("bot.ai.vision.check_real_person",
-               lambda v, c, s: (_ for _ in ()).throw(RuntimeError("AI 接口超时")))
-    try:
-        sched._cycle()
-    finally:
-        mp.undo()
+    sched._cycle()
     assert db.pending_review_count() == 1
 
 
 def test_disabled_flag_skips_check(db, patches, monkeypatch):
     """reject_real_person=False → 完全不调检测，直接进审核。"""
     called = {"n": 0}
-    monkeypatch.setattr("bot.ai.vision.check_real_person",
-                        lambda v, c, s: called.__setitem__("n", called["n"] + 1) or False)
+    monkeypatch.setattr("bot.ai.vision.inspect_cover",
+                        lambda c, s: called.__setitem__("n", called["n"] + 1))
     sched = _sched(db, [_cand("v1")], reject_real_person=False)
     sched._cycle()
     assert called["n"] == 0
