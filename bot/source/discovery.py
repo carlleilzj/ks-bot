@@ -30,9 +30,10 @@ class Candidate:
     uploader: str
     duration: float     # 秒，0 表示未知
     thumbnail: str      # 缩略图 URL
-    score: float        # 热度评分（播放量/点赞数归一化），越大越热
+    score: float        # 热度评分（播放量/点赞数归一化），越大越热；<=0 表示无热度数据
     reason: str         # 人工可读的来源说明，如 "YouTube 搜索: anime short"
     source_tag: str     # 机器可读的来源标签，如 "yt_search:anime short"，用于追溯
+    trusted_source: bool = False  # 官方/订阅频道来源：跳过关键词白名单（标题常不含 anime 字样）
 
 
 class SourceAdapter:
@@ -139,9 +140,10 @@ class RSSAdapter(SourceAdapter):
                     uploader=ent["author"],
                     duration=0.0,  # RSS 不带 duration，交给 FilterChain 用默认区间放行
                     thumbnail=ent.get("thumbnail", ""),
-                    score=float(-idx),  # 越新 score 越高（0 是最新）
+                    score=float(-idx),  # 越新 score 越高（0 是最新）；负数序数不参与热度阈值
                     reason=f"YouTube RSS: {cid}",
                     source_tag=f"yt_rss:{cid}",
+                    trusted_source=True,  # 订阅的是人工筛选的官方频道，跳过关键词白名单
                 ))
         return cands
 

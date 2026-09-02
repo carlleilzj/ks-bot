@@ -45,11 +45,12 @@ def _check_via_vision_api(image: Path, s: Settings) -> bool:
     img_b64 = base64.b64encode(image.read_bytes()).decode("utf-8")
     mime = "image/jpeg"
 
-    # 尝试用 vision 模型（需要模型名带 vision 能力）
-    # Grok 支持图片输入的模型名通常是 grok-vision 或 grok-4-vision 等
-    vision_model = s.ai_model  # 先用当前模型试
-    # 如果当前模型不支持 vision，尝试已知的 vision 模型
-    vision_candidates = [s.ai_model, "grok-4.20-reasoning", "grok-vision", "grok-4-vision"]
+    # 尝试用 vision 模型（需要模型名带 vision 能力）。
+    # 注意：grok 全系（含 grok-4.5/4.6）不接受 image_url 输入，会 400/404；
+    # 若 AI_BASE_URL 中转站只有 grok，真人检测会走"默认放行"分支。
+    # 支持图输入的常见模型：gpt-4o / gemini-2.x-flash / glm-4v / claude-3.5+
+    vision_candidates = [s.ai_model, "gpt-4o-mini", "gpt-4o",
+                          "gemini-2.0-flash", "glm-4v-flash"]
 
     last_err = ""
     for model in vision_candidates:

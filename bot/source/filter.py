@@ -51,8 +51,8 @@ class FilterChain:
         # 时长：duration=0（RSS 不带时长）放行，只对有值的过滤
         if c.duration > 0 and not (r.min_duration <= c.duration <= r.max_duration):
             return False, f"时长 {int(c.duration)}s 不在区间 [{int(r.min_duration)},{int(r.max_duration)}]"
-        # 热度
-        if c.score < r.min_score:
+        # 热度：score<=0（RSS 用负数序数表示新旧，非热度值）跳过阈值检查
+        if c.score > 0 and c.score < r.min_score:
             return False, f"热度 {c.score} < {r.min_score}"
         # 关键词命中检测（标题 + 来源说明 + 上传者）
         text = f"{c.title} {c.reason} {c.uploader}".lower()
@@ -60,7 +60,8 @@ class FilterChain:
             for k in r.keyword_blacklist:
                 if k and k in text:
                     return False, f"命中黑名单关键词: {k}"
-        if r.keyword_whitelist:
+        # 白名单：可信来源（人工筛选的官方频道 RSS）跳过——标题常不含 anime 字样
+        if r.keyword_whitelist and not c.trusted_source:
             if not any(k and k in text for k in r.keyword_whitelist):
                 return False, "未命中白名单关键词"
         return True, "通过"

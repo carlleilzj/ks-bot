@@ -69,7 +69,7 @@ platform_categories:
 # 发现层：主动采集热门动画短视频，发 TG 审核后再进流水线
 # ============================================================
 discovery:
-  enabled: false          # 默认关闭；改为 true 才启动发现层
+  enabled: true           # 默认关闭；改为 true 才启动发现层
   interval_min: 60        # 每轮发现的间隔（分钟）
   limit_per_source: 20   # 每个适配器每轮最多取多少条候选
   max_pending_review: 10  # 待审核堆积上限，超过暂停发现（避免 TG 刷屏）
@@ -91,5 +91,8 @@ discovery:
     # YouTube 频道 RSS 订阅（增量推送，不限流）
     # channel_id 在频道首页查看源代码搜 channel_id=，或用在线工具获取
     - type: youtube_rss
-      channel_ids: []
-      # 示例：["UCxxx", "UCyyy"]  # 填你要订阅的动画频道 ID
+      channel_ids:
+        - UCBSs9x2KzSLhyyA9IKyt4YA   # Netflix Anime 官方
+        - UC6pGDc4bFGD1_36IKv3FnYg   # Crunchyroll 官方
+        - UCGbshtvS9t-8CW11W7TooQg   # Muse Asia（木棉花，中文字幕）
+        - UCrWNiNprIWU1nj0Zm6t1IWg   # Ani-One Asia 官方

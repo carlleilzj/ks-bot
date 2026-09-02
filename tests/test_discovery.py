@@ -79,6 +79,37 @@ def test_filter_reject_low_score():
     assert "热度" in reason
 
 
+def test_filter_rss_negative_score_skips_threshold():
+    """RSS 候选 score 用负数序数（0,-1,-2…越新越大），不参与热度阈值判定。"""
+    chain = FilterChain(FilterRules.from_dict({"min_score": 1000}))
+    for idx_score in (0, -1, -4, -9):
+        ok, reason = chain.keep(_make_cand(score=idx_score, title="anime pv"))
+        assert ok, f"score={idx_score} 应放行: {reason}"
+
+
+def test_filter_trusted_source_skips_whitelist():
+    """官方频道来源（trusted_source）跳过白名单；黑名单仍然生效。"""
+    rules = FilterRules.from_dict({"keyword_whitelist": ["anime"]})
+    chain = FilterChain(rules)
+    # 标题无 anime 字样的官方频道 PV → 放行
+    ok, _ = chain.keep(_make_cand(title="《KAGURABACHI》 - Character PV",
+                                  reason="YouTube RSS: UCxxx", trusted_source=True))
+    assert ok
+    # 同样标题但来源不可信 → 拦
+    ok2, reason2 = chain.keep(_make_cand(title="《KAGURABACHI》 - Character PV",
+                                         reason="YouTube RSS: UCxxx"))
+    assert not ok2
+    assert "白名单" in reason2
+    # 可信来源但命中黑名单 → 仍然拦
+    rules_bl = FilterRules.from_dict({"keyword_blacklist": ["recap"]})
+    chain_bl = FilterChain(rules_bl)
+    ok3, reason3 = chain_bl.keep(_make_cand(title="Anime Recap 全集解说",
+                                            reason="YouTube RSS: UCxxx",
+                                            trusted_source=True))
+    assert not ok3
+    assert "黑名单" in reason3
+
+
 def test_filter_pass_rss_unknown_duration():
     """RSS 候选 duration=0，应放行（不卡时长）。"""
     chain = FilterChain(FilterRules.from_dict({"min_duration": 5, "max_duration": 120}))
