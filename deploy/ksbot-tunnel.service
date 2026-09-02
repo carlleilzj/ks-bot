@@ -1,0 +1,14 @@
+[Unit]
+Description=ks-bot SSH tunnel to VPS Remote API (数据面走公网 SSH，Tailscale 作管理面)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=PLACEHOLDER_USER
+ExecStart=/usr/bin/ssh -p PLACEHOLDER_SSH_PORT -i /home/PLACEHOLDER_USER/.ssh/id_ed25519 -N -L 127.0.0.1:8765:100.126.64.50:8765 -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes root@109.66.88.124
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

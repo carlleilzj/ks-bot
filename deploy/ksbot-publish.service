@@ -1,0 +1,16 @@
+[Unit]
+Description=ks-bot publish worker (home publisher)
+After=network-online.target ksbot-tunnel.service
+Wants=network-online.target ksbot-tunnel.service
+
+[Service]
+Type=simple
+User=PLACEHOLDER_USER
+WorkingDirectory=/home/PLACEHOLDER_USER/apps/ks-bot
+ExecStart=/home/PLACEHOLDER_USER/apps/ks-bot/.venv/bin/python -m bot.publish_worker --interval 120
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=ks-bot VPS 处理端（采集/转码/ASR/文案/字幕 + Remote API）
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ks-bot
+ExecStart=/opt/ks-bot/.venv/bin/python -m bot.main --stage=process
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
