@@ -1,0 +1,93 @@
+# ============================================================
+# 非敏感配置。敏感信息（token/key）请写在 .env 里。
+# ============================================================
+
+# 轮询 Instagram 新作品的间隔（分钟）。官方 API 无风控压力，可适当调小
+poll_interval_min: 15
+
+# 本地 faster-whisper 附加选项（ASR_PROVIDER=local 时生效）
+asr:
+  local_device: auto      # auto / cpu
+  local_compute: int8     # int8 / int8_float16 / float16
+
+# 字幕烧录样式（ratio 均为相对视频尺寸的比例，自动适配竖屏/横屏）
+subtitle:
+  enabled: true
+  # 字体在本机不存在时会自动回退（PingFang SC → Hiragino Sans GB → Heiti SC）
+  font: PingFang SC
+  font_size_ratio: 0.045  # 字号 = 视频宽 * 0.045
+  outline_ratio: 0.006    # 描边宽度
+  margin_v_ratio: 0.07    # 距底部距离 = 视频高 * 0.07
+  bold: true
+
+# 发布节奏（窗口全局；每日上限和最小间隔按平台独立计算，互不影响）
+publish:
+  headless: true            # 后台无头浏览器；首次调试发布流程建议改 false 观察操作
+  daily_limit: 5            # 每个平台每天最多发布条数
+  min_gap_hours: 2          # 同一平台两次发布之间的最小间隔（小时）
+  window: ["10:00", "22:00"] # 允许发布的时间窗口，窗口外排队等待（支持跨夜，如 ["20:00","06:00"]）
+
+# 发布平台开关。新平台先 python -m bot.main --login <平台> 扫码登录，再把 enabled 改 true
+platforms:
+  kuaishou:
+    enabled: true
+    spark_task: true            # 发布时挂星火「关联变现任务」（需先在 App 收藏任务）
+    # spark_task_title: 本命英雄  # 可选，标题包含则优先；空则轮询收藏列表
+  douyin:
+    enabled: true
+  xhs:
+    enabled: false   # 账号风控被限制发布，暂停；解封后改回 true
+  weixin:
+    enabled: false   # 默认关闭，只有投链时 @视频号 才发
+
+# 各平台可选分区列表（发布页有分区选择的平台才需要；抖音/小红书无分区，用话题标签）
+# LLM 会从中选择一个；列表与实际不符时自动降级为不选分类
+platform_categories:
+  kuaishou:
+    - 搞笑
+    - 美食
+    - 生活记录
+    - 萌宠
+    - 影视娱乐
+    - 音乐
+    - 舞蹈
+    - 游戏
+    - 科技数码
+    - 知识
+    - 汽车
+    - 运动
+    - 时尚穿搭
+    - 亲子
+    - 情感
+    - 教育
+    - 旅游
+    - 健康
+    - 二次元
+    - 三农
+
+# ============================================================
+# 发现层：主动采集热门动画短视频，发 TG 审核后再进流水线
+# ============================================================
+discovery:
+  enabled: false          # 默认关闭；改为 true 才启动发现层
+  interval_min: 60        # 每轮发现的间隔（分钟）
+  limit_per_source: 20   # 每个适配器每轮最多取多少条候选
+  max_pending_review: 10  # 待审核堆积上限，超过暂停发现（避免 TG 刷屏）
+
+  filters:
+    min_duration: 5       # 短视频最短时长（秒）
+    max_duration: 120     # 动画短视频最长时长（秒）
+    min_score: 1000       # 热度阈值（YouTube view_count；RSS 用发布顺序近似）
+    keyword_whitelist: ["anime", "animation", "动画", "manga", "amv"]
+    keyword_blacklist: ["reaction", "recap", "compilation", "full episode"]
+    # reject_real_person: true   # 可选：对候选封面做真人检测，检测到真人就丢弃
+
+  sources:
+    # YouTube 关键词搜索（yt-dlp ytsearch，最稳）
+    - type: youtube_search
+      queries: ["anime short", "anime clip", "anime ed", "amv short"]
+    # YouTube 频道 RSS 订阅（增量推送，不限流）
+    # channel_id 在频道首页查看源代码搜 channel_id=，或用在线工具获取
+    - type: youtube_rss
+      channel_ids: []
+      # 示例：["UCxxx", "UCyyy"]  # 填你要订阅的动画频道 ID
