@@ -33,4 +33,11 @@ jobs:
         env:
           # 测试里用本地时区判断发布窗口，统一时区避免 CI 时区差异导致 flaky
           TZ: Asia/Shanghai
-        run: pytest tests/ -v
+        run: pytest tests/ -v --tb=short 2>&1 | tee pytest-output.txt
+
+      - name: Upload pytest output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: pytest-output.txt
