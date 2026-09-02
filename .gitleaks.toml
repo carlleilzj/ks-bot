@@ -1,0 +1,13 @@
+# gitleaks 自定义配置：在默认规则基础上，允许项目的占位符/示例值
+# 详见 https://github.com/gitleaks/gitleaks#configuration
+
+[allowlist]
+description = "项目占位符与示例文件白名单"
+paths = [
+  # 示例配置：只有空占位符，不是真实 token
+  '\.env\.example$',
+  # admin.html 是快手创作者中心页面快照，含 CDN 签名 URL（pkey=、tag=），不是密钥
+  'admin\.html$',
+  # README 里的 token 只是变量名说明
+  'README\.md$',
+]
