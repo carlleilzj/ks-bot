@@ -23,9 +23,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install ruff pytest
+          # 装 playwright 浏览器系统依赖 + 二进制（test_core import publish.* 会触发 playwright 包）
+          playwright install --with-deps chromium
 
       - name: Lint (ruff)
         run: ruff check bot/ tests/
 
       - name: Test (pytest)
+        env:
+          # 测试里用本地时区判断发布窗口，统一时区避免 CI 时区差异导致 flaky
+          TZ: Asia/Shanghai
         run: pytest tests/ -v
