@@ -15,11 +15,12 @@ class RealPersonError(RuntimeError):
     pass
 
 
-def check_real_person(video: Path, cover: Path, s: Settings) -> bool:
+def check_real_person(video: Path | None, cover: Path, s: Settings) -> bool:
     """检测视频是否含真人镜头。返回 True 表示含真人（应跳过），False 表示可发布。
 
     策略：用 cover 帧图 + 视频中间帧，发给 AI 视觉模型判断。
     AI 视觉走 AI_BASE_URL 配置的 OpenAI 兼容接口（需要模型支持 vision）。
+    video 参数当前未使用（只看封面帧）；发现层对未下载的候选传 None。
     """
     if not cover.exists():
         return False

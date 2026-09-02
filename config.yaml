@@ -80,7 +80,9 @@ discovery:
     min_score: 1000       # 热度阈值（YouTube view_count；RSS 用发布顺序近似）
     keyword_whitelist: ["anime", "animation", "动画", "manga", "amv"]
     keyword_blacklist: ["reaction", "recap", "compilation", "full episode"]
-    # reject_real_person: true   # 可选：对候选封面做真人检测，检测到真人就丢弃
+    # 真人检测反向过滤：封面用 AI 视觉判断，检测到真人镜头直接丢弃（动画号推荐开）
+    # 每次检测消耗一次 vision API 调用；检测异常时放行进人工审核，不误杀
+    reject_real_person: false
 
   sources:
     # YouTube 关键词搜索（yt-dlp ytsearch，最稳）

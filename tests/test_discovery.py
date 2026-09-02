@@ -15,7 +15,7 @@ import pytest
 # 让 pytest 能 import bot 包（无 __init__.py 在 tests/ 时）
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bot.config import DiscoveryConfig
+from bot.config import DiscoveryConfig, Settings
 from bot.db import Database, State
 from bot.source.discovery import (
     Candidate,
@@ -24,6 +24,7 @@ from bot.source.discovery import (
     build_adapters,
 )
 from bot.source.filter import FilterChain, FilterRules
+from bot.source.scheduler import DiscoveryScheduler
 
 # ============================================================
 # FilterChain 单测
@@ -140,7 +141,8 @@ def test_build_adapters_unknown_type_skipped():
 
 class _FakeMeta:
     """最小 VideoMeta 替身，满足 insert_video 所需字段。"""
-    def __init__(self, shortcode="yt_abc", platform="youtube", url="https://youtube.com/watch?v=abc"):
+    def __init__(self, shortcode="yt_abc", platform="youtube",
+                 url="https://youtube.com/watch?v=abc", thumbnail=""):
         self.source_url = url
         self.platform = platform
         self.video_id = shortcode.split("_")[-1]
@@ -148,7 +150,7 @@ class _FakeMeta:
         self.username = "studio"
         self.title = "anime clip"
         self.caption = ""
-        self.thumbnail_url = ""
+        self.thumbnail_url = thumbnail
         self.duration = 0
         self.permalink = url
 
@@ -220,3 +222,107 @@ def test_find_by_source_url(db):
     found = db.find_by_source_url(meta.source_url)
     assert found is not None
     assert found["state"] == State.CANDIDATE
+
+
+# ============================================================
+# 真人检测反向过滤（scheduler 集成，全 mock 不联网）
+# ============================================================
+
+class _FakeAdapter:
+    """产出固定候选的假适配器。"""
+    name = "fake"
+
+    def __init__(self, cands):
+        self._cands = cands
+
+    def discover(self, limit=20):
+        return list(self._cands)
+
+
+def _sched(db, cands, reject_real_person=True) -> DiscoveryScheduler:
+    """构造一个可跑 _cycle 的 scheduler：假适配器 + mock 掉网络/AI。"""
+    s = Settings()
+    s.ai_api_key = "test-key"  # 让 vision 的调用路径可达（会被 mock）
+    disc = DiscoveryConfig(enabled=True,
+                           sources=[{"type": "youtube_search", "queries": ["q"]}],
+                           filters={"reject_real_person": reject_real_person,
+                                    "min_score": 0, "keyword_whitelist": None,
+                                    "keyword_blacklist": None})
+    s.discovery = disc
+    sched = DiscoveryScheduler(s, db)
+    sched.adapters = [_FakeAdapter(cands)]
+    sched.enabled = True
+    # mock 网络/AI：封面直接生成 1x1 jpeg、元数据用假 meta、TG 发送为空操作
+    sched._download_cover = lambda url, dest: dest.write_bytes(b"\xff\xd8fake")
+    return sched
+
+
+def _cand(vid="v1", title="anime short", score=5000) -> Candidate:
+    return Candidate(url=f"https://youtube.com/watch?v={vid}", platform="youtube",
+                     video_id=vid, title=title, uploader="studio", duration=30,
+                     thumbnail="http://x/y.jpg", score=score,
+                     reason="yt_search:anime", source_tag="yt_search:anime")
+
+
+@pytest.fixture()
+def patches(monkeypatch):
+    """mock extract_meta / telegram / check_real_person，按需调整返回值。"""
+    import bot.source.scheduler as sched_mod
+    state = {"verdict": False}
+
+    monkeypatch.setattr(sched_mod, "extract_meta",
+                        lambda url: _FakeMeta(shortcode=f"yt_{abs(hash(url)) % 100000}",
+                                              url=url, thumbnail="http://x/y.jpg"))
+    monkeypatch.setattr(sched_mod.telegram, "send_review_card", lambda s, task: None)
+    monkeypatch.setattr(sched_mod.telegram, "notify_info", lambda s, text: None)
+
+    def fake_check(video, cover, settings):
+        return state["verdict"]
+
+    monkeypatch.setattr("bot.ai.vision.check_real_person", fake_check)
+    return state
+
+
+def test_real_person_rejected(db, patches):
+    """封面检测到真人 → 直接 SKIPPED，不发审核卡片。"""
+    patches["verdict"] = True  # 检测到真人
+    sched = _sched(db, [_cand("v1")])
+    sched._cycle()
+    assert db.pending_review_count() == 0
+    tasks = db.recent(1)
+    assert tasks[0]["state"] == State.SKIPPED
+    assert "真人" in (tasks[0]["error"] or "")
+
+
+def test_anime_passed_to_review(db, patches):
+    """封面非真人 → 正常进入 PENDING_REVIEW。"""
+    patches["verdict"] = False
+    sched = _sched(db, [_cand("v1")])
+    sched._cycle()
+    assert db.pending_review_count() == 1
+
+
+def test_check_error_passes_through(db, patches):
+    """检测抛异常 → 不误杀，放行进入审核。"""
+    sched = _sched(db, [_cand("v1")])
+    # 把 patches fixture 注册的 mock 换成抛异常版本
+    from _pytest.monkeypatch import MonkeyPatch
+    mp = MonkeyPatch()
+    mp.setattr("bot.ai.vision.check_real_person",
+               lambda v, c, s: (_ for _ in ()).throw(RuntimeError("AI 接口超时")))
+    try:
+        sched._cycle()
+    finally:
+        mp.undo()
+    assert db.pending_review_count() == 1
+
+
+def test_disabled_flag_skips_check(db, patches, monkeypatch):
+    """reject_real_person=False → 完全不调检测，直接进审核。"""
+    called = {"n": 0}
+    monkeypatch.setattr("bot.ai.vision.check_real_person",
+                        lambda v, c, s: called.__setitem__("n", called["n"] + 1) or False)
+    sched = _sched(db, [_cand("v1")], reject_real_person=False)
+    sched._cycle()
+    assert called["n"] == 0
+    assert db.pending_review_count() == 1

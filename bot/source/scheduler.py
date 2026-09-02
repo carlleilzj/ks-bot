@@ -38,6 +38,7 @@ class DiscoveryScheduler(threading.Thread):
         self.enabled = bool(disc and disc.enabled and self.adapters)
         rules = FilterRules.from_dict(getattr(disc, "filters", None) if disc else None)
         self.chain = FilterChain(rules)
+        self.reject_real_person = rules.reject_real_person
         self.interval_sec = (disc.interval_min if disc else 60) * 60
         self.limit_per_source = disc.limit_per_source if disc else 20
         self.max_pending_review = disc.max_pending_review if disc else 10
@@ -127,6 +128,19 @@ class DiscoveryScheduler(threading.Thread):
                             cover_path=str(cover) if cover.exists() else None,
                             title=meta.title or c.title,
                             source_url=meta.source_url)
+
+            # 真人检测反向过滤（可选）：动画号应该全非真人，封面检测到真人就丢弃。
+            # 必须在封面下载之后做（check_real_person 需要图片文件）。
+            if self.reject_real_person and cover.exists():
+                try:
+                    from ..ai.vision import check_real_person
+                    if check_real_person(None, cover, self.s):
+                        self.db.reject(tid, "真人镜头（AI 封面检测）")
+                        log.info("[discovery] 丢弃 %s：封面检测到真人", meta.shortcode)
+                        continue
+                except Exception as e:
+                    # 检测失败不误杀：放行进入审核，由人工把关
+                    log.warning("[discovery] 真人检测异常（放行）：%s", e)
 
             # 转为 PENDING_REVIEW 并发审核卡片
             self.db.update(tid, state=State.PENDING_REVIEW)

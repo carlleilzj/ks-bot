@@ -194,6 +194,7 @@ discovery:
     min_score: 1000       # YouTube 播放量阈值
     keyword_whitelist: ["anime", "animation", "动画", "manga", "amv"]
     keyword_blacklist: ["reaction", "recap", "compilation"]
+    reject_real_person: false  # 真人检测反向过滤：封面检测到真人直接丢弃（动画号推荐开）
 
   sources:
     - type: youtube_search      # yt-dlp ytsearch
@@ -225,3 +226,6 @@ discovery:
 - `ytsearch` 高频会被 YouTube 限流，`interval_min` 建议 ≥ 30 分钟
 - RSS 适配器拿不到 duration，靠 FilterChain 的时长过滤会放行（只卡其他规则）
 - 新增的 `CANDIDATE`/`PENDING_REVIEW` 状态已纳入 `--abandon-unpublished` 和媒体清理范围
+- **真人检测反向过滤**（`filters.reject_real_person: true`）：封面下载后用 AI 视觉判断，
+  检测到真人镜头直接 SKIPPED（动画号应该全非真人）；检测接口异常时**放行**进审核不误杀，
+  由人工把关。每次检测消耗一次 vision API 调用
