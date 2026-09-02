@@ -290,11 +290,13 @@ class RemoteApi:
                 self._send_json(404, {"error": "not found"})
 
         host = bind_host.strip()
-        # 绑定安全校验：不允许绑 0.0.0.0/公网 IP（防误配置暴露公网）
+        # 绑定安全校验：只允许 Tailscale CGNAT（100.64.0.0/10）、其他私有网段和回环
+        # 注意：100.64/10 是运营商级 NAT 保留段（Tailscale 用），Python 的 is_private=False
         ip = ipaddress.ip_address(host)
-        if not (ip.is_private or ip.is_loopback):
+        ts_net = ipaddress.ip_network("100.64.0.0/10")
+        if not (ip in ts_net or ip.is_private or ip.is_loopback):
             raise RemoteApiError(
-                f"拒绝绑定非私有地址 {host}：API 只能绑 Tailscale IP（100.x）或 127.0.0.1")
+                f"拒绝绑定非私有地址 {host}：API 只能绑 Tailscale IP（100.x/CGNAT）或 127.0.0.1")
 
         server = ThreadingHTTPServer((host, port), Handler)
         self.server = server  # 暴露给测试/管理代码（读 server.server_address[1] 取实际端口）
