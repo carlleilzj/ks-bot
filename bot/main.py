@@ -384,6 +384,8 @@ def advance_task(s: Settings, db: Database, task_id: int,
                 if stage == "process":
                     # 分体部署 VPS 端：推进到 READY 即止，发布由家庭端 worker 认领
                     if st == State.SUBTITLED:
+                        # 预创建平台 job：远程端 /api/pending 按 job 派发，没有 job 任务就不可见
+                        db.create_publish_jobs(task_id, [p.name for p in _task_platforms(s, task)])
                         db.update(task_id, state=State.READY)
                         log.info("[stage=process] %s 处理完成，等待远程发布端领取：%s",
                                  task["shortcode"], task["final_path"])
