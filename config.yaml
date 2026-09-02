@@ -82,7 +82,8 @@ discovery:
     keyword_blacklist: ["reaction", "recap", "compilation", "full episode"]
     # 真人检测反向过滤：封面用 AI 视觉判断，检测到真人镜头直接丢弃（动画号推荐开）
     # 每次检测消耗一次 vision API 调用；检测异常时放行进人工审核，不误杀
-    reject_real_person: false
+    # 需在 .env 配 VISION_MODEL（gemini-2.5-flash 已实测可用；grok 全系不支持图片输入）
+    reject_real_person: true
 
   sources:
     # YouTube 关键词搜索（yt-dlp ytsearch，最稳）

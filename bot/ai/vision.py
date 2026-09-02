@@ -34,23 +34,32 @@ def check_real_person(video: Path | None, cover: Path, s: Settings) -> bool:
 
 
 def _check_via_vision_api(image: Path, s: Settings) -> bool:
-    """用 OpenAI 兼容的 vision API 判断图片是否含真人。"""
+    """用 OpenAI 兼容的 vision API 判断图片是否含真人。
+
+    模型/key 优先级：VISION_MODEL+VISION_API_KEY（.env 专用配置）> s.ai_model。
+    注意：grok 全系不接受图片输入，中转站只有 grok 时需配 VISION_MODEL 指向
+    支持 vision 的模型（如 gemini-2.5-flash）。
+    """
     import httpx
     from openai import OpenAI
 
-    client = OpenAI(base_url=s.ai_base_url, api_key=s.ai_api_key,
+    client = OpenAI(base_url=s.ai_base_url,
+                    api_key=s.vision_api_key or s.ai_api_key,
                     timeout=httpx.Timeout(60, connect=15))
 
     # 把图片转 base64
     img_b64 = base64.b64encode(image.read_bytes()).decode("utf-8")
     mime = "image/jpeg"
 
-    # 尝试用 vision 模型（需要模型名带 vision 能力）。
-    # 注意：grok 全系（含 grok-4.5/4.6）不接受 image_url 输入，会 400/404；
-    # 若 AI_BASE_URL 中转站只有 grok，真人检测会走"默认放行"分支。
-    # 支持图输入的常见模型：gpt-4o / gemini-2.x-flash / glm-4v / claude-3.5+
-    vision_candidates = [s.ai_model, "gpt-4o-mini", "gpt-4o",
-                          "gemini-2.0-flash", "glm-4v-flash"]
+    # 候选模型：VISION_MODEL 优先，其后主模型 + 常见 vision 模型名兜底
+    vision_candidates = []
+    if s.vision_model:
+        vision_candidates.append(s.vision_model)
+    if s.ai_model and s.ai_model not in vision_candidates:
+        vision_candidates.append(s.ai_model)
+    for fallback in ("gpt-4o-mini", "gemini-2.5-flash", "glm-4v-flash"):
+        if fallback not in vision_candidates:
+            vision_candidates.append(fallback)
 
     last_err = ""
     for model in vision_candidates:

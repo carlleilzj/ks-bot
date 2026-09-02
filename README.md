@@ -194,7 +194,7 @@ discovery:
     min_score: 1000       # YouTube 播放量阈值
     keyword_whitelist: ["anime", "animation", "动画", "manga", "amv"]
     keyword_blacklist: ["reaction", "recap", "compilation"]
-    reject_real_person: false  # 真人检测反向过滤：封面检测到真人直接丢弃（动画号推荐开）
+    reject_real_person: true  # 真人检测反向过滤：封面检测到真人直接丢弃（动画号推荐开）
 
   sources:
     - type: youtube_search      # yt-dlp ytsearch
@@ -228,4 +228,7 @@ discovery:
 - 新增的 `CANDIDATE`/`PENDING_REVIEW` 状态已纳入 `--abandon-unpublished` 和媒体清理范围
 - **真人检测反向过滤**（`filters.reject_real_person: true`）：封面下载后用 AI 视觉判断，
   检测到真人镜头直接 SKIPPED（动画号应该全非真人）；检测接口异常时**放行**进审核不误杀，
-  由人工把关。每次检测消耗一次 vision API 调用
+  由人工把关。每次检测消耗一次 vision API 调用。
+  **模型要求**：需支持图片输入。grok 全系不支持，在 `.env` 配
+  `VISION_MODEL=gemini-2.5-flash` + `VISION_API_KEY=<key>`（与主 key 可不同），
+  留空则回退 `AI_MODEL`。已实测：动画封面判非真人、真人照片判真人，双向正确

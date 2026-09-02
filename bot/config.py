@@ -85,6 +85,9 @@ class Settings:
     ai_base_url: str = "https://api.openai.com/v1"
     ai_api_key: str = ""
     ai_model: str = "gpt-4o-mini"
+    # 真人检测（vision）：留空回退 ai_api_key/ai_model
+    vision_api_key: str = ""
+    vision_model: str = ""
     # 语音识别
     asr_provider: str = "api"
     asr_model: str = "whisper-1"
@@ -171,6 +174,8 @@ def load_settings() -> Settings:
         ai_base_url=os.getenv("AI_BASE_URL", "").strip() or "https://api.openai.com/v1",
         ai_api_key=os.getenv("AI_API_KEY", "").strip(),
         ai_model=os.getenv("AI_MODEL", "").strip() or "gpt-4o-mini",
+        vision_api_key=os.getenv("VISION_API_KEY", "").strip(),
+        vision_model=os.getenv("VISION_MODEL", "").strip(),
         asr_provider=os.getenv("ASR_PROVIDER", "api").strip().lower(),
         asr_model=os.getenv("ASR_MODEL", "whisper-1").strip(),
         asr_language=os.getenv("ASR_LANGUAGE", "zh").strip(),
