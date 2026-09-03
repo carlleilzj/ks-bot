@@ -204,7 +204,7 @@ class TelegramListener(threading.Thread):
                 # 更新原卡片文本（把按钮换成状态）
                 msg = cq.get("message")
                 if msg:
-                    telegram.edit_message_text(
+                    telegram.edit_review_message(
                         self.s, str(msg.get("chat", {}).get("id", "")),
                         msg.get("message_id", 0),
                         f"✅ 已通过 [{task.get('shortcode','')}]\n"
@@ -221,7 +221,7 @@ class TelegramListener(threading.Thread):
                 telegram.answer_callback(self.s, cq_id, "❌ 已丢弃")
                 msg = cq.get("message")
                 if msg:
-                    telegram.edit_message_text(
+                    telegram.edit_review_message(
                         self.s, str(msg.get("chat", {}).get("id", "")),
                         msg.get("message_id", 0),
                         f"❌ 已丢弃 [{task.get('shortcode','')}]\n"

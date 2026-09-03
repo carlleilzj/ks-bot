@@ -177,6 +177,8 @@ def publish(
             dismiss_dialogs(page)
 
             # 1. 上传视频
+            # 显式等上传输入框渲染（最长 60s），避免页面慢加载时 30s 默认超时误判失败
+            page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=60_000)
             file_input = page.locator(SELECTORS["file_input"]).first
             file_input.set_input_files(str(video))
             log.info("已提交视频上传：%s", video.name)

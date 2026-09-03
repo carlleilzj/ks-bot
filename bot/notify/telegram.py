@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -31,6 +32,9 @@ def _post(s: Settings, method: str, *, json_payload: dict | None = None,
         with httpx.Client(**client_kw) as client:
             if files is not None:
                 data = {"chat_id": s.telegram_chat_id, **(form or {})}
+                if extra_json:
+                    for k, v in extra_json.items():
+                        data[k] = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
                 resp = client.post(url, data=data, files=files)
             else:
                 payload = {"chat_id": s.telegram_chat_id, **(json_payload or {})}
@@ -175,3 +179,12 @@ def edit_message_text(s: Settings, chat_id: str, message_id: int, text: str,
           json_payload={"chat_id": chat_id, "message_id": message_id, "text": text,
                         "disable_web_page_preview": True},
           extra_json={"reply_markup": reply_markup} if reply_markup else None)
+
+
+def edit_review_message(s: Settings, chat_id: str, message_id: int, text: str) -> None:
+    """审核后更新卡片：图片消息(caption)用 editMessageCaption，纯文本用 editMessageText。
+
+    不传 reply_markup 时 TG 会自动移除内联按钮（卡片定格为已处理状态）。
+    """
+    _post(s, "editMessageCaption",
+          json_payload={"chat_id": chat_id, "message_id": message_id, "caption": text})
