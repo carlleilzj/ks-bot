@@ -33,6 +33,10 @@ platforms:
     enabled: true
     spark_task: true            # 发布时挂星火「关联变现任务」（需先在 App 收藏任务）
     # spark_task_title: 本命英雄  # 可选，标题包含则优先；空则轮询收藏列表
+    anchors:
+      热点: "治愈"
+      地点: "郴州"
+      声明: "内容由AI生成"        # 作者声明；下拉若为「内容为AI生成」亦匹配
   douyin:
     enabled: true
     # 发布时自动挂载「添加标签」（留空则跳过）。可选类型：
