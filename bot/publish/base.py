@@ -70,7 +70,9 @@ def chromium_launch_kwargs(*, headless: bool = True, slow_mo: int | None = None,
     """
     if proxy is None:
         proxy = os.environ.get("PUBLISH_PROXY", "").strip()
-    args = ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
+    # 抑制网络接口变化导致的中断（家庭机 fanout VPN 接口频繁增删触发 ERR_NETWORK_CHANGED）
+    args = ["--disable-blink-features=AutomationControlled", "--no-sandbox",
+            "--disable-features=NetworkChangeNotifier,NetworkServiceChangeNotifier"]
     kwargs: dict = {
         "headless": headless,
         "args": args,
@@ -106,6 +108,48 @@ def launch_persistent_chromium(playwright, user_data_dir: str | Path, *,
 
 
 # ---------- 基础工具 ----------
+
+def _is_network_change_error(e: Exception) -> bool:
+    """ERR_NETWORK_CHANGED / 接口抖动类错误。"""
+    s = str(e)
+    return any(k in s for k in ("ERR_NETWORK_CHANGED", "ERR_INTERNET_DISCONNECTED",
+                                 "ERR_ABORTED", "net::ERR_CONNECTION_RESET"))
+
+
+def goto_with_retry(page: Page, url: str, *, attempts: int = 4,
+                    timeout: int = 60_000) -> None:
+    """goto；网络接口抖动（ERR_NETWORK_CHANGED 等）时自动重试。"""
+    import time as _t
+    for i in range(attempts):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            return
+        except Exception as e:
+            if i < attempts - 1 and _is_network_change_error(e):
+                log.warning("goto 网络抖动（第 %d 次）：%s，2 秒后重试", i + 1, str(e)[:80])
+                _t.sleep(2)
+                continue
+            raise
+    # 不可达（理论上不会）
+    raise RuntimeError(f"goto_with_retry: {url} 重试 {attempts} 次仍失败")
+
+
+def reload_with_retry(page: Page, *, attempts: int = 4,
+                      timeout: int = 60_000) -> None:
+    """reload；网络接口抖动时自动重试。"""
+    import time as _t
+    for i in range(attempts):
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=timeout)
+            return
+        except Exception as e:
+            if i < attempts - 1 and _is_network_change_error(e):
+                log.warning("reload 网络抖动（第 %d 次）：%s，2 秒后重试", i + 1, str(e)[:80])
+                _t.sleep(2)
+                continue
+            raise
+    raise RuntimeError(f"reload_with_retry 重试 {attempts} 次仍失败")
+
 
 def shot(page: Page, name: str) -> None:
     """失败截图到 logs/（尽力而为，绝不抛错）。"""

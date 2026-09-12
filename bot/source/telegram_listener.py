@@ -77,8 +77,74 @@ class TelegramListener(threading.Thread):
             except Exception as e:
                 log.exception("TG 监听异常，30s 后重试：%s", e)
                 time.sleep(30)
+            try:
+                self._retry_due_resolves()
+            except Exception as e:
+                log.debug("\u89e3\u6790\u91cd\u8bd5\u5904\u7406\u5f02\u5e38\uff1a%s", e)
+
+    def _retry_due_resolves(self, limit: int = 5) -> int:
+        """排空到期的解析重试项。成功入流水线，失败按指数退避再排。"""
+        rows = self.db.due_resolves(limit=limit)
+        if not rows:
+            return 0
+        done = 0
+        for row in rows:
+            clean_url = row["clean_url"]
+            tp = [x for x in (row.get("target_platforms") or "").split(",") if x] or None
+            log.info("\U0001f504 重试解析 #%d（第 %d 次）：%s",
+                     row["id"], row["attempts"] + 1, clean_url)
+
+            try:
+                if self.db.find_by_source_url(clean_url):
+                    self.db.resolve_done(row["id"])
+                    continue
+            except Exception:
+                pass
+
+            try:
+                meta = extract_meta(clean_url)
+            except ValueError as e:
+                giveup, delay = self.db.resolve_fail(row["id"], str(e)[:200])
+                if giveup:
+                    telegram.send_text(self.s, (
+                        "\u274c 解析最终失败（已重试 %d 次）\n链接：%s\n原因：%s"
+                        % (row["attempts"] + 1, clean_url, str(e)[:150])
+                    ))
+                else:
+                    log.info("重试 #%d 仍失败，%d 秒后再试", row["id"], delay)
+                continue
+            except Exception as e:
+                self.db.resolve_fail(row["id"], ("未预期异常：%s" % e)[:200])
+                continue
+
+            try:
+                if self.db.find_by_source_url(meta.source_url):
+                    self.db.resolve_done(row["id"])
+                    continue
+                tid = self.db.insert_video(meta, target_platforms=tp)
+                self.db.resolve_done(row["id"])
+                if tid is None:
+                    continue
+                done += 1
+                platform_cn = _PLATFORM_CN.get(meta.platform, meta.platform)
+                pub_names = ("、".join(_PUBLISH_PLATFORM_CN.get(x, x) for x in tp)
+                             if tp else "所有启用平台")
+                telegram.send_text(self.s, (
+                    "\u2705 重试解析成功（第 %d 次）\n[%s] %s\n标识：%s\n发布到：%s\n\n"
+                    "流水线：下载 \u2192 转码 \u2192 转录 \u2192 文案 \u2192 字幕 \u2192 发布"
+                    % (row["attempts"] + 1, platform_cn, meta.username or "未知",
+                       meta.shortcode, pub_names)
+                ))
+                log.info("\u2705 重试入库 [%s] tid=%d", meta.shortcode, tid)
+                if self._wakeup is not None:
+                    self._wakeup.set()
+            except Exception as e:
+                log.exception("重试解析后入库失败：%s", e)
+                self.db.resolve_fail(row["id"], ("入库失败：%s" % e)[:200])
+        return done
 
     def _poll_once(self) -> None:
+
         """调一次 getUpdates（long-poll），处理返回的所有更新。"""
         url = f"{self.s.telegram_api_base}/bot{s_telegram_token(self.s)}/getUpdates"
         params = {"offset": self._offset, "timeout": _POLL_TIMEOUT}
@@ -328,12 +394,37 @@ class TelegramListener(threading.Thread):
                 )
             return
 
-        # 提取元数据
-        telegram.send_text(self.s, f"🔍 正在解析链接…\n{clean_url}")
         try:
             meta = extract_meta(clean_url)
         except ValueError as e:
-            telegram.send_text(self.s, f"❌ 无法解析该链接\n{str(e)[:200]}\n链接：{clean_url}")
+            err = str(e)[:200]
+            try:
+                qid = self.db.enqueue_resolve(
+                    raw_url, clean_url, target_platforms, err, delay_sec=120
+                )
+                pending = self.db.resolve_pending_count()
+                if qid:
+                    telegram.send_text(
+                        self.s,
+                        "\u23f3 \u89e3\u6790\u5931\u8d25\uff0c\u5df2\u52a0\u5165\u91cd\u8bd5\u961f\u5217\uff08#%d\uff09\n"
+                        "\u539f\u56e0\uff1a%s\n"
+                        "\u5f53\u524d\u961f\u5217\uff1a%d \u6761\u5f85\u91cd\u8bd5\n"
+                        "\u94fe\u63a5\uff1a%s\n\n"
+                        "\u00b7 5/10/20/40\u2026\u5206\u949f\u6307\u6570\u9000\u907f\uff0c\u6700\u591a 8 \u6b21\n"
+                        "\u00b7 \u89e3\u6790\u6210\u529f\u540e\u81ea\u52a8\u8fdb\u6d41\u6c34\u7ebf\uff0c\u65e0\u9700\u91cd\u53d1"
+                        % (qid, err, pending, clean_url),
+                    )
+                else:
+                    telegram.send_text(
+                        self.s,
+                        "\u274c \u65e0\u6cd5\u89e3\u6790\u8be5\u94fe\u63a5\n%s\n\u94fe\u63a5\uff1a%s" % (err, clean_url),
+                    )
+            except Exception as qe:
+                log.warning("\u5165\u91cd\u8bd5\u961f\u5217\u5931\u8d25\uff1a%s", qe)
+                telegram.send_text(
+                    self.s,
+                    "\u274c \u65e0\u6cd5\u89e3\u6790\u8be5\u94fe\u63a5\n%s\n\u94fe\u63a5\uff1a%s" % (err, clean_url),
+                )
             return
 
         # 再次查重（元数据可能有更精确的 source_url）

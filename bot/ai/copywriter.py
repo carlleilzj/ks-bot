@@ -24,19 +24,33 @@ class PlatformProfile:
     supports_category: bool = False
     tone: str = ""              # 语气/风格提示，注入 system prompt
     desc_hint: str = ""         # 简介的额外要求
+    audience: str = ""          # 目标人群画像，注入 system prompt（为空则不注入）
+    tags_hint: str = ""         # 标签方向偏好（为空则不注入）
 
 
 PLATFORM_PROFILES: dict[str, PlatformProfile] = {
     "kuaishou": PlatformProfile(
         name="kuaishou", display_name="快手", max_title_len=40, max_tags=4,
         supports_category=True,
-        tone="语气接地气、口语化，符合快手用户习惯",
+        tone="语气接地气、口语化，像跟邻居唠嗑，不用网络黑话",
         desc_hint="2~3 句话，自然植入关键词",
+        audience="25~50 岁家庭主妇（湖南郴州及周边三四线城市）。"
+                 "她们在家带娃、做饭、做家务，手机是主要娱乐，爱看轻松解压、"
+                 "家庭生活、育儿日常、美食、情感共鸣类内容。"
+                 "关心点：家庭和睦、孩子成长、省钱实用、邻里家常、婆媳关系、"
+                 "被理解被共情。反感：太潮太洋、炫富、看不懂的梗。",
+        tags_hint="家庭日常、婆媳、育儿、做饭、情感共鸣、解压、生活小妙招、郴州同城",
     ),
     "douyin": PlatformProfile(
         name="douyin", display_name="抖音", max_title_len=55,
-        tone="语气年轻化、有梗、节奏快，标题第一句就要抓眼球",
+        tone="口语自然、有生活烟火气，标题第一句抓眼球但不浮夸",
         desc_hint="2~3 句话，简洁有力，结尾自然引出话题标签",
+        audience="25~50 岁家庭主妇（湖南郴州及周边三四线城市为主）。"
+                 "她们刷抖音主要在娃睡了、做饭间隙、睡前，喜欢看轻松解压、"
+                 "家庭生活、育儿、美食、情感共情类内容。"
+                 "关心点：家庭关系、孩子教育、生活实用技巧、情感共鸣、"
+                 "身边事身边人。反感：太潮太洋、装、看不懂的梗。",
+        tags_hint="家庭日常、育儿、生活记录、情感、美食、解压、郴州同城",
     ),
     "xhs": PlatformProfile(
         name="xhs", display_name="小红书", max_title_len=20,
@@ -55,6 +69,18 @@ class CopywriterError(RuntimeError):
     pass
 
 
+def _audience_block(profile: PlatformProfile) -> str:
+    """把目标人群画像拼成 prompt 片段。"""
+    lines = []
+    if profile.audience:
+        lines.append(f"- 【目标受众】{profile.audience}")
+        lines.append("  标题、简介、标签都要对准这个人群的关心点和说话方式；"
+                     "不要用年轻人网络黑话，用她们能秒懂的大白话")
+    if profile.tags_hint:
+        lines.append(f"- 【标签方向】优先从这些方向选：{profile.tags_hint}")
+    return "\n".join(lines)
+
+
 def _system_prompt(profile: PlatformProfile) -> str:
     category_rule = (
         '"category": "必须从给定的分区列表中选择一个"'
@@ -66,6 +92,7 @@ def _system_prompt(profile: PlatformProfile) -> str:
         if profile.supports_category else
         "- category 固定输出空字符串"
     )
+    audience_block = _audience_block(profile)
     return f"""你是资深的{profile.display_name}短视频运营专家，擅长把视频内容包装成吸引点击的中文文案。
 用户会给你一段视频的语音转录文本（可能为空）和背景信息。
 你的任务是为该视频生成{profile.display_name}发布文案，只输出一个 JSON 对象，不要输出任何其他文字、注释或代码块标记。
@@ -80,6 +107,7 @@ JSON 格式：
 
 要求：
 - 全部用简体中文，{profile.tone}
+{audience_block}
 - 不得出现 Instagram、ins、IG、搬运、搬运工、原作者等字样
 - 不得出现「字幕by」、字幕作者、水印、制作署名、索兰娅等与画面内容无关的字样
 - 若转录像片头片尾水印、无有效对白，按视频常识写文案，不要复述水印

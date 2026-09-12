@@ -11,6 +11,8 @@
   GET  /api/file?path=...      下载成品视频/封面（路径必须位于 media/final|work 下）
   POST /api/claim              {task_id, platform} 认领一个平台 job（PENDING→PUBLISHING）
   POST /api/report             {task_id, platform, ok, url?, error?, login_expired?} 回报结果
+  GET  /api/published          近期已发布作品清单（审核巡检测匹配用）
+  POST /api/audit              {task_id, note, deleted} 审核违规处理回报
   GET  /api/health             健康检查（token 可选，用于 worker 心跳）
 """
 
@@ -115,8 +117,59 @@ class RemoteApi:
             })
         return {"tasks": out, "server_time": now_iso()}
 
+    def audit_report(self, data: dict) -> dict:
+        """家庭端巡检回报：记录违规通知与删除结果到对应 task 的 error 字段。"""
+        task_id = int(data.get("task_id") or 0)
+        if not task_id:
+            return {"ok": False, "error": "task_id required"}
+        note = str(data.get("note") or "")[:800]
+        deleted = bool(data.get("deleted"))
+        if deleted:
+            self.db.update(task_id, error=f"[审核违规·已删除] {note}")
+            log.warning("[audit] task %d 审核违规，作品已删除：%s", task_id, note[:120])
+        else:
+            self.db.update(task_id, error=f"[审核违规·删除失败] {note}")
+            log.warning("[audit] task %d 审核违规，删除失败：%s", task_id, note[:120])
+        return {"ok": True}
+
+    def published_payload(self, platform: str = "douyin", days: int = 7) -> dict:
+        """近期已发布作品清单（供家庭端审核巡检匹配通知）。"""
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = (_dt.now() - _td(days=days)).isoformat(timespec="seconds")
+        rows = self.db.conn.execute(
+            "SELECT j.task_id, j.platform, j.state, j.url, j.published_at, "
+            "       t.shortcode, t.title, t.description, t.source_url "
+            "FROM publish_jobs j JOIN tasks t ON t.id = j.task_id "
+            "WHERE j.platform = ? AND j.state = 'PUBLISHED' "
+            "  AND (j.published_at IS NULL OR j.published_at >= ?) "
+            "ORDER BY j.published_at DESC LIMIT 200",
+            (platform, cutoff)).fetchall()
+        items = []
+        for r in rows:
+            items.append({
+                "task_id": r[0],
+                "platform": r[1],
+                "url": r[3] or "",
+                "published_at": r[4] or "",
+                "shortcode": r[5] or "",
+                "title": r[6] or "",
+                "description": r[7] or "",
+                "source_url": r[8] or "",
+            })
+        return {"ok": True, "platform": platform, "count": len(items), "items": items}
+
     def claim(self, task_id: int, platform: str) -> dict:
-        """原子认领：UPDATE ... WHERE state='PENDING' 抢占，防两端并发重复发布。"""
+        """原子认领：UPDATE ... WHERE state='PENDING' 抢占，防两端并发重复发布。
+
+        认领前复检 gate（窗口/限额/间隔），防止 worker 批量取走同平台多条 job 后
+        在冷却窗内连续发布——gate 只在 pending_payload 快照时算过一次，
+        取走到实际发布之间可能已有同平台新发布落地。
+        """
+        # gate 复检（锁外执行，gate_fn 内部自加 db._lock，避免不可重入死锁）
+        if self.gate_fn:
+            reason = self.gate_fn(platform)
+            if reason:
+                return {"ok": False, "error": f"发布等待：{reason}", "gate_blocked": True}
         with self.db._lock:
             cur = self.db.conn.execute(
                 "UPDATE publish_jobs SET state=?, updated_at=? "
@@ -245,6 +298,11 @@ class RemoteApi:
                 if parsed.path == "/api/pending":
                     self._send_json(200, api.pending_payload())
                     return
+                if parsed.path == "/api/published":
+                    plat = qs.get("platform", ["douyin"])[0]
+                    days = int((qs.get("days", ["7"])[0]) or 7)
+                    self._send_json(200, api.published_payload(plat, days))
+                    return
                 if parsed.path == "/api/file":
                     self._serve_file(qs.get("path", [""])[0])
                     return
@@ -278,6 +336,12 @@ class RemoteApi:
                     try:
                         self._send_json(200, api.claim(int(data.get("task_id") or 0),
                                                        str(data.get("platform") or "")))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
+                if parsed.path == "/api/audit":
+                    try:
+                        self._send_json(200, api.audit_report(data))
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return

@@ -12,7 +12,50 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import yt_dlp
 
+from . import ig_api, ig_pool
+
 log = logging.getLogger(__name__)
+
+# cookies 文件（Netscape 格式）：存在则自动启用，解决 IG/YT 对数据中心 IP 的
+# 强制登录风控（"empty media response" / "Sign in to confirm you're not a bot"）。
+_COOKIE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "cookies.txt"
+
+
+def _pick_cookies(url: str) -> tuple[Path | None, str]:
+    """选 cookie 文件。IG 走多账号池，其余平台用遗留单文件。
+
+    返回 (cookie 路径 or None, 账号名 or "")。
+    """
+    if "instagram.com" in (url or "").lower():
+        cf = ig_pool.pick_cookiefile()
+        if cf is not None:
+            return cf, ig_pool.account_of(cf)
+    if _COOKIE_FILE.exists() and _COOKIE_FILE.stat().st_size > 0:
+        return _COOKIE_FILE, ""
+    return None, ""
+
+
+def _base_opts(url: str = "") -> tuple[dict, str]:
+    """所有 yt-dlp 会话共用的基础选项（含 cookies，若文件存在）。
+
+    返回 (opts, ig_account)。ig_account 非空时调用方可用它回报成功/被封。
+    """
+    opts: dict = {}
+    cf, acct = _pick_cookies(url)
+    if cf is not None:
+        opts["cookiefile"] = str(cf)
+        log.info("yt-dlp 启用 cookies：%s%s", cf, f"（IG 账号 {acct}）" if acct else "")
+    # YouTube 需要：浏览器指纹（curl_cffi）+ JS 运行时（deno）+ PO Token（bgutil 脚本）
+    # + n-challenge 远程组件（等价 CLI 的 --remote-components ejs:github）
+    opts["impersonate"] = yt_dlp.networking.impersonate.ImpersonateTarget("chrome")
+    opts["remote_components"] = ["ejs:github"]  # 顶层参数（YoutubeDL params），非 extractor_args
+    opts["extractor_args"] = {
+        "youtube": {
+            # mweb：实测可绕过 SABR 流限制拿到完整音视频 URL（web_safari 会被 SABR 全灭）
+            "player_client": ["mweb"],
+        },
+    }
+    return opts, acct
 
 # 追踪参数黑名单（出现在这些里的查询参数一律删掉）
 _TRACKING_PREFIXES = ("utm_", "fbclid", "gclid", "igshi", "igsi", "ref", "_branch")
@@ -75,7 +118,22 @@ def extract_meta(url: str) -> VideoMeta:
     会自动跳过非视频内容（图文/直播等）。
     """
     clean_url = parse_url(url)
+
+    # IG 优先走自研解析器：yt-dlp 的 Instagram extractor 依赖已被 IG 废弃的
+    # www.instagram.com/api/graphql，实测恒 400。自研走移动端 API，稳定可用。
+    if ig_api.is_instagram(clean_url):
+        try:
+            return ig_api.extract(clean_url)
+        except ValueError as e:
+            msg = str(e)
+            # 「帖子不可访问」是确定性结论，不必回退 yt-dlp 徒劳重试
+            if "不可访问" in msg or "纯图文" in msg:
+                raise
+            log.warning("自研 IG 解析失败，回退 yt-dlp：%s", msg[:150])
+
+    base, acct = _base_opts(clean_url)
     opts = {
+        **base,
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
@@ -85,7 +143,17 @@ def extract_meta(url: str) -> VideoMeta:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(clean_url, download=False)
     except yt_dlp.utils.DownloadError as e:
-        raise ValueError(f"yt-dlp 无法解析该链接：{str(e)[:300]}") from e
+        msg = str(e)
+        # IG 风控：冷却该账号，下次自动换号
+        if acct and ig_pool.is_blocked(msg):
+            ig_pool.report_blocked(acct, msg)
+            raise ValueError(
+                f"IG 账号 {acct} 被风控，已冷却并切换其他账号。原始错误：{msg[:220]}"
+            ) from e
+        raise ValueError(f"yt-dlp 无法解析该链接：{msg[:300]}") from e
+
+    if acct:
+        ig_pool.report_ok(acct)
 
     if not info:
         raise ValueError("yt-dlp 返回空结果，可能链接无效或视频已删除")
@@ -135,6 +203,7 @@ def download(url: str, dest: Path) -> Path:
     out_name = dest.stem  # 不含扩展名，yt-dlp 会自动加
 
     opts = {
+        **_base_opts(url)[0],
         "quiet": True,
         "no_warnings": True,
         "outtmpl": f"{out_dir}/{out_name}.%(ext)s",

@@ -124,6 +124,30 @@ class Database:
 
     def _migrate(self) -> None:
         """存量库升级：加新列、回填 kuaishou job。幂等。"""
+        # 解析重试队列：IG 风控/网络抖动导致 extract_meta 失败时入队，
+        # 按指数退避择时重试，成功后再进正常流水线。
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS resolve_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_url TEXT NOT NULL,
+                clean_url TEXT NOT NULL,
+                target_platforms TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT NOT NULL,
+                last_error TEXT,
+                state TEXT NOT NULL DEFAULT 'PENDING',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_resolve_url "
+            "ON resolve_queue(clean_url) WHERE state = 'PENDING'"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_resolve_next "
+            "ON resolve_queue(state, next_attempt_at)"
+        )
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
         if "copy_json" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN copy_json TEXT")
@@ -493,6 +517,100 @@ class Database:
                 "SELECT * FROM tasks ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------- 解析重试队列 ----------
+
+    def enqueue_resolve(self, source_url: str, clean_url: str,
+                        target_platforms: list[str] | None = None,
+                        error: str = "", delay_sec: int = 120) -> int | None:
+        """解析失败入队。同 clean_url 已 PENDING 则只更新错误，不重复排队。"""
+        from datetime import datetime, timedelta
+        ts = now_iso()
+        nxt = (datetime.now() + timedelta(seconds=delay_sec)).isoformat(timespec="seconds")
+        tp = ",".join(target_platforms) if target_platforms else None
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT id FROM resolve_queue WHERE clean_url=? AND state='PENDING'",
+                (clean_url,),
+            ).fetchone()
+            if existing:
+                self.conn.execute(
+                    "UPDATE resolve_queue SET last_error=?, updated_at=? WHERE id=?",
+                    (error[:400], ts, existing["id"]),
+                )
+                self.conn.commit()
+                return existing["id"]
+            cur = self.conn.execute(
+                """INSERT INTO resolve_queue
+                   (source_url, clean_url, target_platforms, attempts,
+                    next_attempt_at, last_error, state, created_at, updated_at)
+                   VALUES (?,?,?,0,?,?,'PENDING',?,?)""",
+                (source_url, clean_url, tp, nxt, error[:400], ts, ts),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def due_resolves(self, limit: int = 10) -> list[dict]:
+        """取出到期的待重试项。"""
+        rows = self.conn.execute(
+            """SELECT * FROM resolve_queue
+               WHERE state='PENDING' AND next_attempt_at <= ?
+               ORDER BY next_attempt_at LIMIT ?""",
+            (now_iso(), limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_fail(self, row_id: int, error: str,
+                     max_attempts: int = 8) -> tuple[bool, int]:
+        """记一次失败。返回 (是否放弃, 下次延迟秒数)。"""
+        from datetime import datetime, timedelta
+        row = self.conn.execute(
+            "SELECT attempts FROM resolve_queue WHERE id=?", (row_id,)
+        ).fetchone()
+        if row is None:
+            return True, 0
+        attempts = row["attempts"] + 1
+        ts = now_iso()
+        if attempts >= max_attempts:
+            with self._lock:
+                self.conn.execute(
+                    "UPDATE resolve_queue SET state='GAVEUP', attempts=?, "
+                    "last_error=?, updated_at=? WHERE id=?",
+                    (attempts, error[:400], ts, row_id),
+                )
+                self.conn.commit()
+            return True, 0
+        # 指数退避：5min,10min,20min,40min,80min,160min,320min
+        delay = min(300 * (2 ** (attempts - 1)), 3600 * 6)
+        nxt = (datetime.now() + timedelta(seconds=delay)).isoformat(timespec="seconds")
+        with self._lock:
+            self.conn.execute(
+                "UPDATE resolve_queue SET attempts=?, next_attempt_at=?, "
+                "last_error=?, updated_at=? WHERE id=?",
+                (attempts, nxt, error[:400], ts, row_id),
+            )
+            self.conn.commit()
+        return False, delay
+
+    def resolve_done(self, row_id: int) -> None:
+        with self._lock:
+            self.conn.execute(
+                "UPDATE resolve_queue SET state='DONE', updated_at=? WHERE id=?",
+                (now_iso(), row_id),
+            )
+            self.conn.commit()
+
+    def resolve_stats(self) -> dict:
+        rows = self.conn.execute(
+            "SELECT state, COUNT(*) n FROM resolve_queue GROUP BY state"
+        ).fetchall()
+        return {r["state"]: r["n"] for r in rows}
+
+    def resolve_pending_count(self) -> int:
+        r = self.conn.execute(
+            "SELECT COUNT(*) n FROM resolve_queue WHERE state='PENDING'"
+        ).fetchone()
+        return r["n"] if r else 0
 
     def close(self) -> None:
         with self._lock:

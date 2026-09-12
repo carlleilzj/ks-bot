@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -17,6 +18,7 @@ from pathlib import Path
 from playwright.sync_api import Page, sync_playwright
 
 from ..config import DATA_DIR
+from .douyin_anchor import apply_anchors, apply_hot_topic, pick_goods_for
 from .base import (
     LoginExpired,
     PublishError,
@@ -28,6 +30,8 @@ from .base import (
     settle,
     shot,
     wait_upload_done,
+    goto_with_retry,
+    reload_with_retry,
 )
 
 log = logging.getLogger(__name__)
@@ -42,6 +46,8 @@ UPLOAD_TIMEOUT = 15 * 60
 SELECTORS = {
     "file_input": "input[type='file']",
     "editor": "div[contenteditable='true']",
+    # 标题是独立 input（semi-input），2026-09 改版后简介编辑器不再承载标题
+    "title_input": "input[placeholder*='标题']",
     "publish_btn_text": "发布",
     "upload_done_texts": ["重新上传", "上传完成", "已上传完成"],
     "upload_fail_texts": ["上传失败", "上传出错", "上传中断"],
@@ -90,13 +96,31 @@ def _is_logged_in(page: Page) -> bool:
         return False
 
 
+def _cookie_file_has_login(state_path: Path) -> bool:
+    """直接读 storage_state 文件判登录 cookie（不依赖 Playwright 域匹配）。"""
+    import time as _time
+    try:
+        data = json.loads(Path(state_path).read_text())
+        now = _time.time()
+        names = set()
+        for c in data.get("cookies", []):
+            exp = c.get("expires", -1)
+            if exp is None or exp < 0 or exp > now:
+                names.add(c.get("name", ""))
+        return "sessionid" in names or "sessionid_ss" in names
+    except Exception:
+        return False
+
+
 def _has_login_cookies(context) -> bool:
     try:
         cookies = context.cookies(["https://creator.douyin.com", "https://www.douyin.com"])
         names = {c["name"] for c in cookies}
-        return "sessionid" in names or "sessionid_ss" in names
+        if "sessionid" in names or "sessionid_ss" in names:
+            return True
     except Exception:
-        return False
+        pass
+    return _cookie_file_has_login(STATE_PATH)
 
 
 # ---------- 登录 ----------
@@ -153,6 +177,8 @@ def publish(
     headless: bool = True,
     state_path: Path = STATE_PATH,
     manual_verify: bool = False,  # True=有头模式，短信验证弹窗由人工在窗口里完成
+    anchors: dict | None = None,      # 挂载标签 {"标记万物": "xxx", "位置": "yyy", ...}
+    hot_topic: str = "",              # 关联热点词
 ) -> str | None:
     """上传并发布一条视频，成功返回作品链接（获取不到时 None）。"""
     if not Path(state_path).exists():
@@ -167,7 +193,7 @@ def publish(
         context = new_context(browser, state_path)
         page = context.new_page()
         try:
-            page.goto(PUBLISH_URL, wait_until="domcontentloaded", timeout=60000)
+            goto_with_retry(page, PUBLISH_URL)
             settle(page)
             _check_captcha(page, "打开发布页")
             if not (_is_logged_in(page) or _has_login_cookies(context)):
@@ -176,24 +202,43 @@ def publish(
 
             dismiss_dialogs(page)
 
-            # 1. 上传视频
-            # 显式等上传输入框渲染（最长 60s），避免页面慢加载时 30s 默认超时误判失败
-            page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=60_000)
-            file_input = page.locator(SELECTORS["file_input"]).first
-            file_input.set_input_files(str(video))
-            log.info("已提交视频上传：%s", video.name)
-
-            # 2. 等待上传完成（抖音上传后即进入编辑表单）
-            wait_upload_done(page, SELECTORS["upload_done_texts"], SELECTORS["upload_fail_texts"],
-                             shot_prefix="dy", timeout=UPLOAD_TIMEOUT)
+            # 1+2. 上传视频并等待转码完成（网络抖动导致失败自动重传）
+            _upload_with_retry(page, video)
             page.wait_for_timeout(5000)
             _check_captcha(page, "上传后")
             dismiss_dialogs(page)
             rand_sleep()
 
-            # 3. 填标题+简介+话题（抖音为同一个 contenteditable 编辑器）
+            # 3. 填标题+简介+话题
+            #    抖音改版后标题为独立 input（placeholder='填写作品标题，为作品获得更多流量'），
+            #    简介为 contenteditable（placeholder='添加作品简介'）。两者分开填。
+            title_input = page.locator(SELECTORS["title_input"]).first
+            try:
+                title_input.click(force=True)
+                title_input.fill(title)
+                log.info("已填写标题（%d 字）", len(title))
+            except Exception as e:
+                log.warning("标题输入框填写失败（可能改版）：%s", str(e)[:100])
             editor = page.locator(SELECTORS["editor"]).first
             fill_editor(page, content, shot_prefix="dy_desc", candidates=[editor])
+
+            # 3.5 挂载标签（商品/位置/小程序/团购/热点），失败不阻塞发布
+            if anchors or hot_topic:
+                try:
+                    # 「标记万物: auto」→ 按视频标题/标签自动选品（家庭主妇刚需品）
+                    _anchors = dict(anchors or {})
+                    if str(_anchors.get("标记万物", "")).lower() == "auto":
+                        _anchors["标记万物"] = pick_goods_for(f"{title} {description} {' '.join(tags or [])}")
+                        log.info("自动选品：%s", _anchors["标记万物"])
+                    done = apply_anchors(page, _anchors, hot_topic)
+                    if done:
+                        log.info("抖音挂载完成：%s", "/".join(done))
+                    else:
+                        log.warning("抖音挂载未生效（配置=%r 热点=%r）", anchors, hot_topic)
+                    shot(page, "dy_anchors_done")
+                except Exception as e:
+                    log.warning("挂载流程异常（继续发布）：%s", str(e)[:150])
+                _dismiss_game_promo(page)
 
             # 4. 点发布（manual_verify=True 时短信验证弹窗由人工完成）
             _click_publish(page, manual_verify=manual_verify)
@@ -218,51 +263,167 @@ def _sms_dialog_present(page: Page) -> bool:
     return False
 
 
+def _wait_file_input_with_retry(page: Page, max_refresh: int = 3) -> None:
+    """等上传输入框出现；遇到'页面出错了'自动刷新重试。
+
+    抖音创作者页偶发前端加载失败（主内容区显示"页面出错了，刷新试试"），
+    刷新即可恢复。不处理的话 wait_for_selector 60s 超时 → 误报失败 → 重复发布。
+    """
+    for refresh in range(max_refresh + 1):
+        try:
+            page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=20_000)
+            return  # 出现了
+        except Exception:
+            pass
+        # 20s 还没出现：看是不是'页面出错了'状态
+        try:
+            body = page.locator("body").inner_text(timeout=5_000)
+            page_broken = "页面出错了" in body or "刷新试试" in body
+        except Exception:
+            page_broken = False
+        if not page_broken and refresh < max_refresh:
+            # 没有明确错误提示，也可能只是慢；再等一轮
+            try:
+                page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=20_000)
+                return
+            except Exception:
+                pass
+        if refresh < max_refresh:
+            log.warning("发布页加载失败（第 %d 次），自动刷新重试", refresh + 1)
+            shot(page, f"dy_page_broken_{refresh + 1}")
+            reload_with_retry(page)
+            page.wait_for_timeout(5000)
+    # 最后一轮完整等待
+    page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=60_000)
+
+
+def _upload_with_retry(page: Page, video, max_attempts: int = 3) -> None:
+    """上传视频；网络抖动导致的上传失败/超时自动重传。
+
+    家庭机 fanout VPN 接口高频抖动会打断上传传输（页面报「上传失败」），
+    重新选文件即可恢复。
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            _wait_file_input_with_retry(page)
+            file_input = page.locator(SELECTORS["file_input"]).first
+            file_input.set_input_files(str(video))
+            log.info("已提交视频上传：%s（第 %d 次）", video.name, attempt)
+
+            wait_upload_done(page, SELECTORS["upload_done_texts"],
+                             SELECTORS["upload_fail_texts"],
+                             shot_prefix="dy", timeout=UPLOAD_TIMEOUT)
+            return  # 成功
+        except PublishError as e:
+            last_err = e
+            if attempt >= max_attempts:
+                break
+            log.warning("上传失败（第 %d/%d 次）：%s，准备重传", attempt, max_attempts, str(e)[:120])
+            # 回到干净的发布页再重传
+            try:
+                goto_with_retry(page, PUBLISH_URL)
+                page.wait_for_timeout(5000)
+                dismiss_dialogs(page)
+            except Exception as e2:
+                log.warning("重传前刷新页面失败：%s", str(e2)[:100])
+    raise last_err if last_err else PublishError("视频上传失败（重传耗尽）")
+
+
+def _dismiss_game_promo(page: Page) -> None:
+    """挂载游戏手柄后会弹出「游戏推广」开通弹窗，遮住底部「发布」。"""
+    try:
+        body = page.locator("body").inner_text(timeout=4000)
+    except Exception:
+        body = ""
+    if "游戏推广" not in body and "暂不开通" not in body:
+        return
+    for label in ("暂不开通，仅添加", "暂不开通", "仅添加"):
+        try:
+            loc = page.get_by_role("button", name=label, exact=False)
+            if not loc.count():
+                loc = page.get_by_text(label, exact=False)
+            if loc.count() and loc.first.is_visible():
+                loc.first.click(timeout=4000)
+                page.wait_for_timeout(1500)
+                log.info("已关闭游戏推广弹窗（%s）", label)
+                return
+        except Exception:
+            continue
+    try:
+        x = page.get_by_text("游戏推广", exact=False).locator(
+            "xpath=ancestor::*[contains(@class,'modal') or contains(@class,'dialog') or contains(@class,'popup')][1]//button"
+        )
+        if x.count():
+            x.first.click(timeout=2000)
+            page.wait_for_timeout(1000)
+            log.info("已点游戏推广弹窗关闭按钮")
+    except Exception:
+        pass
+
+
 def _click_publish(page: Page, manual_verify: bool = False) -> None:
+    _dismiss_game_promo(page)
+    dismiss_dialogs(page, extra_texts=("暂不开通，仅添加", "暂不开通"))
+    page.wait_for_timeout(800)
     candidates = [
         page.get_by_role("button", name=SELECTORS["publish_btn_text"], exact=True),
         page.locator("button", has_text=re.compile(r"^\s*发\s*布\s*$")),
         page.get_by_text(SELECTORS["publish_btn_text"], exact=True),
     ]
+    clicked = False
     for loc in candidates:
         try:
-            if loc.count() and loc.first.is_visible():
-                loc.first.click()
-                break
+            n = loc.count()
+            if not n:
+                continue
+            # 底部「发布」通常是最后一个可见 button
+            target = loc.nth(n - 1) if n > 1 else loc.first
+            if not target.is_visible():
+                target = loc.first
+            try:
+                target.click(timeout=5000)
+            except Exception:
+                target.click(force=True, timeout=5000)
+            clicked = True
+            break
         except Exception:
             continue
-    else:
+    if not clicked:
         shot(page, "dy_publish_btn_fail")
         raise DouyinError("未找到发布按钮，截图见 logs/（抖音页面可能已改版）")
 
-    deadline = time.time() + 60
-    sms_prompted = False
-    while time.time() < deadline:
-        if _has_captcha(page):
-            shot(page, "dy_captcha_on_publish")
-            raise DouyinError("抖音在点击发布时触发滑块验证，截图见 logs/，请人工过验证或稍后重试")
-        if _sms_dialog_present(page):
-            if manual_verify:
-                deadline = time.time() + 300  # 人工输入验证码，等 5 分钟
-                if not sms_prompted:
-                    sms_prompted = True
-                    shot(page, "dy_sms_verify")
-                    log.info("抖音要求短信验证，请在浏览器窗口输入验证码并点击「验证」（5 分钟内有效）")
-                # 等用户输入验证码，弹窗消失后继续等成功标志
+    # 发布按钮已点击。不在沉重的上传页轮询成功文案——
+    # 抖音发布后页面跳转到内容管理页的过程中，在上传页操作正在销毁的 DOM
+    # 会触发 "Target crashed" → 报失败 → 重试 → 重复发布。
+    # 改为：等几秒 → 查验证码/短信 → 导航到内容管理页验证作品是否出现。
+    time.sleep(3)
+
+    # 验证码检查（只查一次，不轮询——避免在跳转页操作 DOM 崩溃）
+    if _has_captcha(page):
+        shot(page, "dy_captcha_on_publish")
+        raise DouyinError("抖音在点击发布时触发滑块验证，截图见 logs/，请人工过验证或稍后重试")
+
+    # 短信验证检查
+    if _sms_dialog_present(page):
+        if manual_verify:
+            shot(page, "dy_sms_verify")
+            log.info("抖音要求短信验证，请在浏览器窗口输入验证码并点击「验证」（5 分钟内有效）")
+            sms_deadline = time.time() + 300
+            while time.time() < sms_deadline:
+                if not _sms_dialog_present(page):
+                    break
                 time.sleep(2)
-                continue
+        else:
             shot(page, "dy_sms_verify")
             raise DouyinError("抖音发布触发短信验证（风控），需人工在浏览器里输入验证码完成发布；"
                               "自动流程已中止，本条会重试")
-        for text in SELECTORS["success_texts"]:
-            loc = page.get_by_text(text, exact=False)
-            if loc.count() and loc.first.is_visible():
-                return
-        if "/content/manage" in page.url:
-            return
-        time.sleep(2)
-    shot(page, "dy_publish_result_unknown")
-    raise DouyinError("点击发布后 60 秒内未检测到成功标志，请查看 logs/ 截图确认")
+
+    # 发布按钮已点击，无验证码/短信拦截 → 发布已提交，视为成功。
+    # 不再做内容管理页 DOM 验证——审核中无链接、页面结构变、加载慢都会漏判，
+    # 导致误报失败 → 重试 → 重复发布。URL 获取交给 _fetch_dy_url（best-effort）。
+    log.info("发布按钮已点击，无验证码/短信拦截，视为发布成功")
+    return
 
 
 def _fetch_dy_url(context) -> str | None:

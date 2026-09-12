@@ -58,6 +58,8 @@ class PlatformConfig:
     categories: list[str] = field(default_factory=list)  # 该平台的分区列表（无分区概念的平台留空）
     spark_task: bool = False          # 快手：发布时挂星火「关联变现任务」
     spark_task_title: str = ""        # 可选，收藏任务标题包含该字符串则优先；空则轮询
+    anchors: dict = field(default_factory=dict)  # 抖音：挂载标签 {类型: 搜索词}
+    hot_topic: str = ""               # 抖音：关联热点词
 
 
 @dataclass
@@ -219,10 +221,15 @@ def load_settings() -> Settings:
     if isinstance(plat_raw, dict) and plat_raw:
         for name, conf in plat_raw.items():
             conf = conf if isinstance(conf, dict) else {}
+            _anchors = conf.get("anchors") or {}
+            if not isinstance(_anchors, dict):
+                _anchors = {}
             pc = PlatformConfig(
                 enabled=bool(conf.get("enabled", False)),
                 spark_task=bool(conf.get("spark_task", False)),
                 spark_task_title=str(conf.get("spark_task_title") or "").strip(),
+                anchors={str(k): str(v) for k, v in _anchors.items() if v},
+                hot_topic=str(conf.get("hot_topic") or "").strip(),
             )
             pcats = plat_cats_raw.get(name)
             if isinstance(pcats, list) and pcats:

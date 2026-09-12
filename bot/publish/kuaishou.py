@@ -27,6 +27,8 @@ from .base import (
     settle,
     shot,
     wait_upload_done,
+    goto_with_retry,
+    reload_with_retry,
 )
 
 log = logging.getLogger(__name__)
@@ -131,6 +133,54 @@ def _wait_form_ready(page: Page, timeout: float = 40.0) -> None:
 
 # ---------- 登录态判定 ----------
 
+def _wait_file_input_with_retry(page: Page, max_refresh: int = 3) -> None:
+    """等上传输入框出现；遇到页面加载失败自动刷新重试。
+
+    快手创作者页偶发前端加载失败（主内容区出不来 input[type=file]），
+    刷新即可恢复。不处理的话 wait_for_selector 60s 超时 → 误报失败/误判登录失效。
+    """
+    for refresh in range(max_refresh + 1):
+        try:
+            page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=20_000)
+            return
+        except Exception:
+            pass
+        if refresh < max_refresh:
+            log.warning("发布页加载失败（第 %d 次），自动刷新重试", refresh + 1)
+            shot(page, f"ks_page_broken_{refresh + 1}")
+            reload_with_retry(page)
+            page.wait_for_timeout(5000)
+    page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=60_000)
+
+
+def _upload_with_retry(page: Page, video, max_attempts: int = 3) -> None:
+    """上传视频；网络抖动导致的上传失败/超时自动重传。"""
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            _wait_file_input_with_retry(page)
+            file_input = page.locator(SELECTORS["file_input"]).first
+            file_input.set_input_files(str(video))
+            log.info("已提交视频上传：%s（第 %d 次）", video.name, attempt)
+
+            wait_upload_done(page, SELECTORS["upload_done_texts"],
+                             SELECTORS["upload_fail_texts"],
+                             shot_prefix="ks", timeout=UPLOAD_TIMEOUT)
+            return
+        except PublishError as e:
+            last_err = e
+            if attempt >= max_attempts:
+                break
+            log.warning("上传失败（第 %d/%d 次）：%s，准备重传", attempt, max_attempts, str(e)[:120])
+            try:
+                goto_with_retry(page, PUBLISH_URL)
+                page.wait_for_timeout(5000)
+                dismiss_dialogs(page)
+            except Exception as e2:
+                log.warning("重传前刷新页面失败：%s", str(e2)[:100])
+    raise last_err if last_err else PublishError("视频上传失败（重传耗尽）")
+
+
 def _is_logged_in(page: Page) -> bool:
     """发布页上的快速判定：不在登录页且能找到上传入口。"""
     try:
@@ -141,14 +191,41 @@ def _is_logged_in(page: Page) -> bool:
         return False
 
 
-def _has_login_cookies(context) -> bool:
-    """按 cookie 判定登录态（不依赖页面结构，扫码成功即生效）。"""
+def _cookie_file_has_login(state_path: Path) -> bool:
+    """直接读 storage_state 文件判登录 cookie（不依赖 Playwright 域匹配）。
+
+    实测 context.cookies(["https://cp.kuaishou.com"]) 只返回 4 个 cookie，
+    查不到 .kuaishou.com / id.kuaishou.com 域的 userId/passToken，
+    导致登录态有效却被误判失效 → job 跳过。
+    另：userId 存在多条（有过期的有有效的），须按 expires 过滤。
+    """
+    import time as _time
     try:
-        cookies = context.cookies(["https://cp.kuaishou.com"])
-        names = {c["name"] for c in cookies}
+        data = json.loads(Path(state_path).read_text())
+        now = _time.time()
+        names = set()
+        for c in data.get("cookies", []):
+            exp = c.get("expires", -1)
+            # expires=-1 是会话 cookie 视为有效；有过期时间的必须未过期
+            if exp is None or exp < 0 or exp > now:
+                names.add(c.get("name", ""))
         return "userId" in names or "passToken" in names
     except Exception:
         return False
+
+
+def _has_login_cookies(context) -> bool:
+    """按 cookie 判定登录态（不依赖页面结构，扫码成功即生效）。"""
+    try:
+        cookies = context.cookies(["https://cp.kuaishou.com", "https://www.kuaishou.com",
+                                    "https://id.kuaishou.com", "https://passport.kuaishou.com"])
+        names = {c["name"] for c in cookies}
+        if "userId" in names or "passToken" in names:
+            return True
+    except Exception:
+        pass
+    # 域匹配查不到时兜底：直接读 storage_state 文件
+    return _cookie_file_has_login(KS_STATE_PATH)
 
 
 # ---------- 登录 ----------
@@ -203,7 +280,7 @@ def publish(
         context = new_context(browser, state_path)
         page = context.new_page()
         try:
-            page.goto(PUBLISH_URL, wait_until="domcontentloaded", timeout=60000)
+            goto_with_retry(page, PUBLISH_URL)
             settle(page)
             if not (_is_logged_in(page) or _has_login_cookies(context)):
                 shot(page, "ks_login_expired")
@@ -212,16 +289,8 @@ def publish(
             # 0. 关闭「继续编辑上次未发布视频」弹窗（如果有）
             dismiss_dialogs(page)
 
-            # 1. 上传视频
-            # 显式等上传输入框渲染（最长 60s），避免页面慢加载时 30s 默认超时误判失败
-            page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=60_000)
-            file_input = page.locator(SELECTORS["file_input"]).first
-            file_input.set_input_files(str(video))
-            log.info("已提交视频上传：%s", video.name)
-
-            # 2. 等待上传 + 转码完成
-            wait_upload_done(page, SELECTORS["upload_done_texts"], SELECTORS["upload_fail_texts"],
-                             shot_prefix="ks", timeout=UPLOAD_TIMEOUT)
+            # 1+2. 上传视频并等待转码完成（网络抖动导致失败自动重传）
+            _upload_with_retry(page, video)
             # 上传完成后表单异步渲染，且可能弹出「继续编辑上次未发布视频」等弹窗：
             # 循环关弹窗 + 等描述框可见，最多 40 秒
             _wait_form_ready(page)
@@ -531,8 +600,8 @@ def _click_publish(page: Page) -> None:
                 shot(page, "ks_publish_blocked")
                 raise KuaishouError(
                     f"快手发布被拦截（页面提示「{text}」）。"
-                    f"若创作者中心显示账号健康，优先检查小火箭分流是否把 *.kuaishou.com 走了代理"
-                    f"（发布浏览器应直连国内站）"
+                    f"发布浏览器直连国内网络（无代理）；若创作者中心显示账号健康，"
+                    f"可能是 IP 风控或页面改版，查看截图确认"
                 )
         for text in SELECTORS["success_texts"]:
             if page.get_by_text(text, exact=False).count():

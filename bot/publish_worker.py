@@ -57,12 +57,17 @@ def fetch_pending(base: str, s: Settings) -> list[dict]:
 
 
 def claim(base: str, s: Settings, task_id: int, platform: str) -> dict | None:
-    """原子认领。返回 task payload；被别人抢先/状态不对返回 None。"""
+    """原子认领。返回 task payload；被别人抢先/状态不对/gate 拦截返回 None。"""
     with httpx.Client(timeout=30) as c:
         r = c.post(f"{base}/api/claim", headers=_headers(s),
                    json={"task_id": task_id, "platform": platform})
         data = _check(r, f"认领 {task_id}/{platform}")
-    return data.get("task") if data.get("ok") else None
+    if not data.get("ok"):
+        if data.get("gate_blocked"):
+            log.info("[%s] %s gate 拦截：%s（下轮自动重试）",
+                     task_id, platform, data.get("error", "")[:80])
+        return None
+    return data.get("task")
 
 
 def report(base: str, s: Settings, task_id: int, platform: str, ok: bool,
@@ -72,6 +77,84 @@ def report(base: str, s: Settings, task_id: int, platform: str, ok: bool,
                    json={"task_id": task_id, "platform": platform, "ok": ok,
                          "url": url, "error": error, "login_expired": login_expired})
         _check(r, f"回报 {task_id}/{platform}")
+
+
+
+def fetch_published(base: str, s: Settings, platform: str = "douyin",
+                    days: int = 7) -> list[dict]:
+    """拉 VPS 上近期已发布作品清单（审核巡检测匹配用）。"""
+    with httpx.Client(timeout=30) as c:
+        r = c.get(f"{base}/api/published",
+                  params={"platform": platform, "days": days}, headers=_headers(s))
+        return _check(r, "拉取已发布清单").get("items", [])
+
+
+def report_audit(base: str, s: Settings, task_id: int, note: str, deleted: bool) -> None:
+    with httpx.Client(timeout=30) as c:
+        r = c.post(f"{base}/api/audit", headers=_headers(s),
+                   json={"task_id": task_id, "note": note, "deleted": deleted})
+        _check(r, f"回报审核 {task_id}")
+
+
+def run_audit_check(base: str, s: Settings, dry_run: bool = False) -> int:
+    """抖音审核违规巡检：发现违规通知 → 自动删除对应作品。返回处理数。"""
+    from . import audit_check
+
+    try:
+        published = fetch_published(base, s, "douyin", days=7)
+    except Exception as e:
+        log.warning("拉取已发布清单失败：%s", str(e)[:120])
+        return 0
+    if not published:
+        log.info("无近期抖音已发布作品，跳过审核巡检")
+        return 0
+
+    log.info("审核巡检开始（已发布 %d 条）", len(published))
+    results = audit_check.run_audit(published, headless=s.publish.headless, dry_run=dry_run)
+    handled = 0
+    for r in results:
+        if r.get("error"):
+            log.error("审核巡检出错：%s", r["error"][:150])
+            continue
+        matched = r.get("matched")
+        note = (f"标题：{(matched or {}).get('title', '')[:60]}｜"
+                f"发布：{(matched or {}).get('published_at', '')}｜"
+                f"原因：{r['notice'].get('text', '')[:200]}")
+        if not matched:
+            log.warning("违规通知未匹配到作品，仅告警：%s", r["notice"].get("text", "")[:120])
+            try:
+                telegram.notify_info(s, f"⚠️ 抖音审核违规通知（未匹配到本地作品）\n"
+                                        f"{r['notice'].get('text', '')[:300]}")
+            except Exception:
+                pass
+            continue
+        handled += 1
+        sc = matched.get("shortcode", "")
+        if r.get("dry_run"):
+            log.info("[DRY] 将删除 %s（task %s）", sc, matched.get("task_id"))
+            continue
+        try:
+            report_audit(base, s, matched["task_id"], note, bool(r.get("deleted")))
+        except Exception as e:
+            log.warning("回报审核结果失败：%s", str(e)[:120])
+        if r.get("deleted"):
+            log.warning("[%s] 审核违规，作品已删除：%s", sc, matched.get("title", "")[:40])
+            try:
+                telegram.notify_info(
+                    s, f"🗑️ 抖音审核违规，已自动删除作品\n"
+                       f"任务：{sc}\n标题：{matched.get('title', '')[:50]}\n"
+                       f"原因：{r['notice'].get('text', '')[:200]}")
+            except Exception:
+                pass
+        else:
+            log.error("[%s] 审核违规，但删除失败（需人工处理）", sc)
+            try:
+                telegram.notify_info(
+                    s, f"⚠️ 抖音审核违规，自动删除失败，请人工处理\n"
+                       f"任务：{sc}\n标题：{matched.get('title', '')[:50]}")
+            except Exception:
+                pass
+    return handled
 
 
 def download_file(base: str, s: Settings, entry: dict, dest_dir: Path) -> Path:
@@ -155,11 +238,17 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict) -> Non
 
         copy = _platform_copy(payload, platform)
         extra = {}
+        plat_cfg = s.platforms.get(platform)
         if platform == "kuaishou":
-            plat_cfg = s.platforms.get("kuaishou")
             if plat_cfg and plat_cfg.spark_task:
                 extra["spark_task"] = True
                 extra["spark_task_title"] = plat_cfg.spark_task_title
+        elif platform == "douyin":
+            # 挂载标签（商品/位置/小程序/团购/热点），配置驱动，失败不阻塞发布
+            if plat_cfg and getattr(plat_cfg, "anchors", None):
+                extra["anchors"] = dict(plat_cfg.anchors)
+            if plat_cfg and getattr(plat_cfg, "hot_topic", ""):
+                extra["hot_topic"] = plat_cfg.hot_topic
         log.info("[%s] %s 开始发布：%s", task["shortcode"], pub.display_name, copy["title"][:40])
         url = pub.publish(
             video=video,
@@ -194,8 +283,28 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict) -> Non
             log.error("回报失败结果也失败（网络断），下轮重试")
 
 
+# 审核巡检节流：全局记录上次执行时间
+_last_audit_at: float = 0.0
+AUDIT_INTERVAL = 30 * 60  # 30 分钟
+
+
+def maybe_audit(base: str, s: Settings) -> None:
+    """按间隔跑抖音审核巡检（失败不影响发布主流程）。"""
+    global _last_audit_at
+    if not s.platforms.get("douyin") or not s.platforms["douyin"].enabled:
+        return
+    now = time.time()
+    if now - _last_audit_at < AUDIT_INTERVAL:
+        return
+    _last_audit_at = now
+    try:
+        run_audit_check(base, s)
+    except Exception:
+        log.exception("审核巡检异常（忽略，不影响发布）")
+
+
 def run_once(base: str, s: Settings) -> int:
-    """一轮：拉清单 → 逐个可发布平台处理。返回处理数。"""
+    """一轮：拉清单 → 逐个可发布平台处理 → 审核巡检。返回处理数。"""
     tasks = fetch_pending(base, s)
     n = 0
     for task in tasks:
@@ -210,6 +319,7 @@ def run_once(base: str, s: Settings) -> int:
             process_platform(base, s, task, plat)
             n += 1
             time.sleep(5)  # 平台间小间隔
+    maybe_audit(base, s)
     return n
 
 
@@ -218,6 +328,10 @@ def main() -> None:
                                      description="远程发布 worker（家庭端）")
     parser.add_argument("--once", action="store_true", help="跑一轮就退出（调试）")
     parser.add_argument("--interval", type=int, default=120, help="轮询间隔秒数（默认 120）")
+    parser.add_argument("--audit", action="store_true",
+                        help="只跑一轮抖音审核巡检（违规通知→自动删除作品）后退出")
+    parser.add_argument("--audit-dry-run", action="store_true",
+                        help="配合 --audit：只匹配不删除")
     args = parser.parse_args()
 
     from .main import setup_logging
@@ -228,6 +342,12 @@ def main() -> None:
         log.error("REMOTE_API_URL / REMOTE_API_TOKEN 未配置（.env），无法连接 VPS")
         raise SystemExit(1)
     base = s.remote_api_url.rstrip("/")
+
+    if args.audit:
+        log.info("审核巡检模式（dry_run=%s）", args.audit_dry_run)
+        n = run_audit_check(base, s, dry_run=args.audit_dry_run)
+        log.info("审核巡检结束，处理 %d 条", n)
+        return
 
     log.info("发布 worker 启动 → %s（间隔 %ds）", base, args.interval)
     try:
