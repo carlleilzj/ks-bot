@@ -223,3 +223,13 @@ def apply_anchors(page: Page, anchors: dict | None, hot_topic: str = "") -> list
         except Exception as e:
             log.warning("挂载热点异常：%s", str(e)[:100])
     return done
+
+
+def pick_goods_for(text: str = "") -> str:
+    """根据视频文本推荐带货关键词（标记万物）。"""
+    lower = (text or "").lower()
+    if any(k in lower for k in ("狗", "猫", "宠", "动物", "pet", "dog", "cat", "puppy", "kitten")):
+        return "狗粮"
+    if any(k in lower for k in ("洗", "洁", "净", "刷", "拖", "收纳")):
+        return "清洁用品"
+    return "生活日用"
