@@ -32,7 +32,7 @@ platforms:
   kuaishou:
     enabled: true
     spark_task: true            # 发布时挂星火「关联变现任务」（需先在 App 收藏任务）
-    # spark_task_title: 本命英雄  # 可选，标题包含则优先；空则轮询收藏列表
+    spark_task_title: 狐缘山间  # 优先挂载星火变现任务《狐缘山间》吃播放奖金池收益
     anchors:
       热点: "治愈"
       地点: "郴州"
