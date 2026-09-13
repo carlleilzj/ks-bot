@@ -334,38 +334,56 @@ def _click_publish(page: Page) -> None:
     else:
         btn_click = lambda: btn.click(force=True)
 
-    # 注册网络响应监听：视频号发表成功返回 201 到 post 接口
-    published = {"ok": False}
-    def _on_response(r):
-        try:
-            if not published["ok"] and r.status in (200, 201) and "post" in r.url and "mmfinderassistant" in r.url:
-                published["ok"] = True
-        except Exception:
-            pass
-    page.on("response", _on_response)
     btn_click()
     if btn:
         log.info("点击发表按钮（DOM）")
 
-    # 等待成功：优先看网络响应 201，其次看页面文字/URL 变化
+    # 注册网络响应监听：视频号发表成功返回 200/201（过滤掉普通上报接口）
+    published = {"ok": False}
+    def _on_response(r):
+        try:
+            path = r.url.split("?")[0]
+            if not published["ok"] and r.status in (200, 201) and any(
+                p in path for p in ("/post/create", "/post/create_post", "/post/publish", "/post/post_create")
+            ):
+                published["ok"] = True
+        except Exception:
+            pass
+    page.on("response", _on_response)
+
+    # 等待成功：优先看网络响应 200/201，其次看页面文字/URL 变化，循环中持续检测并点击二次确认弹窗
     deadline = time.time() + 60
     while time.time() < deadline:
-        page.wait_for_timeout(2000)  # 用 Playwright 事件循环而非 time.sleep，确保回调能执行
+        page.wait_for_timeout(1000)
+
+        # 视频号原创声明/分成计划二次确认弹窗：“直接发表”或“确定”
+        for text in ("直接发表", "确认发表", "确定", "确认", "继续发表"):
+            try:
+                confirm = page.get_by_role("button", name=text, exact=False).first
+                if confirm.count() and confirm.is_visible():
+                    confirm.click(force=True)
+                    log.info("点击了发布确认弹窗按钮：%s", text)
+                    page.wait_for_timeout(1500)
+                    break
+            except Exception:
+                continue
+
         if published["ok"]:
-            log.info("检测到发表成功（网络响应 201）")
+            log.info("检测到发表成功（网络响应 200/201）")
+            page.wait_for_timeout(3000)
             return
+
         for text in SELECTORS["success_texts"]:
             if page.get_by_text(text, exact=False).count():
+                log.info("检测到发表成功文字标志：%s", text)
+                page.wait_for_timeout(3000)
                 return
+
         if "post/list" in page.url or "post/manage" in page.url:
+            log.info("检测到已跳转至作品列表：%s", page.url)
+            page.wait_for_timeout(3000)
             return
-        # 视频号可能弹出确认弹窗
-        for text in ("确认发表", "确定", "确认"):
-            confirm = page.get_by_role("button", name=text, exact=False).first
-            if confirm.count() and confirm.is_visible():
-                confirm.click()
-                log.info("点击确认发表")
-                break
+
     shot(page, "weixin_publish_result_unknown")
     raise WeixinError("点击发表后 60 秒内未检测到成功标志，请查看 logs/ 截图确认")
 
