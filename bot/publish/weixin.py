@@ -295,26 +295,16 @@ def _click_publish(page: Page) -> None:
         page.wait_for_timeout(300)
     page.wait_for_timeout(1000)
 
-    # 2. 先关掉弹窗
+    # 2. 先关掉可能存在的弹窗
     for _ in range(2):
         try:
             page.keyboard.press("Escape")
         except Exception:
             pass
         time.sleep(0.5)
-    dismiss_dialogs(page, extra_texts=("我知道了", "知道了", "确定", "同意", "原创声明"))
+    dismiss_dialogs(page, extra_texts=("我知道了", "知道了", "确定", "同意", "原创声明", "取消", "关闭"))
 
-    # 3. 检查是否有未勾选的合规/协议复选框
-    try:
-        checkboxes = page.locator("input[type='checkbox']").all()
-        for cb in checkboxes:
-            if cb.is_visible() and not cb.is_checked():
-                cb.check()
-                page.wait_for_timeout(300)
-    except Exception as e:
-        log.debug("勾选复选框失败（可能无复选框）：%s", e)
-
-    # 4. 等待发表按钮可用（视频号按钮禁用时 class 含 btn_disabled）
+    # 3. 等待发表按钮可用（视频号按钮禁用时 class 含 btn_disabled）
     deadline = time.time() + 35
     btn = None
     while time.time() < deadline:
@@ -332,7 +322,6 @@ def _click_publish(page: Page) -> None:
         if btn:
             break
         time.sleep(2)
-        time.sleep(2)
 
     if not btn:
         pos = _find_publish_button_px(page)
@@ -343,7 +332,7 @@ def _click_publish(page: Page) -> None:
             shot(page, "weixin_publish_btn_fail")
             raise WeixinError("发表按钮不可用（可能仍有必填项未完成），截图见 logs/")
     else:
-        btn_click = lambda: btn.click()
+        btn_click = lambda: btn.click(force=True)
 
     # 注册网络响应监听：视频号发表成功返回 201 到 post 接口
     published = {"ok": False}
