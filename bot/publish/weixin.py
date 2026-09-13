@@ -176,8 +176,19 @@ def publish(
             dismiss_dialogs(page)
             rand_sleep()
 
-            # 3. 标题（≥6 字，视频号最低要求）
-            min_title = title[:30] if len(title) >= 6 else title + "精彩视频"
+            # 3. 短标题（视频号硬性要求：6~16 字，超过16字发布按钮会被禁用）
+            t = (title or "").strip()
+            if len(t) > 16:
+                clean_t = t.replace("，", " ").replace("。", " ")
+                parts = clean_t.split()
+                if parts and 6 <= len(parts[0]) <= 16:
+                    min_title = parts[0]
+                else:
+                    min_title = t[:16]
+            elif len(t) < 6:
+                min_title = (t + "治愈纯享")[:16]
+            else:
+                min_title = t
             _fill_title(page, min_title)
             # 填完标题后描述框才会渲染，等待它出现
             page.wait_for_timeout(3000)
