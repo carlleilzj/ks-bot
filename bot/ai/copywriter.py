@@ -59,7 +59,7 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
     ),
     "weixin": PlatformProfile(
         name="weixin", display_name="微信视频号", max_title_len=16, max_tags=4,
-        tone="温和内敛、正向治愈，包含前缀必须严格在6~16字以内",
+        tone="温和内敛、正向治愈，包含前缀必须严格在6~16字以内，短标题严禁使用【】方括号，可用书名号《》或纯文本",
         desc_hint="简洁有质感，突出真挚情感或静心体验",
     ),
 }

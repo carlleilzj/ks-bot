@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -176,19 +177,8 @@ def publish(
             dismiss_dialogs(page)
             rand_sleep()
 
-            # 3. 短标题（视频号硬性要求：6~16 字，超过16字发布按钮会被禁用）
-            t = (title or "").strip()
-            if len(t) > 16:
-                clean_t = t.replace("，", " ").replace("。", " ")
-                parts = clean_t.split()
-                if parts and 6 <= len(parts[0]) <= 16:
-                    min_title = parts[0]
-                else:
-                    min_title = t[:16]
-            elif len(t) < 6:
-                min_title = (t + "治愈纯享")[:16]
-            else:
-                min_title = t
+            # 3. 短标题（视频号硬性要求：6~16 字且符号受限）
+            min_title = _sanitize_short_title(title)
             _fill_title(page, min_title)
             # 填完标题后描述框才会渲染，等待它出现
             page.wait_for_timeout(3000)
@@ -207,6 +197,31 @@ def publish(
         finally:
             context.close()
             browser.close()
+
+
+def _sanitize_short_title(title: str) -> str:
+    """视频号短标题规范：
+    - 字数严格限制 6~16 字（超限或不足发布按钮均被禁用）
+    - 符号仅支持书名号、引号、冒号、加号、问号、百分号、摄氏度，逗号可用空格代替
+    - 坚决不可使用【】方括号、感叹号等，一律清理或替换
+    """
+    t = (title or "").strip()
+    # 替换方括号、圆括号为纯空格
+    t = re.sub(r'[【】\[\]()（）]', ' ', t)
+    # 逗号、句号、感叹号一律替换为空格
+    t = re.sub(r'[,，.。!！;；~～·\-_/]', ' ', t)
+    # 移除非法符号（仅保留中英文数字、空格及官方允许的标点：书名号《》、引号""‘’“”、冒号:：、加号+、问号?？、百分号%、摄氏度℃）
+    t = re.sub(r'[^\w\s《》“”"\'’‘+?？%:：℃]', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    if len(t) > 16:
+        parts = t.split()
+        if parts and 6 <= len(parts[0]) <= 16:
+            t = parts[0]
+        else:
+            t = t[:16].strip()
+    if len(t) < 6:
+        t = (t + " 治愈解压")[:16].strip()
+    return t
 
 
 def _ensure_video_tab(page: Page) -> None:
@@ -234,7 +249,9 @@ def _fill_title(page: Page, title: str) -> None:
                     page.keyboard.press("Control+a")
                     page.keyboard.press("Backspace")
                     page.keyboard.type(title, delay=40)
-                    log.info("已填写视频号标题（%d 字）", len(title))
+                    page.keyboard.press("Tab")
+                    page.wait_for_timeout(1000)
+                    log.info("已填写视频号标题（%d 字）：%s", len(title), title)
                     return
             except Exception:
                 continue
@@ -272,7 +289,13 @@ def _find_publish_button_px(page: Page) -> tuple[int, int] | None:
 
 
 def _click_publish(page: Page) -> None:
-    # 先关掉弹窗
+    # 1. 向下滚动确保发表按钮渲染并位于可视区
+    for _ in range(5):
+        page.mouse.wheel(0, 800)
+        page.wait_for_timeout(300)
+    page.wait_for_timeout(1000)
+
+    # 2. 先关掉弹窗
     for _ in range(2):
         try:
             page.keyboard.press("Escape")
@@ -281,14 +304,25 @@ def _click_publish(page: Page) -> None:
         time.sleep(0.5)
     dismiss_dialogs(page, extra_texts=("我知道了", "知道了", "确定", "同意", "原创声明"))
 
-    # 等待发表按钮可用（视频号按钮禁用时 class 含 btn_disabled）
-    deadline = time.time() + 30
+    # 3. 检查是否有未勾选的合规/协议复选框
+    try:
+        checkboxes = page.locator("input[type='checkbox']").all()
+        for cb in checkboxes:
+            if cb.is_visible() and not cb.is_checked():
+                cb.check()
+                page.wait_for_timeout(300)
+    except Exception as e:
+        log.debug("勾选复选框失败（可能无复选框）：%s", e)
+
+    # 4. 等待发表按钮可用（视频号按钮禁用时 class 含 btn_disabled）
+    deadline = time.time() + 35
     btn = None
     while time.time() < deadline:
         for text in (SELECTORS["publish_btn_text"], "发布"):
             try:
                 b = page.get_by_role("button", name=text, exact=False).first
-                if b.count() and b.is_visible():
+                if b.count():
+                    b.scroll_into_view_if_needed()
                     cls = b.get_attribute("class") or ""
                     if "btn_disabled" not in cls:
                         btn = b
@@ -297,6 +331,7 @@ def _click_publish(page: Page) -> None:
                 continue
         if btn:
             break
+        time.sleep(2)
         time.sleep(2)
 
     if not btn:
