@@ -119,17 +119,15 @@ def extract_meta(url: str) -> VideoMeta:
     """
     clean_url = parse_url(url)
 
-    # IG 优先走自研解析器：yt-dlp 的 Instagram extractor 依赖已被 IG 废弃的
-    # www.instagram.com/api/graphql，实测恒 400。自研走移动端 API，稳定可用。
+    # IG 优先走自研解析器；若自研失败（除纯图文帖外），回退到 yt-dlp 兜底
     if ig_api.is_instagram(clean_url):
         try:
             return ig_api.extract(clean_url)
         except ValueError as e:
             msg = str(e)
-            # 「帖子不可访问」是确定性结论，不必回退 yt-dlp 徒劳重试
-            if "不可访问" in msg or "纯图文" in msg:
+            if "纯图文" in msg:
                 raise
-            log.warning("自研 IG 解析失败，回退 yt-dlp：%s", msg[:150])
+            log.warning("自研 IG 解析失败，回退 yt-dlp 兜底：%s", msg[:150])
 
     base, acct = _base_opts(clean_url)
     opts = {
