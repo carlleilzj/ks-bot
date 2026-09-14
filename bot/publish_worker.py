@@ -56,11 +56,11 @@ def fetch_pending(base: str, s: Settings) -> list[dict]:
         return _check(r, "拉取待发布清单").get("tasks", [])
 
 
-def claim(base: str, s: Settings, task_id: int, platform: str) -> dict | None:
+def claim(base: str, s: Settings, task_id: int, platform: str, force: bool = False) -> dict | None:
     """原子认领。返回 task payload；被别人抢先/状态不对/gate 拦截返回 None。"""
     with httpx.Client(timeout=30) as c:
         r = c.post(f"{base}/api/claim", headers=_headers(s),
-                   json={"task_id": task_id, "platform": platform})
+                   json={"task_id": task_id, "platform": platform, "force": force})
         data = _check(r, f"认领 {task_id}/{platform}")
     if not data.get("ok"):
         if data.get("gate_blocked"):
@@ -208,14 +208,14 @@ def _platform_copy(task: dict, platform: str) -> dict:
     }
 
 
-def process_platform(base: str, s: Settings, task: dict, plat_info: dict) -> None:
+def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force: bool = False) -> None:
     """处理单个平台 job：认领 → 下载 → 发布 → 回报。异常就地回报失败，不中断其他平台。"""
     from .publish import get_publisher
     from .publish.base import LoginExpired
 
     task_id, platform = task["task_id"], plat_info["platform"]
     try:
-        payload = claim(base, s, task_id, platform)
+        payload = claim(base, s, task_id, platform, force=force)
         if not payload:
             log.info("[%s] %s 认领失败（已被处理或状态变化），跳过",
                      task.get("shortcode"), platform)
