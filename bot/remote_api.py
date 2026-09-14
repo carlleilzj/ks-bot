@@ -158,15 +158,16 @@ class RemoteApi:
             })
         return {"ok": True, "platform": platform, "count": len(items), "items": items}
 
-    def claim(self, task_id: int, platform: str) -> dict:
+    def claim(self, task_id: int, platform: str, force: bool = False) -> dict:
         """原子认领：UPDATE ... WHERE state='PENDING' 抢占，防两端并发重复发布。
 
         认领前复检 gate（窗口/限额/间隔），防止 worker 批量取走同平台多条 job 后
         在冷却窗内连续发布——gate 只在 pending_payload 快照时算过一次，
         取走到实际发布之间可能已有同平台新发布落地。
+        force=True 时绕过 gate 检查（用于补发或人工指定触发）。
         """
         # gate 复检（锁外执行，gate_fn 内部自加 db._lock，避免不可重入死锁）
-        if self.gate_fn:
+        if self.gate_fn and not force:
             reason = self.gate_fn(platform)
             if reason:
                 return {"ok": False, "error": f"发布等待：{reason}", "gate_blocked": True}
@@ -335,7 +336,8 @@ class RemoteApi:
                 if parsed.path == "/api/claim":
                     try:
                         self._send_json(200, api.claim(int(data.get("task_id") or 0),
-                                                       str(data.get("platform") or "")))
+                                                       str(data.get("platform") or ""),
+                                                       force=bool(data.get("force"))))
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return
