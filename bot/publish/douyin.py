@@ -49,7 +49,7 @@ SELECTORS = {
     # 标题是独立 input（semi-input），2026-09 改版后简介编辑器不再承载标题
     "title_input": "input[placeholder*='标题']",
     "publish_btn_text": "发布",
-    "upload_done_texts": ["重新上传", "上传完成", "已上传完成"],
+    "upload_done_texts": ["上传完成", "已上传完成"],
     "upload_fail_texts": ["上传失败", "上传出错", "上传中断"],
     "success_texts": ["发布成功", "视频已提交", "投稿成功"],
     # 滑块/验证码特征（出现任意一个即判定触发风控）
@@ -241,7 +241,7 @@ def publish(
                 _dismiss_game_promo(page)
 
             # 4. 点发布（manual_verify=True 时短信验证弹窗由人工完成）
-            _click_publish(page, manual_verify=manual_verify)
+            _click_publish(page, manual_verify=manual_verify, title=title)
 
             dy_url = _fetch_dy_url(context)
             shot(page, "dy_publish_done")
@@ -330,40 +330,52 @@ def _upload_with_retry(page: Page, video, max_attempts: int = 3) -> None:
     raise last_err if last_err else PublishError("视频上传失败（重传耗尽）")
 
 
-def _dismiss_game_promo(page: Page) -> None:
-    """挂载游戏手柄后会弹出「游戏推广」开通弹窗，遮住底部「发布」。"""
+def _dismiss_douyin_modals(page: Page) -> None:
+    """关闭可能遮挡发布按钮的弹窗（账号违规提示、权限收回、游戏推广等）。"""
+    # 1. 账号违规 / 权限收回居中弹窗
     try:
-        body = page.locator("body").inner_text(timeout=4000)
+        violation = page.locator("div, [class*='modal']").filter(has_text=re.compile(r"(你的账号违规|权限被收回|违规记录)"))
+        if violation.count():
+            close_btn = violation.first.locator("button[aria-label*='Close'], .semi-modal-close, [class*='close'], svg").first
+            if close_btn.count() and close_btn.is_visible():
+                close_btn.click()
+                page.wait_for_timeout(1000)
+                log.info("已关闭抖音账号违规/权限提示弹窗")
+    except Exception as e:
+        log.debug("关闭违规弹窗异常：%s", e)
+
+    # 2. 挂载游戏手柄后弹出「游戏推广」开通弹窗
+    try:
+        body = page.locator("body").inner_text(timeout=3000)
     except Exception:
         body = ""
-    if "游戏推广" not in body and "暂不开通" not in body:
-        return
-    for label in ("暂不开通，仅添加", "暂不开通", "仅添加"):
+    if "游戏推广" in body or "暂不开通" in body:
+        for label in ("暂不开通，仅添加", "暂不开通", "仅添加"):
+            try:
+                loc = page.get_by_role("button", name=label, exact=False)
+                if not loc.count():
+                    loc = page.get_by_text(label, exact=False)
+                if loc.count() and loc.first.is_visible():
+                    loc.first.click(timeout=3000)
+                    page.wait_for_timeout(1000)
+                    log.info("已关闭游戏推广弹窗（%s）", label)
+                    return
+            except Exception:
+                continue
         try:
-            loc = page.get_by_role("button", name=label, exact=False)
-            if not loc.count():
-                loc = page.get_by_text(label, exact=False)
-            if loc.count() and loc.first.is_visible():
-                loc.first.click(timeout=4000)
-                page.wait_for_timeout(1500)
-                log.info("已关闭游戏推广弹窗（%s）", label)
-                return
+            x = page.get_by_text("游戏推广", exact=False).locator(
+                "xpath=ancestor::*[contains(@class,'modal') or contains(@class,'dialog') or contains(@class,'popup')][1]//button"
+            )
+            if x.count():
+                x.first.click(timeout=2000)
+                page.wait_for_timeout(1000)
+                log.info("已点游戏推广弹窗关闭按钮")
         except Exception:
-            continue
-    try:
-        x = page.get_by_text("游戏推广", exact=False).locator(
-            "xpath=ancestor::*[contains(@class,'modal') or contains(@class,'dialog') or contains(@class,'popup')][1]//button"
-        )
-        if x.count():
-            x.first.click(timeout=2000)
-            page.wait_for_timeout(1000)
-            log.info("已点游戏推广弹窗关闭按钮")
-    except Exception:
-        pass
+            pass
 
 
-def _click_publish(page: Page, manual_verify: bool = False) -> None:
-    _dismiss_game_promo(page)
+def _click_publish(page: Page, manual_verify: bool = False, title: str = "") -> None:
+    _dismiss_douyin_modals(page)
     dismiss_dialogs(page, extra_texts=("暂不开通，仅添加", "暂不开通"))
     page.wait_for_timeout(800)
     candidates = [
@@ -393,11 +405,10 @@ def _click_publish(page: Page, manual_verify: bool = False) -> None:
         shot(page, "dy_publish_btn_fail")
         raise DouyinError("未找到发布按钮，截图见 logs/（抖音页面可能已改版）")
 
-    # 发布按钮已点击。不在沉重的上传页轮询成功文案——
-    # 抖音发布后页面跳转到内容管理页的过程中，在上传页操作正在销毁的 DOM
-    # 会触发 "Target crashed" → 报失败 → 重试 → 重复发布。
-    # 改为：等几秒 → 查验证码/短信 → 导航到内容管理页验证作品是否出现。
     time.sleep(3)
+
+    # 再次清理可能弹出的违规/拦截提示
+    _dismiss_douyin_modals(page)
 
     # 验证码检查（只查一次，不轮询——避免在跳转页操作 DOM 崩溃）
     if _has_captcha(page):
@@ -419,11 +430,36 @@ def _click_publish(page: Page, manual_verify: bool = False) -> None:
             raise DouyinError("抖音发布触发短信验证（风控），需人工在浏览器里输入验证码完成发布；"
                               "自动流程已中止，本条会重试")
 
-    # 发布按钮已点击，无验证码/短信拦截 → 发布已提交，视为成功。
-    # 不再做内容管理页 DOM 验证——审核中无链接、页面结构变、加载慢都会漏判，
-    # 导致误报失败 → 重试 → 重复发布。URL 获取交给 _fetch_dy_url（best-effort）。
-    log.info("发布按钮已点击，无验证码/短信拦截，视为发布成功")
-    return
+    # 等待页面跳转到内容管理页或出现成功文案
+    deadline = time.time() + 45
+    jumped = False
+    while time.time() < deadline:
+        page.wait_for_timeout(2000)
+        _dismiss_douyin_modals(page)
+        dismiss_dialogs(page)
+        for text in SELECTORS["success_texts"]:
+            if page.get_by_text(text, exact=False).count():
+                log.info("检测到抖音发布成功文字：%s", text)
+                return
+        if "/creator-micro/content/manage" in page.url:
+            log.info("已跳转至抖音内容管理页：%s", page.url)
+            jumped = True
+            return
+
+    # 未自动跳转：主动访问内容管理页核实最新作品标题
+    if not jumped:
+        try:
+            page.goto("https://creator.douyin.com/creator-micro/content/manage", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(4000)
+            clean_title = re.sub(r"[【】《》#\s]", "", title)[:10]
+            body = page.evaluate("() => document.body.innerText")
+            if clean_title and clean_title in body:
+                log.info("抖音内容管理页已核实出现新作品「%s」（发布成功）", clean_title)
+                return
+        except Exception:
+            pass
+        shot(page, "dy_publish_result_unknown")
+        raise DouyinError(f"点击发布后未检测到成功标志（未跳转内容管理页且未在列表中找到新作品「{title[:12]}」）")
 
 
 def _fetch_dy_url(context) -> str | None:
