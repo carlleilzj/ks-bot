@@ -328,7 +328,8 @@ def maybe_audit(base: str, s: Settings) -> None:
         _scheduled_audits = [t for t in _scheduled_audits if now < t]
         log.info("触发发布后定向复检（剩余待复检任务：%d 个）", len(_scheduled_audits))
     else:
-        log.info("触发常规兜底巡检（距上次 %.1f 分钟）", (now - _last_audit_at) / 60)
+        gap_str = f"距上次 {(now - _last_audit_at) / 60:.1f} 分钟" if _last_audit_at > 0 else "初始启动"
+        log.info("触发常规兜底巡检（%s）", gap_str)
 
     _last_audit_at = now
     try:
