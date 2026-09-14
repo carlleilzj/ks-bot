@@ -28,6 +28,7 @@ import httpx
 
 from .config import MEDIA_DIR, Settings, load_settings
 from .notify import telegram
+from .audit_check import _parse_dt
 
 log = logging.getLogger("publish_worker")
 
@@ -263,6 +264,9 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         )
         report(base, s, task_id, platform, ok=True, url=url or "")
         log.info("[%s] %s 发布成功：%s", task["shortcode"], pub.display_name, url or "-")
+        if platform == "douyin":
+            schedule_douyin_audit(5 * 60, reason=f"发布后 5 分钟初审复检 [{task['shortcode']}]")
+            schedule_douyin_audit(15 * 60, reason=f"发布后 15 分钟二审复检 [{task['shortcode']}]")
         # 发布完成后清理该任务缓存视频
         shutil.rmtree(dest_dir, ignore_errors=True)
     except LoginExpired as e:
@@ -283,19 +287,49 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
             log.error("回报失败结果也失败（网络断），下轮重试")
 
 
-# 审核巡检节流：全局记录上次执行时间
+# 审核巡检节流与发布追踪调度
 _last_audit_at: float = 0.0
-AUDIT_INTERVAL = 30 * 60  # 30 分钟
+AUDIT_INTERVAL = 30 * 60  # 30 分钟兜底巡检
+_scheduled_audits: list[float] = []
+
+
+def schedule_douyin_audit(delay_seconds: int, reason: str = "") -> None:
+    """预约在指定秒数后触发一次定向巡检（如发布后 5 分钟、15 分钟）。"""
+    if delay_seconds <= 0:
+        delay_seconds = 5
+    target = time.time() + delay_seconds
+    # 去重：若已有预约在目标时间 ±45 秒内，则不重复加入
+    if any(abs(target - existing) < 45 for existing in _scheduled_audits):
+        return
+    _scheduled_audits.append(target)
+    _scheduled_audits.sort()
+    log.info("已预约抖音审核复检（%s）：将在 %d 秒后执行（预计 %s）",
+             reason or "追踪",
+             delay_seconds,
+             time.strftime("%H:%M:%S", time.localtime(target)))
 
 
 def maybe_audit(base: str, s: Settings) -> None:
-    """按间隔跑抖音审核巡检（失败不影响发布主流程）。"""
-    global _last_audit_at
+    """按常规周期或发布追踪计划跑抖音审核巡检（失败不影响发布主流程）。"""
+    global _last_audit_at, _scheduled_audits
     if not s.platforms.get("douyin") or not s.platforms["douyin"].enabled:
         return
     now = time.time()
-    if now - _last_audit_at < AUDIT_INTERVAL:
+
+    # 检查是否有到期的预约巡检
+    due = [t for t in _scheduled_audits if now >= t]
+    is_scheduled_due = bool(due)
+    is_periodic_due = (now - _last_audit_at >= AUDIT_INTERVAL)
+
+    if not is_scheduled_due and not is_periodic_due:
         return
+
+    if is_scheduled_due:
+        _scheduled_audits = [t for t in _scheduled_audits if now < t]
+        log.info("触发发布后定向复检（剩余待复检任务：%d 个）", len(_scheduled_audits))
+    else:
+        log.info("触发常规兜底巡检（距上次 %.1f 分钟）", (now - _last_audit_at) / 60)
+
     _last_audit_at = now
     try:
         run_audit_check(base, s)
@@ -354,6 +388,23 @@ def main() -> None:
         telegram.notify_info(s, f"🟢 发布 worker 已启动\n远端：{base}\n间隔 {args.interval}s")
     except Exception:
         pass
+
+    # 启动时恢复近期发布追踪：如果 20 分钟内有新发布抖音作品，自动补齐复检预约
+    try:
+        recent_pub = fetch_published(base, s, "douyin", days=1)
+        now_ts = time.time()
+        for item in recent_pub:
+            dt = _parse_dt(item.get("published_at", ""))
+            if dt:
+                age = now_ts - dt.timestamp()
+                title_short = item.get("title", "")[:12]
+                if 0 <= age < 5 * 60:
+                    schedule_douyin_audit(int(5 * 60 - age), reason=f"启动补齐 5m 复检 [{title_short}]")
+                    schedule_douyin_audit(int(15 * 60 - age), reason=f"启动补齐 15m 复检 [{title_short}]")
+                elif 5 * 60 <= age < 15 * 60:
+                    schedule_douyin_audit(int(15 * 60 - age), reason=f"启动补齐 15m 复检 [{title_short}]")
+    except Exception as e:
+        log.debug("启动时恢复近期发布追踪失败：%s", e)
 
     consecutive_failures = 0
     while True:
