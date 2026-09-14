@@ -238,7 +238,7 @@ def publish(
                     shot(page, "dy_anchors_done")
                 except Exception as e:
                     log.warning("挂载流程异常（继续发布）：%s", str(e)[:150])
-                _dismiss_game_promo(page)
+                _dismiss_douyin_modals(page)
 
             # 4. 点发布（manual_verify=True 时短信验证弹窗由人工完成）
             _click_publish(page, manual_verify=manual_verify, title=title)
