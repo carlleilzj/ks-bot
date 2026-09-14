@@ -69,9 +69,15 @@ class WeixinError(PublishError):
 
 def _is_logged_in(page: Page) -> bool:
     try:
-        if "login" in page.url or "passport" in page.url:
+        url = page.url.lower()
+        if "login" in url or "passport" in url:
             return False
-        return page.locator(SELECTORS["file_input"]).count() > 0
+        for t in ("登录视频号助手", "扫码登录", "请使用微信扫码"):
+            if page.get_by_text(t, exact=False).count():
+                return False
+        if page.locator("img.qrcode, .qrcode-img, [class*='qrcode']").count():
+            return False
+        return page.locator(SELECTORS["file_input"]).count() > 0 or "/platform/" in url
     except Exception:
         return False
 
@@ -149,9 +155,9 @@ def publish(
         try:
             page.goto(PUBLISH_URL, wait_until="domcontentloaded", timeout=60000)
             settle(page)
-            if not _has_login_cookies(context):
+            if not _has_login_cookies(context) or not _is_logged_in(page):
                 shot(page, "weixin_login_expired")
-                raise LoginExpired("视频号登录态已失效，请运行 python -m bot.main --login weixin 重新扫码")
+                raise LoginExpired("视频号登录态已失效，请重新扫码登录")
             dismiss_dialogs(page)
 
             # 确保在视频上传页（先检查 file input 是否已就绪，是则跳过 tab 切换）
