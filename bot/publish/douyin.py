@@ -297,6 +297,34 @@ def _wait_file_input_with_retry(page: Page, max_refresh: int = 3) -> None:
     page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=60_000)
 
 
+def _wait_dy_upload_done(page: Page, timeout: int = UPLOAD_TIMEOUT) -> None:
+    """等待抖音视频上传完成。"""
+    deadline = time.time() + timeout
+    last_log = 0.0
+    time.sleep(2)
+    while time.time() < deadline:
+        for fail in SELECTORS["upload_fail_texts"]:
+            if page.get_by_text(fail, exact=False).count():
+                shot(page, "dy_upload_fail")
+                raise DouyinError(f"视频上传失败（页面出现「{fail}」）")
+        try:
+            body = page.locator("body").inner_text(timeout=3000)
+        except Exception:
+            body = ""
+        # 上传完成标志：出现「重新上传」或「上传成功」，且不再处于「取消上传」/上传中阶段
+        has_done = "重新上传" in body or "上传成功" in body or "已上传完成" in body
+        is_uploading = "取消上传" in body or "上传过程中" in body or ("已上传：" in body and "%" in body)
+        if has_done and not is_uploading:
+            log.info("抖音视频上传完成")
+            return
+        if time.time() - last_log > 15:
+            log.info("等待抖音视频上传...（最长 %d 分钟）", timeout // 60)
+            last_log = time.time()
+        time.sleep(2)
+    shot(page, "dy_upload_timeout")
+    raise DouyinError(f"等待抖音上传超时（{timeout // 60} 分钟）")
+
+
 def _upload_with_retry(page: Page, video, max_attempts: int = 3) -> None:
     """上传视频；网络抖动导致的上传失败/超时自动重传。
 
@@ -311,9 +339,7 @@ def _upload_with_retry(page: Page, video, max_attempts: int = 3) -> None:
             file_input.set_input_files(str(video))
             log.info("已提交视频上传：%s（第 %d 次）", video.name, attempt)
 
-            wait_upload_done(page, SELECTORS["upload_done_texts"],
-                             SELECTORS["upload_fail_texts"],
-                             shot_prefix="dy", timeout=UPLOAD_TIMEOUT)
+            _wait_dy_upload_done(page, timeout=UPLOAD_TIMEOUT)
             return  # 成功
         except PublishError as e:
             last_err = e
