@@ -52,7 +52,7 @@ SELECTORS = {
     ],
     "category_entry_text": "选择分类",
     "publish_btn_text": "发布",
-    "upload_done_texts": ["重新上传", "上传完成", "转码完成"],
+    "upload_done_texts": ["上传完成", "转码完成"],
     "upload_fail_texts": ["上传失败", "上传出错"],
     "success_texts": ["发布成功", "提交成功", "审核中"],
 }
@@ -153,7 +153,54 @@ def _wait_file_input_with_retry(page: Page, max_refresh: int = 3) -> None:
     page.wait_for_selector(SELECTORS["file_input"], state="attached", timeout=60_000)
 
 
-def _upload_with_retry(page: Page, video, max_attempts: int = 3) -> None:
+def _wait_ks_upload_done(page: Page, timeout: int = UPLOAD_TIMEOUT) -> None:
+    """等待快手视频真正上传完成（直到「上传中」消失，且无失败提示）。"""
+    deadline = time.time() + timeout
+    upload_started = False
+    last_log = 0.0
+
+    while time.time() < deadline:
+        # 1. 检查失败
+        for fail in SELECTORS["upload_fail_texts"]:
+            if page.get_by_text(fail, exact=False).count():
+                shot(page, "ks_upload_fail")
+                raise PublishError(f"快手视频上传失败（页面出现「{fail}」）")
+
+        # 2. 检查上传状态与进度
+        status = page.evaluate("""() => {
+            const body = document.body.innerText || '';
+            const lines = body.split('\\n').map(s => s.trim()).filter(Boolean);
+            const hasUploading = lines.includes('上传中') || body.includes('上传中');
+            const matchPercent = body.match(/\\b(\\d{1,3})%\\b/);
+            return {
+                hasUploading,
+                percent: matchPercent ? matchPercent[1] : null
+            };
+        }""")
+
+        if status["hasUploading"]:
+            upload_started = True
+            if time.time() - last_log > 15:
+                pct_str = f"（{status['percent']}%）" if status["percent"] else ""
+                log.info("等待快手视频上传与转码%s...（最长 %d 分钟）", pct_str, timeout // 60)
+                last_log = time.time()
+        else:
+            if upload_started:
+                log.info("快手视频上传完成")
+                page.wait_for_timeout(2000)
+                return
+            # 尚未捕获到上传中（可能视频较小瞬间传完，或者刚开始）：等待最多 10 秒
+            if time.time() - (deadline - timeout) > 10:
+                log.info("快手视频上传完成（未处于上传状态）")
+                return
+
+        page.wait_for_timeout(2000)
+
+    shot(page, "ks_upload_timeout")
+    raise PublishError(f"等待快手视频上传超时（{timeout // 60} 分钟）")
+
+
+def _upload_with_retry(page: Page, video, max_attempts: int = 3, timeout: int = UPLOAD_TIMEOUT) -> None:
     """上传视频；网络抖动导致的上传失败/超时自动重传。"""
     last_err: Exception | None = None
     for attempt in range(1, max_attempts + 1):
@@ -163,9 +210,7 @@ def _upload_with_retry(page: Page, video, max_attempts: int = 3) -> None:
             file_input.set_input_files(str(video))
             log.info("已提交视频上传：%s（第 %d 次）", video.name, attempt)
 
-            wait_upload_done(page, SELECTORS["upload_done_texts"],
-                             SELECTORS["upload_fail_texts"],
-                             shot_prefix="ks", timeout=UPLOAD_TIMEOUT)
+            _wait_ks_upload_done(page, timeout=timeout)
             return
         except PublishError as e:
             last_err = e
@@ -314,7 +359,7 @@ def publish(
                 _attach_spark_task(page, prefer=spark_task_title)
 
             # 6. 点击发布
-            _click_publish(page)
+            _click_publish(page, title=title)
 
             ks_url = _fetch_ks_url(context)
             shot(page, "ks_publish_done")
@@ -532,7 +577,7 @@ def _upload_cover(page: Page, cover: Path) -> None:
         shot(page, "ks_cover_fail")
 
 
-def _click_publish(page: Page) -> None:
+def _click_publish(page: Page, title: str = "") -> None:
     # 点发布前先关掉话题联想浮层（#标签 注入后快手会弹「推荐话题」浮层，可能挡住底部发布按钮）
     try:
         page.keyboard.press("Escape")
@@ -550,47 +595,65 @@ def _click_publish(page: Page) -> None:
     _remove_joyride(page)
     page.wait_for_timeout(500)
 
-    # 在同一次 JS evaluate 内注入 CSS 屏蔽 joyride + 查找按钮并点击
-    clicked = page.evaluate("""() => {
-        if (!document.getElementById('__ks_joyride_killer')) {
-            const s = document.createElement('style');
-            s.id = '__ks_joyride_killer';
-            s.textContent = '#react-joyride-portal, .react-joyride__overlay, .react-joyride__spotlight { pointer-events: none !important; z-index: -1 !important; }';
-            document.head.appendChild(s);
-        }
-        const els = [...document.querySelectorAll('*')].filter(el => {
-            const t = (el.textContent || '').trim();
-            const cls = (el.className || '').toString();
-            return t === '发布' && cls.includes('button-primary');
-        });
-        if (!els.length) return false;
-        const btn = els[els.length - 1];
-        btn.scrollIntoView({block: 'center'});
-        btn.click();
-        return true;
-    }""")
-    if not clicked:
-        # DOM 兜底
-        for loc in (
-            page.get_by_role("button", name=SELECTORS["publish_btn_text"], exact=True),
-            page.locator("button", has_text=re.compile(r"^\s*发布\s*$")),
-            page.locator("button.button-primary", has_text=re.compile(r"发布")),
-        ):
-            try:
-                if loc.count():
-                    loc.first.click(force=True)
-                    clicked = True
-                    break
-            except Exception:
-                continue
-    if not clicked:
+    def _do_click() -> bool:
+        clicked = page.evaluate("""() => {
+            if (!document.getElementById('__ks_joyride_killer')) {
+                const s = document.createElement('style');
+                s.id = '__ks_joyride_killer';
+                s.textContent = '#react-joyride-portal, .react-joyride__overlay, .react-joyride__spotlight, .ant-tour, [class*="tour"], [class*="guide-step"] { pointer-events: none !important; z-index: -1 !important; display: none !important; }';
+                document.head.appendChild(s);
+            }
+            const els = [...document.querySelectorAll('*')].filter(el => {
+                const t = (el.textContent || '').trim();
+                const cls = (el.className || '').toString();
+                return t === '发布' && (cls.includes('button-primary') || cls.includes('_button-primary'));
+            });
+            if (!els.length) return false;
+            const btn = els[els.length - 1];
+            btn.scrollIntoView({block: 'center'});
+            btn.click();
+            return true;
+        }""")
+        if not clicked:
+            # DOM 兜底
+            for loc in (
+                page.locator("div[class*='button-primary'], div[class*='_button-primary']").filter(has_text=re.compile(r"^\s*发布\s*$")),
+                page.locator("button[class*='button-primary'], button[class*='_button-primary']").filter(has_text=re.compile(r"^\s*发布\s*$")),
+                page.get_by_role("button", name=SELECTORS["publish_btn_text"], exact=True),
+                page.locator("button", has_text=re.compile(r"^\s*发布\s*$")),
+            ):
+                try:
+                    if loc.count():
+                        loc.first.click(force=True)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+        return clicked
+
+    if not _do_click():
         shot(page, "ks_publish_btn_fail")
         raise KuaishouError("未找到发布按钮，截图见 logs/（页面可能已改版）")
     log.info("已点击发布按钮")
 
+    # 检查是否有「请在视频上传完成后再点击发布」提示，若有则等待后重试
+    for _ in range(30):
+        page.wait_for_timeout(1000)
+        if page.get_by_text("请在视频上传完成后再点击发布", exact=False).count():
+            log.info("视频仍处于后台转码中（提示请在上传完成后再发布），等待 3 秒后重试...")
+            for confirm_text in ("确认", "确定", "我知道了"):
+                c_btn = page.get_by_role("button", name=confirm_text, exact=False).first
+                if c_btn.count() and c_btn.is_visible():
+                    c_btn.click()
+                    break
+            page.wait_for_timeout(3000)
+            _do_click()
+        else:
+            break
+
     # 注意：pc/submit 返回 200 不代表发布成功——账号被风控时接口照常 200 但作品被拦截。
     # 可靠标志：URL 跳转到内容管理页（?status=2 审核中）+ 页面出现「审核中」。
-    deadline = time.time() + 45
+    deadline = time.time() + 60
     jumped = False
     while time.time() < deadline:
         page.wait_for_timeout(2000)
@@ -605,18 +668,21 @@ def _click_publish(page: Page) -> None:
                 )
         for text in SELECTORS["success_texts"]:
             if page.get_by_text(text, exact=False).count():
+                log.info("检测到快手发布成功文字：%s", text)
                 return
         if "/article/manage" in page.url:
+            log.info("已跳转至作品管理页：%s", page.url)
             jumped = True
             return
-    # 未检测到跳转：打开内容管理页核实最新作品是否出现（发布可能成功但 SPA 未更新 URL）
+    # 未检测到跳转：打开内容管理页核实最新作品是否出现（必须核实标题）
     if not jumped:
         try:
             page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(4000)
+            clean_title = re.sub(r"[【】《》#\s]", "", title)[:10]
             body = page.evaluate("() => document.body.innerText")
-            if "审核中" in body or "已发布" in body:
-                log.info("内容管理页已出现新作品（发布成功）")
+            if clean_title and clean_title in body:
+                log.info("内容管理页已核实出现新作品「%s」（发布成功）", clean_title)
                 return
         except Exception:
             pass

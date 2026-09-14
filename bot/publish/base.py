@@ -253,14 +253,14 @@ def wait_upload_done(page: Page, done_texts: list[str], fail_texts: list[str],
 
 
 def _remove_joyride(page: Page) -> None:
-    """禁用 react-joyride 新手引导遮罩的点击拦截（注入 CSS 而非删除 DOM，避免 React 重渲染）。"""
+    """禁用 react-joyride / ant-tour 等新手引导遮罩的点击拦截（注入 CSS 屏蔽浮层交互与显示）。"""
     try:
         style_id = "__ks_joyride_killer"
         page.evaluate("""(id) => {
             if (!document.getElementById(id)) {
                 const s = document.createElement('style');
                 s.id = id;
-                s.textContent = '#react-joyride-portal, .react-joyride__overlay, .react-joyride__spotlight { pointer-events: none !important; z-index: -1 !important; }';
+                s.textContent = '#react-joyride-portal, .react-joyride__overlay, .react-joyride__spotlight, .ant-tour, [class*="tour"], [class*="guide-step"] { pointer-events: none !important; z-index: -1 !important; display: none !important; }';
                 document.head.appendChild(s);
             }
         }""", style_id)
