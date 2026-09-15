@@ -140,10 +140,6 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
     except ffmpeg.FFmpegError as e:
         log.warning("[%s] 封面抽取失败（不影响流程）：%s", sc, e)
 
-    # 多帧质检产物清理（避免残留 work 目录）
-    for f in WORK_DIR.glob(f"{sc}_tc_qc*.jpg"):
-        pass  # 保留供排查；cleanup 模块会按前缀统一回收
-
     db.update(task["id"], state=State.TRANSCODED, work_path=str(tc),
               cover_path=str(cover) if cover.exists() else None, error=None)
 
@@ -154,6 +150,7 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
     if cover.exists() and not weixin_only:
         # 多帧质检：避免「1 秒单帧恰好含背景虚化路人」导致整条动画被误杀
         verdict = None
+        frames: list[Path] = []
         try:
             frames = _sample_frames(tc, n=3)
             if len(frames) >= 2:
@@ -163,6 +160,13 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
                 verdict = inspect_cover(cover, s)
         except Exception as e:
             log.warning("[%s] 多帧质检失败（放行）：%s", sc, str(e)[:120])
+        finally:
+            # 质检帧用完即删，避免在 work 目录堆积
+            for f in frames:
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         if verdict is not None and not verdict.ok_for_animal_anime:
             # 已执行擦水印时，delogo 的插值填充本身会被 vision 识别为
