@@ -24,7 +24,7 @@ from dotenv import set_key
 
 from .ai.asr import transcribe
 from .ai.copywriter import generate_copy
-from .ai.vision import check_real_person, inspect_video_frames
+from .ai.vision import check_real_person, inspect_video_frames, watermark_only_block
 from .config import (
     ENV_PATH,
     FINAL_DIR,
@@ -127,9 +127,11 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
     ffmpeg.strip_metadata(tc, tc)
 
     # 水印擦除（可选）：在转码阶段擦掉固定位置的烧录水印
+    watermark_removed = False
     if s.watermark.enabled and s.watermark.regions:
         try:
             ffmpeg.delogo_watermark(tc, tc, s.watermark.regions, box=s.watermark.box)
+            watermark_removed = True
         except Exception as e:
             log.warning("[%s] 水印擦除失败（继续发布）：%s", sc, str(e)[:150])
 
@@ -163,18 +165,27 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
             log.warning("[%s] 多帧质检失败（放行）：%s", sc, str(e)[:120])
 
         if verdict is not None and not verdict.ok_for_animal_anime:
-            why = verdict.reject_reason or "封面质检未通过"
-            db.update(task["id"], state=State.SKIPPED, error=why)
-            log.info("[%s] %s（AI 封面检测）→ 跳过", sc, why)
-            telegram.notify_info(s, f"🚫 跳过视频（AI 封面检测）\n"
-                                    f"来源：@{task.get('username','')} {task.get('permalink','')}\n"
-                                    f"shortcode：{sc}\n"
-                                    f"原因：{why}\n"
-                                    f"判定：animation={verdict.is_animation} "
-                                    f"person={verdict.has_real_person}"
-                                    f"({verdict.real_person_ratio}) "
-                                    f"watermark={verdict.has_watermark}")
-            return
+            # 已执行擦水印时，delogo 的插值填充本身会被 vision 识别为
+            # "半透明模糊/马赛克水印痕迹" —— 这是我们自己的处理痕迹，
+            # 不是平台水印。此种情况下水印规则不再否决，只记录日志。
+            if watermark_removed and watermark_only_block(verdict):
+                log.info("[%s] 质检仅剩水印判定，且已执行擦水印 → 放行"
+                         "（animation=%s person=%s watermark_desc=%r）",
+                         sc, verdict.is_animation, verdict.has_real_person,
+                         verdict.watermark_desc)
+            else:
+                why = verdict.reject_reason or "封面质检未通过"
+                db.update(task["id"], state=State.SKIPPED, error=why)
+                log.info("[%s] %s（AI 封面检测）→ 跳过", sc, why)
+                telegram.notify_info(s, f"🚫 跳过视频（AI 封面检测）\n"
+                                        f"来源：@{task.get('username','')} {task.get('permalink','')}\n"
+                                        f"shortcode：{sc}\n"
+                                        f"原因：{why}\n"
+                                        f"判定：animation={verdict.is_animation} "
+                                        f"person={verdict.has_real_person}"
+                                        f"({verdict.real_person_ratio}) "
+                                        f"watermark={verdict.has_watermark}")
+                return
 
 
 def step_transcribe(s: Settings, db: Database, task: dict) -> None:

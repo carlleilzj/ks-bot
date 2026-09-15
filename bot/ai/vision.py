@@ -103,6 +103,18 @@ class CoverVerdict:
         return ""
 
 
+def watermark_only_block(verdict: CoverVerdict) -> bool:
+    """判定「否决原因仅为水印」——即真人规则与动画规则都不构成否决。
+
+    用于 step_transcode：若已执行 delogo 擦水印，模型会把插值填充痕迹
+    识别为"半透明模糊/马赛克水印痕迹"（我们自己的处理痕迹，非平台水印），
+    此时不应再因水印规则二次否决整条任务。
+    """
+    return (verdict.has_watermark is True
+            and not verdict.real_person_blocks
+            and verdict.is_animation is not False)
+
+
 def check_real_person(video: Path | None, cover: Path, s: Settings) -> bool:
     """检测视频是否含真人镜头。返回 True 表示含真人（应跳过），False 表示可发布。
 

@@ -213,3 +213,36 @@ def test_multiframe_all_fail_returns_unknown(tmp_path, monkeypatch):
 def test_parse_ratio(raw, expected):
     from bot.ai.vision import _parse_ratio
     assert _parse_ratio(raw) == expected
+
+
+# ---------- 擦水印后的反馈循环 ----------
+
+def test_watermark_only_block_detects_delogo_residue():
+    """已擦水印后，模型把模糊痕迹当水印 → 判定为"仅水印否决"。"""
+    from bot.ai.vision import watermark_only_block
+    v = CoverVerdict(is_animation=True, has_real_person=False, has_watermark=True,
+                     watermark_desc="右下角沙滩处有半透明条状模糊/马赛克水印痕迹")
+    assert watermark_only_block(v) is True
+
+
+def test_watermark_only_block_false_when_real_person():
+    """真人主体否决时不适用（水印不是唯一原因）。"""
+    from bot.ai.vision import watermark_only_block
+    v = CoverVerdict(is_animation=False, has_real_person=True,
+                     real_person_ratio=0.8, real_person_is_subject=True,
+                     has_watermark=True)
+    assert watermark_only_block(v) is False
+
+
+def test_watermark_only_block_false_when_not_animation():
+    """明确非动画时不适用（赛道不符是独立原因）。"""
+    from bot.ai.vision import watermark_only_block
+    v = CoverVerdict(is_animation=False, has_real_person=False, has_watermark=True)
+    assert watermark_only_block(v) is False
+
+
+def test_watermark_only_block_false_without_watermark():
+    """没有水印判定时当然不适用。"""
+    from bot.ai.vision import watermark_only_block
+    v = CoverVerdict(is_animation=True, has_real_person=False, has_watermark=False)
+    assert watermark_only_block(v) is False
