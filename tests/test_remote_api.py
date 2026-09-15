@@ -21,6 +21,11 @@ def _settings(tmp_path: Path) -> Settings:
     s.remote_api_bind = "127.0.0.1"
     s.remote_api_port = 0  # OS 分配临时端口，避免并行冲突
     s.ai_api_key = ""
+    # 清空发布窗口/间隔，让 gate 相关测试不依赖墙上时钟
+    # （HK B 凌晨跑测试时 10:00~22:00 窗口会让 window 检查先短路）
+    s.publish.window = []
+    s.publish.min_gap_hours = 0
+    s.publish.daily_limit = 999
     return s
 
 
@@ -225,6 +230,7 @@ def test_publishing_job_blocks_gap_via_anchor(api_env):
     from datetime import datetime
 
     db, tid, s = api_env["db"], api_env["task_id"], api_env["s"]
+    s.publish.min_gap_hours = 2  # 本用例只验间隔逻辑，不受 _settings 默认值影响
 
     # 造一条"发布中"的 job（模拟上一条作品正在浏览器里发布）
     _hx.post(f"{api_env['base']}/api/claim", headers=_h(api_env["s"]),
@@ -271,6 +277,7 @@ def test_two_tasks_same_platform_gap_enforced(api_env, monkeypatch):
 
     db, s = api_env["db"], api_env["s"]
     base = api_env["base"]
+    s.publish.min_gap_hours = 2  # 只验间隔，窗口已在 _settings 里清空
 
     # 再造一个 READY 任务（同平台 kuaishou）
     meta2 = VideoMeta(source_url="https://x/2", platform="youtube", video_id="abc2",

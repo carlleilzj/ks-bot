@@ -213,6 +213,7 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
     """处理单个平台 job：认领 → 下载 → 发布 → 回报。异常就地回报失败，不中断其他平台。"""
     from .publish import get_publisher
     from .publish.base import LoginExpired
+    from .publish.kuaishou import SparkAttachError
 
     task_id, platform = task["task_id"], plat_info["platform"]
     try:
@@ -272,6 +273,25 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
     except LoginExpired as e:
         log.warning("[%s] %s 登录态失效：%s", task.get("shortcode"), platform, str(e)[:120])
         report(base, s, task_id, platform, ok=False, error=str(e)[:500], login_expired=True)
+    except SparkAttachError as e:
+        # 星火挂载未生效 → 阻断发布。这是配置/平台侧问题，重试通常无解，
+        # 但也不该静默白发：回报失败让 job 回 PENDING，并 Telegram 告警，
+        # 由人工决定（去 App 重新收藏任务 / 临时关掉 spark_task）。
+        log.error("[%s] %s 星火挂载阻断发布：%s", task.get("shortcode"), platform, e)
+        try:
+            report(base, s, task_id, platform, ok=False,
+                   error=f"星火挂载未生效，已阻断发布：{str(e)[:400]}")
+        except Exception:
+            log.error("回报星火阻断结果失败（网络断），下轮重试")
+        try:
+            telegram.notify_info(
+                s,
+                f"🚫 [{task.get('shortcode')}] {platform} 星火挂载未生效，已阻断发布\n"
+                f"避免无收益白发。请到快手 App 星火计划确认任务是否仍可挂 / 额度是否已满，"
+                f"或在 config.yaml 把 spark_task 设为 false 跳过挂载\n"
+                f"失败截图：logs/ks_spark_verify_fail.png")
+        except Exception:
+            log.debug("星火阻断告警推送失败", exc_info=True)
     except WorkerError as e:
         # 网络/API 层错误：回报普通失败，VPS 会把 job 放回 PENDING
         log.error("[%s] %s worker 错误：%s", task.get("shortcode"), platform, e)

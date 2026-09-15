@@ -71,6 +71,15 @@ class KuaishouError(PublishError):
     pass
 
 
+class SparkAttachError(PublishError):
+    """星火变现任务挂载未生效。
+
+    与「不阻断发布」的其他可选步骤（分区/封面）不同：星火挂载失败意味着
+    作品拿不到播放奖金池收益，属于静默收益损失，必须阻断发布而不是放行。
+    """
+    pass
+
+
 def _fill_desc_js(page: Page, text: str) -> bool:
     """JS 直接注入描述（不点击元素，绕过 joyride 引导遮罩的点击拦截）。
 
@@ -354,9 +363,20 @@ def publish(
             if cover and Path(cover).exists():
                 _upload_cover(page, Path(cover))
 
-            # 5.5 挂星火「关联变现任务」（需 App 先收藏；失败不阻断发布）
+            # 5.5 挂星火「关联变现任务」（需 App 先收藏；失败**阻断发布**）
+            #     与分区/封面不同，星火挂载失败 = 作品拿不到奖金池收益，
+            #     属静默收益损失，故此处必须硬失败：
+            #     SparkAttachError → worker 回报失败 → job 回 PENDING 待重试。
+            #     重试无解时（平台侧任务下架/额度满）人工介入：
+            #     去 App 重新收藏任务，或把 config.yaml 的 spark_task 设为 false。
             if spark_task:
-                _attach_spark_task(page, prefer=spark_task_title)
+                attached = _attach_spark_task(page, prefer=spark_task_title)
+                if not attached:
+                    shot(page, "ks_spark_blocked")
+                    raise SparkAttachError(
+                        "星火变现任务挂载未生效，已阻断发布（避免无收益白发）。"
+                        "请检查：快手 App 星火计划里任务是否仍可挂、额度是否已满、"
+                        "或把 config.yaml 的 spark_task 设为 false 以跳过")
 
             # 6. 点击发布
             _click_publish(page, title=title)
@@ -466,8 +486,109 @@ def _click_placeholder(page: Page, placeholder: str) -> bool:
     return False
 
 
+def _spark_form_state(page: Page) -> dict:
+    """读回发布表单里星火字段的真实状态（不依赖我们是否"点成功"）。
+
+    返回 {"service_type":..., "task":...}：
+      service_type —— 「选择服务类型」那一栏当前显示的文本（未选时是占位符）
+      task         —— 「关联变现任务获得更多收入」那一栏当前显示的文本
+
+    关键：这是**回读表单**，而非相信交互动作的返回值。2026-09-13 起出现过
+    交互全部成功、日志报「已挂星火变现任务」、但平台端作品不带「流量助推」
+    的静默失效——只有回读才能证伪。
+    """
+    try:
+        return page.evaluate("""() => {
+            const out = {service_type: '', task: ''};
+            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+            // ant-select 选中项文本优先取 .ant-select-selection-item
+            const picks = [...document.querySelectorAll('.ant-select-selection-item')]
+                .map(e => norm(e.textContent)).filter(Boolean);
+            // 按占位符语义归类：服务类型那一栏含「关联变现任务」关键词
+            for (const t of picks) {
+                if (t.includes('关联变现任务') && !out.service_type) out.service_type = t;
+                else if (!out.task) out.task = t;
+            }
+            // 兜底：从整个表单文本里找"关联变现任务获得更多收入"附近的内容
+            const body = norm(document.body ? document.body.innerText : '');
+            const m = body.match(/关联变现任务获得更多收入\\s*([^\\n]{0,60})/);
+            if (m) out.task_hint = norm(m[1]);
+            out.picks = picks;
+            return out;
+        }""") or {}
+    except Exception as e:
+        log.warning("回读星火表单状态失败：%s", e)
+        return {}
+
+
+def _spark_attached(page: Page, chosen: str, pre_state: dict | None = None) -> bool:
+    """判定星火任务是否真的挂上了：表单回读里必须出现所选任务标题。
+
+    pre_state 为挂载前回读的表单状态（可选）。传入时会做"变化检测"：
+    只有当任务栏与挂载前不同、且不再是占位文案时，才在无法按标题匹配时放行。
+    这样能挡住「任务栏本来就填着别的任务」被误判为挂载成功的情况。
+    """
+    st = _spark_form_state(page)
+    picks = st.get("picks") or []
+    key = (chosen or "").strip()
+    if key:
+        # 取标题前 8 个字符做特征匹配，避开平台追加的「任务时间：xxx」后缀差异
+        probe = key[:8]
+        for p in picks:
+            if probe and probe in p:
+                return True
+        task_hint = st.get("task_hint") or ""
+        if probe and probe in task_hint:
+            return True
+        # 标题没匹配上 —— 不放行。宁可阻断发布也不要挂着错任务白发。
+        return False
+
+    # 没有明确标题时（chosen 为空），退化为"任务栏非空、非占位、且相对挂载前有变化"
+    task_field = (st.get("task") or "").strip()
+    if not task_field or "获得更多收入" in task_field or len(task_field) <= 3:
+        return False
+    if pre_state is not None:
+        before = (pre_state.get("task") or "").strip()
+        if before and before == task_field:
+            return False  # 与挂载前一致 → 说明这次没改动
+    return True
+
+
+def _select_spark_option(page: Page, chosen: str) -> bool:
+    """在打开的下拉里点选任务标题。成功只代表点击动作发出，不代表已生效。"""
+    if _click_visible_option(page, chosen):
+        return True
+    loc = page.get_by_text(chosen, exact=True)
+    if loc.count():
+        try:
+            loc.last.click(force=True, timeout=2500)
+            return True
+        except Exception:
+            return False
+    # 平台可能给标题追加了后缀（如「任务时间：...」），用子串前缀兜底
+    probe = chosen[:10]
+    try:
+        ok = page.evaluate("""(probe) => {
+            const nodes = [...document.querySelectorAll(
+                '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
+            )];
+            const el = nodes.find(e => ((e.textContent || '').trim()).includes(probe));
+            if (!el) return false;
+            el.scrollIntoView({block: 'nearest'});
+            el.click();
+            return true;
+        }""", probe)
+        return bool(ok)
+    except Exception:
+        return False
+
+
 def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
-    """发布表单挂星火「关联变现任务」。成功返回任务标题，失败返回 None（不抛）。"""
+    """发布表单挂星火「关联变现任务」。
+
+    返回挂载成功的任务标题；返回 None 表示**未生效**（调用方必须阻断发布）。
+    注意：本函数不再"失败不阻断"——星火挂载失败 = 白丢收益，必须停下。
+    """
     try:
         dismiss_dialogs(page)
         _remove_joyride(page)
@@ -477,13 +598,17 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
             pass
         page.wait_for_timeout(400)
 
+        pre_state = _spark_form_state(page)  # 挂载前快照，用于变化检测
+
         if not _click_placeholder(page, "选择服务类型"):
-            log.info("未找到「选择服务类型」，跳过星火挂载")
+            log.warning("星火挂载失败：未找到「选择服务类型」入口")
+            shot(page, "ks_spark_no_entry")
             return None
         page.wait_for_timeout(800)
         opts = _dropdown_option_texts(page)
         if SPARK_TYPE_LABEL not in opts and SPARK_TYPE_LABEL not in (page.inner_text("body") or ""):
-            log.info("作者服务下拉里没有「关联变现任务」，跳过星火挂载")
+            log.warning("星火挂载失败：作者服务下拉里没有「关联变现任务」（任务可能已下架或账号无权限）")
+            shot(page, "ks_spark_no_type")
             try:
                 page.keyboard.press("Escape")
             except Exception:
@@ -493,7 +618,8 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
             # 下拉项可能还没套 ant-select-item class，退回文案点击
             loc = page.get_by_text(SPARK_TYPE_LABEL, exact=True)
             if not loc.count():
-                log.info("点不开「关联变现任务」，跳过星火挂载")
+                log.warning("星火挂载失败：点不开「关联变现任务」")
+                shot(page, "ks_spark_type_click_fail")
                 return None
             loc.last.click(force=True, timeout=2500)
         page.wait_for_timeout(1200)
@@ -508,13 +634,15 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
                 break
             page.wait_for_timeout(400)
         if not opened:
-            log.info("星火任务下拉未出现（可能还没在 App 收藏任务），跳过挂载")
+            log.warning("星火挂载失败：任务下拉未出现（可能还没在 App 收藏任务）")
+            shot(page, "ks_spark_no_dropdown")
             return None
         page.wait_for_timeout(800)
 
         titles = _dropdown_option_texts(page)
         if not titles:
-            log.info("星火收藏任务列表为空，跳过挂载")
+            log.warning("星火挂载失败：收藏任务列表为空（请到快手 App 星火计划收藏任务）")
+            shot(page, "ks_spark_empty_list")
             try:
                 page.keyboard.press("Escape")
             except Exception:
@@ -523,24 +651,33 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
 
         chosen, nxt = pick_spark_title(titles, prefer=prefer, cursor=_spark_rr_load())
         if not chosen:
+            log.warning("星火挂载失败：未能从 %d 个收藏任务中选出标题", len(titles))
+            shot(page, "ks_spark_pick_fail")
             return None
-        if not _click_visible_option(page, chosen):
-            loc = page.get_by_text(chosen, exact=True)
-            if loc.count():
-                loc.last.click(force=True, timeout=2500)
-            else:
-                log.warning("星火任务「%s」在下拉里点不到，跳过挂载", chosen)
-                try:
-                    page.keyboard.press("Escape")
-                except Exception:
-                    pass
-                return None
+        if not _select_spark_option(page, chosen):
+            log.warning("星火挂载失败：任务「%s」在下拉里点不到", chosen)
+            shot(page, "ks_spark_option_click_fail")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return None
+
+        # 关键：回读表单确认真的挂上了。交互成功 ≠ 平台已接受
+        # （2026-09-13 起出现"日志报成功但作品无流量助推"的静默失效）
+        page.wait_for_timeout(900)
+        if not _spark_attached(page, chosen, pre_state=pre_state):
+            log.warning("星火挂载未生效：点选「%s」后表单回读未确认（详见 ks_spark_verify_fail 截图）",
+                        chosen)
+            shot(page, "ks_spark_verify_fail")
+            return None
+
         _spark_rr_save(nxt)
         page.wait_for_timeout(600)
-        log.info("已挂星火变现任务：%s", chosen)
+        log.info("已挂星火变现任务（已回读校验）：%s", chosen)
         return chosen
     except Exception as e:
-        log.warning("挂星火变现任务失败（不影响发布）：%s", e)
+        log.warning("挂星火变现任务异常：%s", e)
         shot(page, "ks_spark_attach_fail")
         try:
             page.keyboard.press("Escape")
