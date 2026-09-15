@@ -1,12 +1,17 @@
 #!/usr/bin/env python
-"""星火挂载诊断：打开快手发布页，把星火相关表单的真实 DOM 状态 dump 出来。
+"""星火挂载诊断：打开快手发布页、上传一条视频，把星火相关表单的真实 DOM 状态 dump 出来。
 
 用途：2026-09-13 起出现「交互成功但作品不带流量助推」的静默失效，
 本脚本用于在不发布的前提下，抓取发布页上「关联变现任务」下拉的真实内容，
 判断任务是否还在可选列表里、是否被平台过滤。
 
+注意：星火表单区在**视频上传完成之前不会渲染**（未上传时整页只有上传区），
+所以本脚本必须先传一条视频才能看到星火下拉。
+
 用法（在阿里云发布端）：
-    cd /opt/ks-bot && .venv/bin/python tools/diag_spark.py
+    cd /opt/ks-bot && .venv/bin/python tools/diag_spark.py [视频路径]
+
+不传视频路径时自动从 media/remote/*/ 里挑一条已缓存的 _final.mp4。
 
 输出：
     - 终端打印服务类型下拉项 / 变现任务下拉项 / 表单选中项
@@ -21,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from playwright.sync_api import sync_playwright
 
-from bot.config import KS_STATE_PATH
+from bot.config import KS_STATE_PATH, MEDIA_DIR
 from bot.publish.base import launch_chromium, new_context, goto_with_retry, settle
 from bot.publish.kuaishou import (
     PUBLISH_URL,
@@ -30,6 +35,8 @@ from bot.publish.kuaishou import (
     _click_placeholder,
     _spark_form_state,
     _remove_joyride,
+    _upload_with_retry,
+    _wait_form_ready,
     dismiss_dialogs,
     shot,
 )
@@ -37,10 +44,25 @@ from bot.publish.kuaishou import (
 LOG_DIR = Path("/opt/ks-bot/logs")
 
 
+def _pick_video(argv: list[str]) -> Path | None:
+    if len(argv) > 1:
+        p = Path(argv[1])
+        return p if p.exists() else None
+    # 自动挑一条缓存视频
+    cands = sorted(MEDIA_DIR.glob("remote/*/*_final.mp4"), key=lambda x: -x.stat().st_mtime)
+    return cands[0] if cands else None
+
+
 def main() -> int:
     if not Path(KS_STATE_PATH).exists():
         print(f"[x] 找不到登录态：{KS_STATE_PATH}")
         return 1
+
+    video = _pick_video(sys.argv)
+    if not video:
+        print("[x] 找不到可上传的视频（media/remote/*/*_final.mp4），请显式传路径")
+        return 1
+    print(f"使用视频：{video}（{video.stat().st_size / 1024 / 1024:.1f} MB）")
 
     with sync_playwright() as p:
         browser = launch_chromium(p, headless=True)
@@ -52,15 +74,18 @@ def main() -> int:
             dismiss_dialogs(page)
             _remove_joyride(page)
 
-            print("=== 0. 发布页初始状态 ===")
-            print(f"URL  : {page.url}")
-            print(f"表单 : {_spark_form_state(page)}")
+            print("\n=== 0. 上传视频（星火表单区在上传完成前不渲染）===")
+            _upload_with_retry(page, video)
+            _wait_form_ready(page)
+            print(f"表单就绪。初始状态：{_spark_form_state(page)}")
             shot(page, "spark_diag_00_initial")
 
             print("\n=== 1. 点开「选择服务类型」 ===")
             if not _click_placeholder(page, "选择服务类型"):
-                print("[!] 未找到「选择服务类型」入口 —— 表单本身没渲染出来")
-                print("    （通常是该账号/该页面版本没有星火模块，或页面改版）")
+                print("[!] 未找到「选择服务类型」入口 —— 该账号/页面版本没有星火模块")
+                body = page.inner_text("body") or ""
+                for kw in ("服务类型", "关联变现", "变现", "星火"):
+                    print(f"    页面文本含「{kw}」: {body.count(kw)} 次")
                 shot(page, "spark_diag_01_no_entry")
                 return 2
             page.wait_for_timeout(1200)
@@ -87,6 +112,8 @@ def main() -> int:
             }""", SPARK_TYPE_LABEL)
             print(f"选中服务类型: {clicked}")
             page.wait_for_timeout(1500)
+            print(f"选后表单状态：{_spark_form_state(page)}")
+            shot(page, "spark_diag_02_type_selected")
 
             second_ph = "关联变现任务获得更多收入"
             opened = False

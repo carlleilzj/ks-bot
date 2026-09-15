@@ -98,9 +98,10 @@ def test_attached_false_when_form_untouched():
     assert ks._spark_attached(page, "狐缘山间") is False
 
 
-def test_attached_false_when_placeholder_still_showing():
-    """任务栏仍是占位文案『…获得更多收入』→ 不算挂上。"""
-    page = FakePage(picks=["关联变现任务", "关联变现任务获得更多收入"])
+@pytest.mark.parametrize("ph", ks.SPARK_TASK_PLACEHOLDERS)
+def test_attached_false_when_placeholder_still_showing(ph):
+    """任务栏仍是占位文案（新旧两版）→ 不算挂上。"""
+    page = FakePage(picks=["关联变现任务", ph])
     assert ks._spark_attached(page, "狐缘山间") is False
 
 
@@ -124,10 +125,23 @@ def test_attached_true_when_pre_state_changed():
     assert ks._spark_attached(page, "", pre_state=pre) is True
 
 
-def test_attached_via_task_hint_fallback():
-    """选中项读不到时，回退用页面文本里的『获得更多收入』后缀特征判定。"""
-    page = FakePage(picks=[], task_hint="狐缘山间任务时间：2026.05.06-2027.05.31")
-    assert ks._spark_attached(page, "狐缘山间") is True
+def test_attached_tolerates_platform_suffix_stripping():
+    """下拉项带『任务时间：…』后缀，选中后表单只显示任务名 —— 双向匹配都要命中。"""
+    # 表单里显示纯任务名，chosen 是带后缀的下拉项
+    page = FakePage(picks=["关联变现任务", "狐缘山间"])
+    assert ks._spark_attached(page, "狐缘山间任务时间：2026.05.06-2027.05.31") is True
+
+
+def test_spark_title_probe_strips_suffix():
+    """_spark_title_probe 去掉『任务时间：…』后缀。"""
+    assert ks._spark_title_probe(None, "狐缘山间任务时间：2026.05.06-2027.05.31") == "狐缘山间"
+    assert ks._spark_title_probe(None, "狐缘山间") == "狐缘山间"
+
+
+def test_attached_ignores_service_type_field():
+    """picks 里只有服务类型那一栏（『关联变现任务』）不算挂上具体任务。"""
+    page = FakePage(picks=["关联变现任务"])
+    assert ks._spark_attached(page, "狐缘山间") is False
 
 
 def test_form_state_survives_evaluate_exception():
@@ -144,9 +158,9 @@ def test_form_state_survives_evaluate_exception():
 # ---------- 端到端：挂载失败必须阻断发布 ----------
 
 def test_attach_returns_none_when_no_entry(monkeypatch):
-    """找不到『选择服务类型』入口 → 返回 None（调用方将阻断发布）。"""
+    """服务类型下拉打不开（选项为空）→ 返回 None（调用方将阻断发布）。"""
     page = FakePage()
-    monkeypatch.setattr(ks, "_click_placeholder", lambda p, t: False)
+    monkeypatch.setattr(ks, "_open_select_dropdown", lambda p, ph="": [])
     monkeypatch.setattr(ks, "shot", lambda *a, **k: None)
     monkeypatch.setattr(ks, "dismiss_dialogs", lambda p: None)
     monkeypatch.setattr(ks, "_remove_joyride", lambda p: None)
@@ -156,8 +170,8 @@ def test_attach_returns_none_when_no_entry(monkeypatch):
 def test_attach_returns_none_when_type_missing(monkeypatch):
     """作者服务下拉里没有『关联变现任务』→ 返回 None。"""
     page = FakePage()
-    monkeypatch.setattr(ks, "_click_placeholder", lambda p, t: True)
-    monkeypatch.setattr(ks, "_dropdown_option_texts", lambda p: [])
+    monkeypatch.setattr(ks, "_open_select_dropdown",
+                        lambda p, ph="": ["关联商品", "关联小程序"])
     monkeypatch.setattr(ks, "shot", lambda *a, **k: None)
     monkeypatch.setattr(ks, "dismiss_dialogs", lambda p: None)
     monkeypatch.setattr(ks, "_remove_joyride", lambda p: None)
@@ -169,8 +183,12 @@ def test_attach_returns_none_when_verify_fails(monkeypatch):
     page = FakePage(picks=["关联变现任务"])  # 任务栏空 → 回读失败
     monkeypatch.setattr(ks, "dismiss_dialogs", lambda p: None)
     monkeypatch.setattr(ks, "_remove_joyride", lambda p: None)
-    monkeypatch.setattr(ks, "_click_placeholder", lambda p, t: True)
-    monkeypatch.setattr(ks, "_dropdown_option_texts", lambda p: ["狐缘山间"])
+    def _open(p, ph=""):
+        # 第二层（占位符含"收益"）→ 任务列表；第一层 → 全部服务类型
+        if any(x in ph for x in ks.SPARK_TASK_PLACEHOLDERS):
+            return ["狐缘山间"]
+        return ["关联商品", ks.SPARK_TYPE_LABEL, "关联小程序"]
+    monkeypatch.setattr(ks, "_open_select_dropdown", _open)
     monkeypatch.setattr(ks, "_click_visible_option", lambda p, t: True)
     monkeypatch.setattr(ks, "_select_spark_option", lambda p, t: True)
     monkeypatch.setattr(ks, "shot", lambda *a, **k: None)
@@ -187,8 +205,12 @@ def test_attach_returns_title_when_verify_passes(monkeypatch):
     page = FakePage(picks=["关联变现任务", "狐缘山间任务时间：2026.05.06-2027.05.31"])
     monkeypatch.setattr(ks, "dismiss_dialogs", lambda p: None)
     monkeypatch.setattr(ks, "_remove_joyride", lambda p: None)
-    monkeypatch.setattr(ks, "_click_placeholder", lambda p, t: True)
-    monkeypatch.setattr(ks, "_dropdown_option_texts", lambda p: ["狐缘山间"])
+    def _open(p, ph=""):
+        # 第二层（占位符含"收益"）→ 任务列表；第一层 → 全部服务类型
+        if any(x in ph for x in ks.SPARK_TASK_PLACEHOLDERS):
+            return ["狐缘山间"]
+        return ["关联商品", ks.SPARK_TYPE_LABEL, "关联小程序"]
+    monkeypatch.setattr(ks, "_open_select_dropdown", _open)
     monkeypatch.setattr(ks, "_click_visible_option", lambda p, t: True)
     monkeypatch.setattr(ks, "_select_spark_option", lambda p, t: True)
     monkeypatch.setattr(ks, "shot", lambda *a, **k: None)

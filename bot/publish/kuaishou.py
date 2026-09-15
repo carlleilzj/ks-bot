@@ -37,6 +37,11 @@ PUBLISH_URL = "https://cp.kuaishou.com/article/publish/video"
 MANAGE_URL = "https://cp.kuaishou.com/article/manage"
 SPARK_RR_PATH = DATA_DIR / "ks_spark_rr.json"
 SPARK_TYPE_LABEL = "关联变现任务"
+# 发布页「作者服务」区两个下拉的占位符（2026-09-16 实机核对）
+SPARK_TYPE_PLACEHOLDER = "选择服务类型"
+# 注意：平台文案改过。旧版是「关联变现任务获得更多收入」，
+# 2026-09 起实际页面显示「关联成功可获得更多收益」。两版都带上以兼容。
+SPARK_TASK_PLACEHOLDERS = ("关联成功可获得更多收益", "关联变现任务获得更多收入")
 
 # 转码等待上限（秒）
 UPLOAD_TIMEOUT = 15 * 60
@@ -449,30 +454,94 @@ def _spark_rr_save(cursor: int) -> None:
 
 
 def _dropdown_option_texts(page: Page) -> list[str]:
+    """当前展开的 antd 下拉里的可见选项文本。
+
+    只取 rc-virtual-list 里真正可见的 `.ant-select-item-option`，
+    排除一份 height:0 的无障碍镜像（否则会读到重复/错位的文本）。
+    """
     try:
-        return page.evaluate("""() => [...document.querySelectorAll(
-            '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option-content'
-        )].map(e => (e.textContent || '').trim()).filter(Boolean)""") or []
+        return page.evaluate("""() => {
+            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+            return [...document.querySelectorAll(
+                '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
+            )].filter(e => e.offsetParent || e.getClientRects().length)
+              .map(e => norm(
+                  e.querySelector('.ant-select-item-option-content')?.textContent
+                  ?? e.textContent))
+              .filter(Boolean);
+        }""") or []
     except Exception:
         return []
 
 
 def _click_visible_option(page: Page, text: str) -> bool:
-    """点开着的 ant-select 下拉里标题完全匹配的项。"""
+    """点开着的 ant-select 下拉里标题完全匹配的项。
+
+    antd 的虚拟列表（rc-virtual-list）里可见项是 `.ant-select-item-option`，
+    但同一份 DOM 里还有一份 height:0 的无障碍镜像（[role=option]），
+    因此这里只认带 ant-select-item-option 类的可见节点。
+    """
     try:
         ok = page.evaluate("""(want) => {
+            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
             const nodes = [...document.querySelectorAll(
                 '.ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option'
-            )];
-            const el = nodes.find(e => ((e.textContent || '').trim()) === String(want || '').trim());
+            )].filter(e => e.offsetParent || e.getClientRects().length);
+            const el = nodes.find(e => norm(e.textContent) === String(want || '').trim())
+                    || nodes.find(e => norm(e.textContent).includes(String(want || '').trim()));
             if (!el) return false;
             el.scrollIntoView({block: 'nearest'});
-            el.click();
+            // antd 选中走 mousedown+mouseup+click 三连，只发 click 有时不生效
+            for (const t of ['mousedown', 'mouseup', 'click']) {
+                el.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window}));
+            }
             return true;
         }""", text)
         return bool(ok)
     except Exception:
         return False
+
+
+def _open_select_dropdown(page: Page, placeholder: str = "") -> list[str]:
+    """展开一个 antd Select 并返回它当前可见的选项文本。
+
+    antd 的 Select 靠 **mousedown** 展开，Playwright 的 click() 只发
+    click 事件，经常打不开下拉（这就是 2026-09-13 起星火静默失效的
+    直接原因：下拉没展开 → 选项列表为空 → 直接 return None 跳过挂载）。
+
+    这里直接在真实 `.ant-select-selector` 上派发 mousedown/mouseup/click，
+    再回读可见选项。placeholder 为空时作用于页面上第一个可用的 select。
+    """
+    try:
+        page.evaluate("""(ph) => {
+            const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+            const cands = [...document.querySelectorAll('.ant-select')].filter(
+                e => !(e.className || '').toString().includes('disabled'));
+            let target = null;
+            if (ph) {
+                target = cands.find(e => norm(
+                    e.querySelector('.ant-select-selection-placeholder')?.textContent) === ph)
+                    || cands.find(e => norm(e.textContent).includes(ph));
+            } else {
+                target = cands[0];
+            }
+            if (!target) return false;
+            const box = target.querySelector('.ant-select-selector') || target;
+            for (const t of ['mousedown', 'mouseup', 'click']) {
+                box.dispatchEvent(new MouseEvent(t, {bubbles: true, cancelable: true, view: window}));
+            }
+            return true;
+        }""", placeholder)
+        # 等浮层渲染（虚拟列表首帧可能空）
+        for _ in range(10):
+            page.wait_for_timeout(300)
+            opts = _dropdown_option_texts(page)
+            if opts:
+                return opts
+        return []
+    except Exception as e:
+        log.warning("展开下拉失败（placeholder=%r）：%s", placeholder, e)
+        return []
 
 
 def _click_placeholder(page: Page, placeholder: str) -> bool:
@@ -489,9 +558,10 @@ def _click_placeholder(page: Page, placeholder: str) -> bool:
 def _spark_form_state(page: Page) -> dict:
     """读回发布表单里星火字段的真实状态（不依赖我们是否"点成功"）。
 
-    返回 {"service_type":..., "task":...}：
+    返回 {"service_type":..., "task":..., "picks":[...]}：
       service_type —— 「选择服务类型」那一栏当前显示的文本（未选时是占位符）
-      task         —— 「关联变现任务获得更多收入」那一栏当前显示的文本
+      task         —— 具体变现任务那一栏当前显示的文本（选中后是任务名，如「狐缘山间」）
+      picks        —— 所有 antd 选中项的文本列表
 
     关键：这是**回读表单**，而非相信交互动作的返回值。2026-09-13 起出现过
     交互全部成功、日志报「已挂星火变现任务」、但平台端作品不带「流量助推」
@@ -499,26 +569,26 @@ def _spark_form_state(page: Page) -> dict:
     """
     try:
         return page.evaluate("""() => {
-            const out = {service_type: '', task: ''};
             const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
-            // ant-select 选中项文本优先取 .ant-select-selection-item
+            const out = {service_type: '', task: '', picks: []};
             const picks = [...document.querySelectorAll('.ant-select-selection-item')]
                 .map(e => norm(e.textContent)).filter(Boolean);
-            // 按占位符语义归类：服务类型那一栏含「关联变现任务」关键词
-            for (const t of picks) {
-                if (t.includes('关联变现任务') && !out.service_type) out.service_type = t;
-                else if (!out.task) out.task = t;
-            }
-            // 兜底：从整个表单文本里找"关联变现任务获得更多收入"附近的内容
-            const body = norm(document.body ? document.body.innerText : '');
-            const m = body.match(/关联变现任务获得更多收入\\s*([^\\n]{0,60})/);
-            if (m) out.task_hint = norm(m[1]);
             out.picks = picks;
+            // 作者服务区第一个下拉 = 服务类型；紧随其后那个 = 具体任务
+            for (const t of picks) {
+                if (!out.service_type && t === '关联变现任务') { out.service_type = t; continue; }
+                if (!out.task && t !== '关联变现任务') { out.task = t; break; }
+            }
             return out;
         }""") or {}
     except Exception as e:
         log.warning("回读星火表单状态失败：%s", e)
         return {}
+
+
+def _spark_title_probe(page: Page, text: str) -> str:
+    """去掉平台追加的「任务时间：…」后缀，得到纯任务名。"""
+    return re.split(r"任务时间[:：]", (text or "").strip())[0].strip()
 
 
 def _spark_attached(page: Page, chosen: str, pre_state: dict | None = None) -> bool:
@@ -530,23 +600,28 @@ def _spark_attached(page: Page, chosen: str, pre_state: dict | None = None) -> b
     """
     st = _spark_form_state(page)
     picks = st.get("picks") or []
-    key = (chosen or "").strip()
+    key = _spark_title_probe(page, chosen)
     if key:
-        # 取标题前 8 个字符做特征匹配，避开平台追加的「任务时间：xxx」后缀差异
-        probe = key[:8]
+        # 下拉项形如「狐缘山间任务时间：2026.05.06-2027.05.31」，
+        # 选中后表单里显示为「狐缘山间」——所以两个方向都要能匹配上。
         for p in picks:
-            if probe and probe in p:
+            p_clean = _spark_title_probe(page, p)
+            if not p_clean or p_clean == SPARK_TYPE_LABEL:
+                continue  # 跳过服务类型那一栏本身
+            if p_clean == key or key[:6] in p_clean or p_clean[:6] in key:
                 return True
-        task_hint = st.get("task_hint") or ""
-        if probe and probe in task_hint:
+        task_field = (st.get("task") or "").strip()
+        if task_field and (key == task_field or key[:6] in task_field):
             return True
         # 标题没匹配上 —— 不放行。宁可阻断发布也不要挂着错任务白发。
         return False
 
     # 没有明确标题时（chosen 为空），退化为"任务栏非空、非占位、且相对挂载前有变化"
     task_field = (st.get("task") or "").strip()
-    if not task_field or "获得更多收入" in task_field or len(task_field) <= 3:
+    if not task_field or len(task_field) <= 3:
         return False
+    if any(ph in task_field for ph in SPARK_TASK_PLACEHOLDERS):
+        return False  # 还是占位文案 → 没挂上
     if pre_state is not None:
         before = (pre_state.get("task") or "").strip()
         if before and before == task_field:
@@ -600,14 +675,18 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
 
         pre_state = _spark_form_state(page)  # 挂载前快照，用于变化检测
 
-        if not _click_placeholder(page, "选择服务类型"):
-            log.warning("星火挂载失败：未找到「选择服务类型」入口")
+        # ── 第一层下拉：作者服务 → 关联变现任务 ──
+        # 必须用 _open_select_dropdown（派发 mousedown）。antd Select 靠
+        # mousedown 展开，早先用的 Playwright click() 打不开下拉，
+        # 导致选项列表恒为空 → 静默跳过挂载（2026-09-13 起的线上问题）。
+        opts = _open_select_dropdown(page, SPARK_TYPE_PLACEHOLDER)
+        if not opts:
+            log.warning("星火挂载失败：点不开「%s」下拉或下拉为空", SPARK_TYPE_PLACEHOLDER)
             shot(page, "ks_spark_no_entry")
             return None
-        page.wait_for_timeout(800)
-        opts = _dropdown_option_texts(page)
-        if SPARK_TYPE_LABEL not in opts and SPARK_TYPE_LABEL not in (page.inner_text("body") or ""):
-            log.warning("星火挂载失败：作者服务下拉里没有「关联变现任务」（任务可能已下架或账号无权限）")
+        if SPARK_TYPE_LABEL not in opts:
+            log.warning("星火挂载失败：作者服务下拉里没有「%s」，实际选项=%s",
+                        SPARK_TYPE_LABEL, opts)
             shot(page, "ks_spark_no_type")
             try:
                 page.keyboard.press("Escape")
@@ -615,39 +694,33 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
                 pass
             return None
         if not _click_visible_option(page, SPARK_TYPE_LABEL):
-            # 下拉项可能还没套 ant-select-item class，退回文案点击
-            loc = page.get_by_text(SPARK_TYPE_LABEL, exact=True)
-            if not loc.count():
-                log.warning("星火挂载失败：点不开「关联变现任务」")
-                shot(page, "ks_spark_type_click_fail")
-                return None
-            loc.last.click(force=True, timeout=2500)
+            log.warning("星火挂载失败：点不开「%s」", SPARK_TYPE_LABEL)
+            shot(page, "ks_spark_type_click_fail")
+            return None
         page.wait_for_timeout(1200)
 
-        # 选完类型后，右侧下拉从 disabled 变成「关联变现任务获得更多收入」
-        second_ph = "关联变现任务获得更多收入"
-        deadline = time.time() + 8
-        opened = False
-        while time.time() < deadline:
-            if _click_placeholder(page, second_ph):
-                opened = True
+        # ── 第二层下拉：具体变现任务 ──
+        # 占位符文案平台改过（旧：「关联变现任务获得更多收入」，
+        # 新：2026-09 起为「关联成功可获得更多收益」），两版都试。
+        titles: list[str] = []
+        matched_ph = ""
+        for ph in SPARK_TASK_PLACEHOLDERS:
+            titles = _open_select_dropdown(page, ph)
+            if titles:
+                matched_ph = ph
                 break
-            page.wait_for_timeout(400)
-        if not opened:
-            log.warning("星火挂载失败：任务下拉未出现（可能还没在 App 收藏任务）")
-            shot(page, "ks_spark_no_dropdown")
-            return None
-        page.wait_for_timeout(800)
-
-        titles = _dropdown_option_texts(page)
         if not titles:
-            log.warning("星火挂载失败：收藏任务列表为空（请到快手 App 星火计划收藏任务）")
+            log.warning("星火挂载失败：任务下拉打不开或收藏任务列表为空"
+                        "（试过占位符 %s）—— 请到快手 App 星火计划收藏任务",
+                        list(SPARK_TASK_PLACEHOLDERS))
             shot(page, "ks_spark_empty_list")
             try:
                 page.keyboard.press("Escape")
             except Exception:
                 pass
             return None
+        log.info("星火任务下拉已展开（占位符「%s」）：%d 个候选 %s",
+                 matched_ph, len(titles), titles[:5])
 
         chosen, nxt = pick_spark_title(titles, prefer=prefer, cursor=_spark_rr_load())
         if not chosen:
