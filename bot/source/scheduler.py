@@ -129,17 +129,16 @@ class DiscoveryScheduler(threading.Thread):
                             title=meta.title or c.title,
                             source_url=meta.source_url)
 
-            # 封面 AI 质检（可选）：一次调用判 真人/水印/是否动画 三项。
-            # 动物动画赛道：真人、水印、明确非动画都直接丢弃。
+            # 封面 AI 质检（可选）：一次调用判 真人/水印/是否动画 多项。
+            # 动物动画赛道：真人主体、水印、明确非动画都直接丢弃。
+            # 动画内容的真人判定已豁免（动画角色/远景建模不算真人）。
             # 必须在封面下载之后做（需要图片文件）。
             if self.reject_real_person and cover.exists():
                 try:
                     from ..ai.vision import inspect_cover
                     verdict = inspect_cover(cover, self.s)
                     if not verdict.ok_for_animal_anime:
-                        why = ("真人镜头" if verdict.has_real_person else
-                               f"水印: {verdict.watermark_desc}" if verdict.has_watermark else
-                               "非动画内容")
+                        why = verdict.reject_reason or "封面质检未通过"
                         self.db.reject(tid, f"{why}（AI 封面检测）")
                         log.info("[discovery] 丢弃 %s：%s", meta.shortcode, why)
                         continue

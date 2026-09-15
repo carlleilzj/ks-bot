@@ -20,6 +20,18 @@ subtitle:
   margin_v_ratio: 0.07    # 距底部距离 = 视频高 * 0.07
   bold: true
 
+# 水印擦除（烧录在画面像素里的固定位置水印，用 ffmpeg delogo 取周边像素插值填充）
+# 注意：只能擦固定位置水印；delogo 需重编码视频，画质有轻微损失。
+# 坐标 [x, y, w, h]：数值全 <=1 视为相对比例（推荐，自动适配任意分辨率）。
+watermark:
+  enabled: false          # 默认关闭；确认素材确实带烧录水印再打开
+  box: 1                  # delogo 采样边框宽度，1 最轻、越大越糊
+  presets: []             # 预置区域：top_left / bottom_right / corner_pair / douyin
+  # 自定义区域（与 presets 叠加生效）
+  regions: []
+  # 示例（左上角圆形 Logo + 右下角账号名水印，IMILASHA 这类素材的典型布局）：
+  # presets: ["corner_pair"]
+
 # 发布节奏（窗口全局；每日上限和最小间隔按平台独立计算，互不影响）
 publish:
   headless: true            # 后台无头浏览器；首次调试发布流程建议改 false 观察操作

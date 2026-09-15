@@ -314,10 +314,14 @@ def _cand(vid="v1", title="anime short", score=5000) -> Candidate:
 
 @pytest.fixture()
 def patches(monkeypatch):
-    """mock extract_meta / telegram / inspect_cover，按需调整返回值。"""
+    """mock extract_meta / telegram / inspect_cover，按需调整返回值。
+
+    默认：动画 + 无真人 + 无水印（干净动画，放行）。
+    """
     import bot.source.scheduler as sched_mod
     from bot.ai.vision import CoverVerdict
     state = {"real_person": False, "watermark": False, "is_animation": True,
+             "real_person_ratio": None, "real_person_is_subject": None,
              "raise_error": False}
 
     monkeypatch.setattr(sched_mod, "extract_meta",
@@ -334,6 +338,8 @@ def patches(monkeypatch):
             has_real_person=state["real_person"],
             has_watermark=state["watermark"],
             watermark_desc="右下角 TikTok logo" if state["watermark"] else "",
+            real_person_ratio=state.get("real_person_ratio"),
+            real_person_is_subject=state.get("real_person_is_subject"),
             reason="mock",
         )
 
@@ -342,14 +348,47 @@ def patches(monkeypatch):
 
 
 def test_real_person_rejected(db, patches):
-    """封面检测到真人 → 直接 SKIPPED，不发审核卡片。"""
-    patches["real_person"] = True  # 检测到真人
+    """真人实拍出镜（非动画、真人为主体）→ 直接 SKIPPED，不发审核卡片。"""
+    patches["real_person"] = True
+    patches["is_animation"] = False          # 实拍内容
+    patches["real_person_ratio"] = 0.65      # 真人占据主要画面
+    patches["real_person_is_subject"] = True
     sched = _sched(db, [_cand("v1")])
     sched._cycle()
     assert db.pending_review_count() == 0
     tasks = db.recent(1)
     assert tasks[0]["state"] == State.SKIPPED
     assert "真人" in (tasks[0]["error"] or "")
+
+
+def test_animation_with_person_passes_review(db, patches):
+    """回归：动画内容中出现人形角色 → 不再误杀（instagram_Dc_obVBP4ZP 场景）。"""
+    patches["real_person"] = True            # 画面里"有人"
+    patches["is_animation"] = True           # 但是动画
+    patches["real_person_ratio"] = 0.02      # 且占比极低（远景建模）
+    patches["real_person_is_subject"] = False
+    sched = _sched(db, [_cand("v1")])
+    sched._cycle()
+    assert db.pending_review_count() == 1    # 正确放行进审核
+
+
+def test_real_person_background_passerby_not_blocked_by_person_rule(db, patches):
+    """回归：实拍内容里真人仅是小占比背景路人 → 真人规则不否决。
+
+    注意：本用例只验证「真人规则不触发」；因为 is_animation=False 仍会被
+    「非动画内容」规则拦下（赛道要求），所以断言的是 reject_reason 不含"真人"。
+    """
+    patches["is_animation"] = False
+    patches["real_person"] = True
+    patches["real_person_ratio"] = 0.03
+    patches["real_person_is_subject"] = False
+    sched = _sched(db, [_cand("v1")])
+    sched._cycle()
+    tasks = db.recent(1)
+    assert tasks[0]["state"] == State.SKIPPED
+    err = tasks[0]["error"] or ""
+    assert "真人" not in err          # 未因真人被拦
+    assert "非动画" in err            # 而是因赛道要求（非动画）被拦
 
 
 def test_watermark_rejected(db, patches):

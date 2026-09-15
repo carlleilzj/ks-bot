@@ -35,6 +35,33 @@ DEFAULT_CATEGORIES = [
 
 
 @dataclass
+class WatermarkConfig:
+    """水印擦除配置：在转码阶段用 ffmpeg delogo 擦除固定位置的烧录水印。"""
+
+    enabled: bool = False
+    # 区域列表：每项 [x, y, w, h]，数值全 <=1 视为相对比例，否则为绝对像素
+    regions: list = field(default_factory=list)
+    box: int = 1          # delogo 采样边框宽度
+    # 常见预设名（config.yaml 里写 name 即可，坐标按比例自动适配任意分辨率）
+    # 见 PRESET_REGIONS
+
+
+# 预置水印区域（相对比例，自动适配分辨率）：
+# 坐标按 [x, y, w, h] 相对比例给出，已用 1276x718 实测素材逐像素标定
+# （白色文字/Logo 包围盒 + 6px 余量）。实测水印位置全片稳定，不漂移。
+PRESET_REGIONS: dict[str, list] = {
+    # 左上角圆形头像/频道 Logo（实测包围盒 x24-93, y16-85，含弧形文字）
+    "top_left": [[0.0141, 0.0139, 0.0643, 0.1142]],
+    # 右下角账号名文字水印（实测包围盒 x939-1254, y650-700）
+    "bottom_right": [[0.7312, 0.8969, 0.2571, 0.0877]],
+    # 常见「左上 Logo + 右下账号名」组合（IMILASHA 这类素材的典型布局）
+    "corner_pair": [[0.0141, 0.0139, 0.0643, 0.1142], [0.7312, 0.8969, 0.2571, 0.0877]],
+    # 抖音/TikTok 右下角音波 logo（比账号名更靠右、更方正）
+    "douyin": [[0.780, 0.880, 0.200, 0.100]],
+}
+
+
+@dataclass
 class SubtitleConfig:
     enabled: bool = True
     font: str = "PingFang SC"
@@ -110,6 +137,7 @@ class Settings:
     # 行为
     poll_interval_min: int = 5
     subtitle: SubtitleConfig = field(default_factory=SubtitleConfig)
+    watermark: WatermarkConfig = field(default_factory=WatermarkConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     categories: list[str] = field(default_factory=lambda: list(DEFAULT_CATEGORIES))  # 快手分区（兼容旧配置）
@@ -129,6 +157,42 @@ def _load_yaml() -> dict:
     except yaml.YAMLError as e:  # 配置写错不要硬崩，用默认值并提示
         log.warning("config.yaml 解析失败，使用默认配置: %s", e)
         return {}
+
+
+def _build_watermark(raw: dict | None) -> WatermarkConfig:
+    """解析 watermark 段。
+
+    支持两种区域写法：
+      regions: [[0.02, 0.02, 0.16, 0.10], ...]   # 显式坐标（比例或像素）
+      presets: ["corner_pair"]                    # 预置名（见 PRESET_REGIONS）
+    """
+    raw = raw or {}
+    cfg = WatermarkConfig(
+        enabled=bool(raw.get("enabled", False)),
+        box=int(raw.get("box", 1) or 1),
+    )
+    regions: list = []
+
+    for preset in (raw.get("presets") or []):
+        key = str(preset).strip()
+        if key in PRESET_REGIONS:
+            regions.extend(PRESET_REGIONS[key])
+        else:
+            log.warning("未知水印预设 %r（可选：%s）", key, ", ".join(PRESET_REGIONS))
+
+    for item in (raw.get("regions") or []):
+        if isinstance(item, (list, tuple)) and len(item) == 4:
+            try:
+                regions.append([float(v) for v in item])
+            except (TypeError, ValueError):
+                log.warning("水印区域格式错误，已跳过：%r", item)
+        else:
+            log.warning("水印区域需为 [x, y, w, h]，已跳过：%r", item)
+
+    cfg.regions = regions
+    if cfg.enabled and not regions:
+        log.warning("watermark.enabled=true 但未配置任何区域，水印擦除将空转")
+    return cfg
 
 
 def _build_subtitle(raw: dict) -> SubtitleConfig:
@@ -208,6 +272,7 @@ def load_settings() -> Settings:
         s.asr_local_compute = str(asr_raw.get("local_compute") or "int8").strip() or "int8"
 
     s.subtitle = _build_subtitle(raw.get("subtitle") or {})
+    s.watermark = _build_watermark(raw.get("watermark"))
     s.publish = _build_publish(raw.get("publish") or {})
     s.discovery = _build_discovery(raw.get("discovery"))
     cats = raw.get("categories")

@@ -181,3 +181,92 @@ def burn_subtitles(src: Path, ass_path: Path, dst: Path) -> Path:
     tmp.rename(dst)
     log.info("字幕烧录完成 %s", dst.name)
     return dst
+
+
+# ---------- 水印擦除 ----------
+
+# 预置水印区域：坐标为 (x, y, w, h) 四元组。
+# 支持两种写法：
+#   1) 绝对像素：(100, 50, 200, 80)
+#   2) 相对比例：(0.03, 0.03, 0.12, 0.06) —— 默认，自动按视频尺寸换算，
+#      换分辨率/换素材都不用改配置。
+def _to_pixels(region: tuple, width: int, height: int) -> tuple[int, int, int, int]:
+    """水印区域统一换算成像素。数值全 <=1 视为相对比例。"""
+    x, y, w, h = (float(v) for v in region)
+    if all(v <= 1.0 for v in (x, y, w, h)):
+        x, y, w, h = x * width, y * height, w * width, h * height
+    # delogo 要求区域完全落在画面内，且至少要 1x1
+    px, py = int(max(0, min(x, width - 2))), int(max(0, min(y, height - 2)))
+    pw = int(max(2, min(w, width - px - 1)))
+    ph = int(max(2, min(h, height - py - 1)))
+    return px, py, pw, ph
+
+
+_DELOGO_SUPPORTS_BOX: bool | None = None
+
+
+def _delogo_supports_box() -> bool:
+    """探测当前 ffmpeg 的 delogo 滤镜是否支持 box 参数。
+
+    不同发行版差异很大：Debian/Ubuntu 的 ffmpeg 长期只有 x/y/w/h/show，
+    带 box 的版本传该参数会直接报 "Option 'box' not found" 并中止转码。
+    结果缓存，只探测一次。
+    """
+    global _DELOGO_SUPPORTS_BOX
+    if _DELOGO_SUPPORTS_BOX is None:
+        try:
+            proc = subprocess.run([_ffmpeg(), "-hide_banner", "-h", "filter=delogo"],
+                                  capture_output=True, text=True, timeout=20)
+            _DELOGO_SUPPORTS_BOX = "box" in (proc.stdout or "")
+        except Exception:
+            _DELOGO_SUPPORTS_BOX = False
+    return _DELOGO_SUPPORTS_BOX
+
+
+def delogo_watermark(src: Path, dst: Path, regions: list[tuple],
+                     box: int = 1) -> Path:
+    """擦除烧录在画面像素里的水印（ffmpeg delogo 滤镜，取周边像素插值填充）。
+
+    regions: [(x, y, w, h), ...]，相对比例或绝对像素均可（见 _to_pixels）。
+    box: delogo 采样边框宽度，仅在支持该参数的 ffmpeg 构建上生效（自动探测）。
+
+    注意：
+    - 只能擦除**固定位置**的水印；位置随帧漂移的水印需先做运动补偿，本函数不处理。
+    - delogo 会重编码视频（无法 -c:v copy），因此画质有轻微损失。
+    - 区域务必覆盖完整水印，边缘留 2~4px 余量，否则会残留"水印影"。
+
+    原地覆盖：src == dst 时先写临时文件再替换。
+    """
+    if not src.exists():
+        raise FFmpegError(f"待擦水印的视频不存在: {src}")
+    if not regions:
+        return src
+
+    info = video_info(src)
+    width, height = info["width"], info["height"]
+    if width <= 0 or height <= 0:
+        raise FFmpegError(f"无法获取视频尺寸: {src}")
+
+    supports_box = _delogo_supports_box()
+    filters = []
+    for region in regions:
+        px, py, pw, ph = _to_pixels(tuple(region), width, height)
+        f = f"delogo=x={px}:y={py}:w={pw}:h={ph}"
+        if supports_box:
+            f += f":box={int(box)}"
+        filters.append(f)
+        log.info("水印擦除区域：x=%d y=%d w=%d h=%d（视频 %dx%d）",
+                 px, py, pw, ph, width, height)
+    log.debug("delogo 滤镜（box 支持=%s）：%s", supports_box, ",".join(filters))
+
+    tmp = dst.with_name(dst.stem + ".delogo.mp4") if dst == src else dst
+    cmd = [_ffmpeg(), "-y", "-i", str(src), "-vf", ",".join(filters)]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"]
+    if info["has_audio"]:
+        cmd += ["-c:a", "copy"]
+    cmd += ["-movflags", "+faststart", str(tmp)]
+    _run(cmd)
+    if dst == src:
+        tmp.replace(dst)
+    log.info("水印擦除完成 %s（%d 个区域）", dst.name, len(regions))
+    return dst

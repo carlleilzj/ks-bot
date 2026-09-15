@@ -24,7 +24,7 @@ from dotenv import set_key
 
 from .ai.asr import transcribe
 from .ai.copywriter import generate_copy
-from .ai.vision import check_real_person
+from .ai.vision import check_real_person, inspect_video_frames
 from .config import (
     ENV_PATH,
     FINAL_DIR,
@@ -87,6 +87,36 @@ def step_download(s: Settings, db: Database, task: dict) -> None:
     log.info("[%s] 原始视频下载完成（来源 @%s）", sc, task.get("username"))
 
 
+def _sample_frames(video: Path, n: int = 3) -> list[Path]:
+    """按 1s / 25% / 50% 抽 n 帧，用于多帧质检（避免单帧误判）。
+
+    其中 1s 帧复用已有的 cover_path（转码阶段已抽过），其余帧抽到 work 目录。
+    抽帧失败返回已成功的子集；全失败返回空列表（调用方退化为单帧逻辑）。
+    """
+    info = ffmpeg.video_info(video)
+    duration = float(info.get("duration") or 0)
+    # 采样点：跳过片头前 1 秒（常有转场/黑帧），均匀铺在正片里
+    if duration > 3:
+        points = [1.0, duration * 0.25, duration * 0.5]
+    else:
+        points = [0.5]
+    frames: list[Path] = []
+    for i, t in enumerate(points[:n]):
+        f = video.with_name(f"{video.stem}_qc{i}.jpg")
+        if f.exists():
+            frames.append(f)
+            continue
+        try:
+            ffmpeg._run([  # noqa: SLF001 —— 复用模块内 ffmpeg 调用
+                ffmpeg._ffmpeg(), "-y", "-ss", str(t), "-i", str(video),  # noqa: SLF001
+                "-frames:v", "1", "-q:v", "3", str(f),
+            ], timeout=120)
+            frames.append(f)
+        except Exception as e:
+            log.debug("抽帧失败 t=%.1fs: %s", t, e)
+    return frames
+
+
 def step_transcode(s: Settings, db: Database, task: dict) -> None:
     sc = task["shortcode"]
     raw = Path(task["raw_path"])
@@ -95,10 +125,23 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
     ffmpeg.ensure_compatible(raw, tc)
     # 去除元数据里的作者/来源痕迹（IG 视频会带 title/comment 标签）
     ffmpeg.strip_metadata(tc, tc)
+
+    # 水印擦除（可选）：在转码阶段擦掉固定位置的烧录水印
+    if s.watermark.enabled and s.watermark.regions:
+        try:
+            ffmpeg.delogo_watermark(tc, tc, s.watermark.regions, box=s.watermark.box)
+        except Exception as e:
+            log.warning("[%s] 水印擦除失败（继续发布）：%s", sc, str(e)[:150])
+
     try:
         ffmpeg.extract_cover(tc, cover)
     except ffmpeg.FFmpegError as e:
         log.warning("[%s] 封面抽取失败（不影响流程）：%s", sc, e)
+
+    # 多帧质检产物清理（避免残留 work 目录）
+    for f in WORK_DIR.glob(f"{sc}_tc_qc*.jpg"):
+        pass  # 保留供排查；cleanup 模块会按前缀统一回收
+
     db.update(task["id"], state=State.TRANSCODED, work_path=str(tc),
               cover_path=str(cover) if cover.exists() else None, error=None)
 
@@ -107,13 +150,30 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
     targets = task.get("target_platforms")
     weixin_only = targets and all(t.strip() == "weixin" for t in targets.split(",") if t.strip())
     if cover.exists() and not weixin_only:
-        is_real = check_real_person(tc, cover, s)
-        if is_real:
-            db.update(task["id"], state=State.SKIPPED, error="真人镜头，跳过发布")
-            log.info("[%s] 检测到真人镜头，跳过", sc)
-            telegram.notify_info(s, f"🚫 跳过真人镜头视频\n"
+        # 多帧质检：避免「1 秒单帧恰好含背景虚化路人」导致整条动画被误杀
+        verdict = None
+        try:
+            frames = _sample_frames(tc, n=3)
+            if len(frames) >= 2:
+                verdict = inspect_video_frames(frames, s)
+            else:
+                from .ai.vision import inspect_cover
+                verdict = inspect_cover(cover, s)
+        except Exception as e:
+            log.warning("[%s] 多帧质检失败（放行）：%s", sc, str(e)[:120])
+
+        if verdict is not None and not verdict.ok_for_animal_anime:
+            why = verdict.reject_reason or "封面质检未通过"
+            db.update(task["id"], state=State.SKIPPED, error=why)
+            log.info("[%s] %s（AI 封面检测）→ 跳过", sc, why)
+            telegram.notify_info(s, f"🚫 跳过视频（AI 封面检测）\n"
                                     f"来源：@{task.get('username','')} {task.get('permalink','')}\n"
-                                    f"shortcode：{sc}\n原因：AI 检测到视频含真人镜头，已自动跳过")
+                                    f"shortcode：{sc}\n"
+                                    f"原因：{why}\n"
+                                    f"判定：animation={verdict.is_animation} "
+                                    f"person={verdict.has_real_person}"
+                                    f"({verdict.real_person_ratio}) "
+                                    f"watermark={verdict.has_watermark}")
             return
 
 
