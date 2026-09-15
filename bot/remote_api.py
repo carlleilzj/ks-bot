@@ -186,6 +186,30 @@ class RemoteApi:
             return {"ok": False, "error": "任务不存在"}
         return {"ok": True, "task": self._task_payload(task)}
 
+    def release_stale_jobs(self, older_than_minutes: int = 30) -> int:
+        """把卡死的 PUBLISHING job 放回 PENDING，返回释放条数。
+
+        卡死成因：worker 在发布中途被杀（部署重启/崩溃/OOM），job 永久停在
+        PUBLISHING —— 既不会被 claim（只在 PENDING 里挑），也不会被 report
+        （worker 进程已死）。实测存量库里积了 3 条，最久的卡了 8 天。
+
+        阈值默认 30 分钟：正常发布耗时 1~3 分钟，超过 30 分钟必然是异常。
+        发布端每次启动时调用一次即可（幂等）。
+        """
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = (_dt.now() - _td(minutes=max(1, older_than_minutes))).isoformat(timespec="seconds")
+        with self.db._lock:
+            cur = self.db.conn.execute(
+                "UPDATE publish_jobs SET state='PENDING', claimed_at=NULL, updated_at=? "
+                "WHERE state=? AND updated_at < ?",
+                (now_iso(), PUBLISHING, cutoff))
+            self.db.conn.commit()
+            n = cur.rowcount
+        if n:
+            log.warning("释放卡死的 PUBLISHING job %d 条（超过 %d 分钟未回报，已放回 PENDING）",
+                        n, older_than_minutes)
+        return n
+
     def _task_payload(self, task: dict) -> dict:
         return {
             "task_id": task["id"], "shortcode": task["shortcode"],
@@ -341,6 +365,17 @@ class RemoteApi:
                         self._send_json(200, api.claim(int(data.get("task_id") or 0),
                                                        str(data.get("platform") or ""),
                                                        force=bool(data.get("force"))))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
+                if parsed.path == "/api/release_stale":
+                    # 发布端启动时调用：把卡死的 PUBLISHING job 放回 PENDING。
+                    # 卡死成因：worker 在发布中途被杀（部署/崩溃），job 永远
+                    # 停在 PUBLISHING，既不会被 claim 也不会被 report。
+                    try:
+                        n = api.release_stale_jobs(
+                            older_than_minutes=int(data.get("older_than_minutes") or 30))
+                        self._send_json(200, {"ok": True, "released": n})
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return

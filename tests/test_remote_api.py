@@ -314,3 +314,74 @@ def test_two_tasks_same_platform_gap_enforced(api_env, monkeypatch):
         assert "间隔不足" in data["error"]
     finally:
         api2.server.shutdown()
+
+
+# ---------- 卡死 job 释放（worker 启动清理） ----------
+
+def test_release_stale_jobs_frees_old_publishing(api_env):
+    """卡死超过阈值的 PUBLISHING job 应被放回 PENDING 并清空 claimed_at。"""
+    import httpx as _hx
+    from datetime import datetime, timedelta
+
+    db, tid = api_env["db"], api_env["task_id"]
+
+    # claim 让它变 PUBLISHING
+    _hx.post(f"{api_env['base']}/api/claim", headers=_h(api_env["s"]),
+             json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    assert db.jobs(tid)[0]["state"] == "PUBLISHING"
+
+    # 手工把 updated_at 改到 2 小时前，模拟 worker 中途被杀
+    old = (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
+    with db._lock:
+        db.conn.execute("UPDATE publish_jobs SET updated_at=? WHERE task_id=?",
+                        (old, tid))
+        db.conn.commit()
+
+    r = _hx.post(f"{api_env['base']}/api/release_stale", headers=_h(api_env["s"]),
+                 json={"older_than_minutes": 30}, timeout=5)
+    assert r.json() == {"ok": True, "released": 1}
+
+    job = db.jobs(tid)[0]
+    assert job["state"] == JobState.PENDING
+    assert job["claimed_at"] is None, "释放后必须清空 claimed_at，否则会形成永久间隔锚点"
+
+
+def test_release_stale_jobs_keeps_fresh_publishing(api_env):
+    """刚认领的 PUBLISHING job（正常发布中）不能被误释放。"""
+    import httpx as _hx
+
+    db, tid = api_env["db"], api_env["task_id"]
+    _hx.post(f"{api_env['base']}/api/claim", headers=_h(api_env["s"]),
+             json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+
+    r = _hx.post(f"{api_env['base']}/api/release_stale", headers=_h(api_env["s"]),
+                 json={"older_than_minutes": 30}, timeout=5)
+    assert r.json()["released"] == 0
+    assert db.jobs(tid)[0]["state"] == "PUBLISHING", "发布中的 job 不该被误放回"
+
+
+def test_released_job_no_longer_blocks_gap(api_env):
+    """释放卡死 job 后，间隔锚点应清空（否则会永久拦住同平台发布）。"""
+    import httpx as _hx
+    from datetime import datetime, timedelta
+    from bot.main import publish_gate
+
+    db, tid, s = api_env["db"], api_env["task_id"], api_env["s"]
+    s.publish.min_gap_hours = 2
+
+    _hx.post(f"{api_env['base']}/api/claim", headers=_h(api_env["s"]),
+             json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    # 此时应被间隔拦住
+    assert "间隔不足" in (publish_gate(s, db, "kuaishou") or "")
+
+    # 卡死 2 小时后释放
+    old = (datetime.now() - timedelta(hours=2)).isoformat(timespec="seconds")
+    with db._lock:
+        db.conn.execute("UPDATE publish_jobs SET updated_at=? WHERE task_id=?", (old, tid))
+        db.conn.commit()
+    _hx.post(f"{api_env['base']}/api/release_stale", headers=_h(api_env["s"]),
+             json={"older_than_minutes": 30}, timeout=5)
+
+    # 锚点已清 → 放行
+    assert db.last_publish_anchor_at("kuaishou") is None
+    assert publish_gate(s, db, "kuaishou") is None

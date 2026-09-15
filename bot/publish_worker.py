@@ -410,6 +410,22 @@ def main() -> None:
     except Exception:
         pass
 
+    # 启动时释放卡死的 PUBLISHING job：上次 worker 若在发布中途被杀
+    # （部署重启/崩溃），job 会永久停在 PUBLISHING，既不会被认领也不会回报。
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.post(f"{base}/api/release_stale", headers=_headers(s),
+                       json={"older_than_minutes": 30})
+        released = (r.json() or {}).get("released", 0)
+        if released:
+            log.warning("启动清理：释放 %d 条卡死的发布中 job（已放回待发布队列）", released)
+            try:
+                telegram.notify_info(s, f"🧹 发布端启动清理：释放了 {released} 条卡死的发布中 job")
+            except Exception:
+                pass
+    except Exception as e:
+        log.debug("启动释放卡死 job 失败：%s", e)
+
     # 启动时恢复近期发布追踪：如果 20 分钟内有新发布抖音作品，自动补齐复检预约
     try:
         recent_pub = fetch_published(base, s, "douyin", days=1)
