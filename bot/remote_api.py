@@ -171,11 +171,12 @@ class RemoteApi:
             reason = self.gate_fn(platform)
             if reason:
                 return {"ok": False, "error": f"发布等待：{reason}", "gate_blocked": True}
+        ts = now_iso()
         with self.db._lock:
             cur = self.db.conn.execute(
-                "UPDATE publish_jobs SET state=?, updated_at=? "
+                "UPDATE publish_jobs SET state=?, claimed_at=?, updated_at=? "
                 "WHERE task_id=? AND platform=? AND state='PENDING'",
-                (PUBLISHING, now_iso(), task_id, platform))
+                (PUBLISHING, ts, ts, task_id, platform))
             self.db.conn.commit()
             claimed = cur.rowcount > 0
         if not claimed:
@@ -211,8 +212,10 @@ class RemoteApi:
 
         with self.db._lock:
             cur = self.db.conn.execute(
-                "UPDATE publish_jobs SET state=?, url=?, error=?, retries=CASE WHEN ? THEN retries ELSE retries+1 END, "
-                "published_at=? WHERE task_id=? AND platform=? AND state=?",
+                "UPDATE publish_jobs SET state=?, url=?, error=?, "
+                "retries=CASE WHEN ? THEN retries ELSE retries+1 END, "
+                "published_at=?, claimed_at=NULL "
+                "WHERE task_id=? AND platform=? AND state=?",
                 (JobState.PUBLISHED if ok else (JobState.SKIPPED if login_expired else JobState.PENDING),
                  url if ok else None, err if not ok else None,
                  1 if ok or login_expired else 0,

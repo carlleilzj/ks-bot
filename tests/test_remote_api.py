@@ -186,3 +186,124 @@ def test_report_never_published_task_stays_subtitled(api_env):
                json={"task_id": tid, "platform": "kuaishou", "ok": False,
                      "error": "网络错误"}, timeout=5)
     assert db.get(tid)["state"] == State.READY
+
+
+# ---------- 发布间隔竞态修复（claimed_at 锚点） ----------
+
+def test_claim_stamps_claimed_at(api_env):
+    """claim 成功后 job 应带 claimed_at 时间戳。"""
+    db, tid = api_env["db"], api_env["task_id"]
+    import httpx as _hx
+    r = _hx.post(f"{api_env['base']}/api/claim", headers=_h(api_env["s"]),
+                 json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    assert r.json()["ok"] is True
+    job = db.jobs(tid)[0]
+    assert job["claimed_at"], "claim 后 claimed_at 应非空"
+    assert job["state"] == "PUBLISHING"
+
+
+def test_report_clears_claimed_at(api_env):
+    """发布成功/失败回 PENDING 后 claimed_at 应清空（不残留假锚点）。"""
+    db, tid = api_env["db"], api_env["task_id"]
+    import httpx as _hx
+    _hx.post(f"{api_env['base']}/api/claim", headers=_h(api_env["s"]),
+             json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    # 失败 → 回 PENDING
+    _hx.post(f"{api_env['base']}/api/report", headers=_h(api_env["s"]),
+             json={"task_id": tid, "platform": "kuaishou", "ok": False,
+                   "error": "x"}, timeout=5)
+    job = db.jobs(tid)[0]
+    assert job["state"] == JobState.PENDING
+    assert job["claimed_at"] is None
+
+
+def test_publishing_job_blocks_gap_via_anchor(api_env):
+    """回归：上一条还在 PUBLISHING（published_at 未落库）时，
+    gate 的间隔检查必须用 claimed_at 锚点拦截下一条同平台 claim。"""
+    import httpx as _hx
+    from bot.main import publish_gate
+    from datetime import datetime
+
+    db, tid, s = api_env["db"], api_env["task_id"], api_env["s"]
+
+    # 造一条"发布中"的 job（模拟上一条作品正在浏览器里发布）
+    _hx.post(f"{api_env['base']}/api/claim", headers=_h(api_env["s"]),
+             json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+
+    # 旧行为：last_published_at 为 None → gate 放行（竞态漏洞）
+    assert db.last_published_at("kuaishou") is None
+    # 新行为：anchor 取 claimed_at → gate 拦截
+    anchor = db.last_publish_anchor_at("kuaishou")
+    assert anchor is not None, "PUBLISHING job 的 claimed_at 应作为间隔锚点"
+
+    reason = publish_gate(s, db, "kuaishou")
+    assert reason is not None and "间隔不足" in reason, \
+        f"发布中 job 应触发间隔拦截，实际：{reason!r}"
+
+
+def test_anchor_uses_published_when_later(api_env):
+    """发布完成落库后，anchor 应回退到 published_at（claimed_at 已清空）。"""
+    import httpx as _hx
+    db, tid = api_env["db"], api_env["task_id"]
+
+    _hx.post(f"{api_env['base']}/api/claim", headers=_h(api_env["s"]),
+             json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    _hx.post(f"{api_env['base']}/api/report", headers=_h(api_env["s"]),
+             json={"task_id": tid, "platform": "kuaishou", "ok": True,
+                   "url": "https://x"}, timeout=5)
+
+    job = db.jobs(tid)[0]
+    assert job["state"] == JobState.PUBLISHED
+    assert job["published_at"] is not None
+    # anchor 应等于 published_at（没有 PUBLISHING job 了）
+    assert db.last_publish_anchor_at("kuaishou") == job["published_at"]
+    assert db.last_publish_anchor_at() == db.last_published_at()
+
+
+def test_two_tasks_same_platform_gap_enforced(api_env, monkeypatch):
+    """端到端回归：两个任务同平台，第一个 claim 后第二个 claim 应被 gate 拦截。"""
+    import httpx as _hx
+    import bot.config as cfg_mod
+    import bot.db as db_mod
+    import bot.remote_api as ra
+    from bot.source.downloader import VideoMeta
+    from bot.db import State
+
+    db, s = api_env["db"], api_env["s"]
+    base = api_env["base"]
+
+    # 再造一个 READY 任务（同平台 kuaishou）
+    meta2 = VideoMeta(source_url="https://x/2", platform="youtube", video_id="abc2",
+                      shortcode="youtube_abc2", username="tester", title="第二个",
+                      caption="", thumbnail_url="", duration=60.0,
+                      permalink="https://x/2")
+    tid2 = db.insert_video(meta2)
+    db.update(tid2, title="第二个", description="d", tags="a", category="搞笑",
+              state=State.READY, target_platforms="kuaishou")
+    db.create_publish_jobs(tid2, ["kuaishou"])
+
+    # gate_fn 用真实的 publish_gate（需要传入真实 s/db）
+    from bot.main import publish_gate
+    # 重建一个带真实 gate 的 API 实例（同一 DB，不同端口）
+    api2 = ra.RemoteApi(s, db, gate_fn=lambda p: publish_gate(s, db, p))
+    t = threading.Thread(target=api2.serve_forever, args=("127.0.0.1", 0), daemon=True)
+    t.start()
+    time.sleep(0.3)
+    base2 = f"http://127.0.0.1:{api2.server.server_address[1]}"
+    try:
+        # 第一个任务 claim → 成功（PUBLISHING，claimed_at 打点）
+        r1 = _hx.post(f"{base2}/api/claim", headers=_h(s),
+                      json={"task_id": api_env["task_id"], "platform": "kuaishou"},
+                      timeout=5)
+        assert r1.json()["ok"] is True
+
+        # 第二个任务 claim → 必须被间隔拦截（旧行为会放行 → 16 秒连发）
+        r2 = _hx.post(f"{base2}/api/claim", headers=_h(s),
+                      json={"task_id": tid2, "platform": "kuaishou"},
+                      timeout=5)
+        data = r2.json()
+        assert data["ok"] is False and data.get("gate_blocked") is True, \
+            f"第二个同平台 claim 应被拦截，实际：{data}"
+        assert "间隔不足" in data["error"]
+    finally:
+        api2.server.shutdown()

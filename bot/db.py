@@ -124,6 +124,14 @@ class Database:
 
     def _migrate(self) -> None:
         """存量库升级：加新列、回填 kuaishou job。幂等。"""
+        # publish_jobs 补列：claimed_at（认领时间戳）。
+        # 竞态背景：gap 检查发生在 claim 时点，而上一条的 published_at 要等
+        # 浏览器发布完成才落库，二者之间有 1~3 分钟窗口，曾导致同平台
+        # 16 秒连发。claimed_at 让「发布中」的 job 也参与间隔计算
+        # （见 last_publish_anchor_at）。
+        job_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(publish_jobs)")}
+        if job_cols and "claimed_at" not in job_cols:
+            self.conn.execute("ALTER TABLE publish_jobs ADD COLUMN claimed_at TEXT")
         # 解析重试队列：IG 风控/网络抖动导致 extract_meta 失败时入队，
         # 按指数退避择时重试，成功后再进正常流水线。
         self.conn.execute(
@@ -227,7 +235,7 @@ class Database:
 
     def update_job(self, job_id: int, **fields) -> None:
         assert fields, "no fields"
-        allowed = {"state", "url", "error", "retries", "published_at"}
+        allowed = {"state", "url", "error", "retries", "published_at", "claimed_at"}
         bad = set(fields) - allowed
         assert not bad, f"unknown job columns: {bad}"
         fields["updated_at"] = now_iso()
@@ -276,6 +284,37 @@ class Database:
                 "SELECT MAX(published_at) m FROM tasks WHERE published_at IS NOT NULL"
             ).fetchone()
         return row["m"]
+
+    def last_publish_anchor_at(self, platform: str | None = None) -> str | None:
+        """间隔检查的锚点时间 = max(最近发布时间, 最早一条发布中 job 的认领时间)。
+
+        竞态修复：claim 在先、published_at 落库在后（浏览器发布要 1~3 分钟）。
+        只看 published_at 时，上一条还在发布中，下一条 claim 会误判"间隔已过"，
+        造成同平台连发。PUBLISHING job 的 claimed_at 是它实际开始发布的
+        时间下界，取两者较大值即可封住这个窗口。
+
+        注：PUBLISHING 状态由 remote_api 定义（"PUBLISHING"），
+        此处用字面量避免反向 import（db 是最底层模块）。
+        """
+        with self._lock:
+            if platform:
+                row = self.conn.execute(
+                    "SELECT MAX(t) m FROM ("
+                    "  SELECT published_at t FROM publish_jobs WHERE published_at IS NOT NULL AND platform=?"
+                    "  UNION ALL"
+                    "  SELECT claimed_at t FROM publish_jobs WHERE state='PUBLISHING' AND claimed_at IS NOT NULL AND platform=?"
+                    ")",
+                    (platform, platform),
+                ).fetchone()
+                return row["m"]
+            row = self.conn.execute(
+                "SELECT MAX(t) m FROM ("
+                "  SELECT published_at t FROM publish_jobs WHERE published_at IS NOT NULL"
+                "  UNION ALL"
+                "  SELECT claimed_at t FROM publish_jobs WHERE state='PUBLISHING' AND claimed_at IS NOT NULL"
+                ")",
+            ).fetchone()
+            return row["m"]
 
     def insert_media(self, post, state: str, error: str | None = None) -> int | None:
         """插入一条 IG 作品（post 为 monitor.instagram.IgPost）。已存在时返回 None。"""
