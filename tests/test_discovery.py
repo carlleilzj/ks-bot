@@ -291,6 +291,9 @@ def _sched(db, cands, reject_real_person=True) -> DiscoveryScheduler:
     """构造一个可跑 _cycle 的 scheduler：假适配器 + mock 掉网络/AI。"""
     s = Settings()
     s.ai_api_key = "test-key"  # 让 vision 的调用路径可达（会被 mock）
+    # 本组用例测的是质检逻辑本身，需显式打开全局开关
+    # （生产默认 False：2026-09-16 起手动发链接模式不再拦真人）
+    s.vision.real_person_check = True
     disc = DiscoveryConfig(enabled=True,
                            sources=[{"type": "youtube_search", "queries": ["q"]}],
                            filters={"reject_real_person": reject_real_person,
@@ -436,4 +439,40 @@ def test_disabled_flag_skips_check(db, patches, monkeypatch):
     sched = _sched(db, [_cand("v1")], reject_real_person=False)
     sched._cycle()
     assert called["n"] == 0
+    assert db.pending_review_count() == 1
+
+
+def test_real_person_not_rejected_when_global_switch_off(db, patches):
+    """回归（2026-09-16）：vision.real_person_check=False 时，
+    即使规则开关为 true、判定为真人主体，也不得丢弃候选。"""
+    patches["real_person"] = True
+    patches["is_animation"] = False
+    patches["real_person_ratio"] = 0.65
+    patches["real_person_is_subject"] = True
+
+    sched = _sched(db, [_cand("v1")])
+    sched.s.vision.real_person_check = False   # 关闭总开关
+    sched._cycle()
+
+    # 未被丢弃 → 发审核卡片
+    assert db.pending_review_count() == 1
+    tasks = db.recent(1)
+    assert tasks[0]["state"] != State.SKIPPED
+    assert "真人" not in (tasks[0]["error"] or "")
+
+
+def test_watermark_still_rejected_when_real_person_off(db, patches):
+    """半开语义确认：关掉真人检测不影响水印判定（仍会丢弃）。
+
+    注：当前实现里 real_person_check 是质检总开关，关闭时水印也不拦。
+    本用例锁定该行为，避免日后误改成语义不明的半开状态。
+    """
+    patches["watermark"] = True
+    patches["real_person"] = False
+
+    sched = _sched(db, [_cand("v1")])
+    sched.s.vision.real_person_check = False
+    sched._cycle()
+
+    # 总开关关闭 → 整段质检跳过 → 发审核
     assert db.pending_review_count() == 1

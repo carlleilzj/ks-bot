@@ -105,6 +105,16 @@ class DiscoveryConfig:
 
 
 @dataclass
+class VisionConfig:
+    """AI 画面质检开关。
+
+    2026-09-16 起改为手动发链接模式：素材由人工筛选，真人检测不再需要，
+    故 real_person_check 默认 False。水印与动画判定不受影响。
+    """
+    real_person_check: bool = False   # False = 完全停用真人检测（含发现层与转码层）
+
+
+@dataclass
 class Settings:
     # Instagram 监控（instaloader，监控别人公开账号）
     ig_targets: list[str] = field(default_factory=list)  # 目标账号列表
@@ -138,6 +148,7 @@ class Settings:
     poll_interval_min: int = 5
     subtitle: SubtitleConfig = field(default_factory=SubtitleConfig)
     watermark: WatermarkConfig = field(default_factory=WatermarkConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     categories: list[str] = field(default_factory=lambda: list(DEFAULT_CATEGORIES))  # 快手分区（兼容旧配置）
@@ -157,6 +168,18 @@ def _load_yaml() -> dict:
     except yaml.YAMLError as e:  # 配置写错不要硬崩，用默认值并提示
         log.warning("config.yaml 解析失败，使用默认配置: %s", e)
         return {}
+
+
+def _build_vision(raw: dict | None) -> VisionConfig:
+    """解析 vision 段。
+
+    real_person_check:
+      False（默认，2026-09-16 起）= 完全停用真人检测；
+      True = 恢复真人检测（发现层丢弃真人候选 + 转码层跳过真人镜头）。
+    注意：无论开关如何，水印擦除（watermark 段）与动画判定都照常工作。
+    """
+    d = raw or {}
+    return VisionConfig(real_person_check=bool(d.get("real_person_check", False)))
 
 
 def _build_watermark(raw: dict | None) -> WatermarkConfig:
@@ -273,6 +296,7 @@ def load_settings() -> Settings:
 
     s.subtitle = _build_subtitle(raw.get("subtitle") or {})
     s.watermark = _build_watermark(raw.get("watermark"))
+    s.vision = _build_vision(raw.get("vision"))
     s.publish = _build_publish(raw.get("publish") or {})
     s.discovery = _build_discovery(raw.get("discovery"))
     cats = raw.get("categories")

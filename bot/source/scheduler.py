@@ -133,7 +133,9 @@ class DiscoveryScheduler(threading.Thread):
             # 动物动画赛道：真人主体、水印、明确非动画都直接丢弃。
             # 动画内容的真人判定已豁免（动画角色/远景建模不算真人）。
             # 必须在封面下载之后做（需要图片文件）。
-            if self.reject_real_person and cover.exists():
+            # 2026-09-16：改为手动发链接后，真人检测由 vision.real_person_check
+            # 统一关闭（默认 False）—— 素材人工筛选，不再需要 AI 拦真人。
+            if self.reject_real_person and self.s.vision.real_person_check and cover.exists():
                 try:
                     from ..ai.vision import inspect_cover
                     verdict = inspect_cover(cover, self.s)

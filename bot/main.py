@@ -144,10 +144,12 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
               cover_path=str(cover) if cover.exists() else None, error=None)
 
     # 真人镜头检测：如果是真人镜头，跳过不发布
-    # 例外：只发视频号的任务不受真人限制（视频号由用户手动指定，不做真人过滤）
+    # 例外 1：只发视频号的任务不受真人限制（视频号由用户手动指定）
+    # 例外 2（2026-09-16）：手动发链接模式下 vision.real_person_check=False，
+    #        整段质检跳过——素材由人工筛选，AI 不再拦真人。
     targets = task.get("target_platforms")
     weixin_only = targets and all(t.strip() == "weixin" for t in targets.split(",") if t.strip())
-    if cover.exists() and not weixin_only:
+    if cover.exists() and not weixin_only and s.vision.real_person_check:
         # 多帧质检：避免「1 秒单帧恰好含背景虚化路人」导致整条动画被误杀
         verdict = None
         frames: list[Path] = []

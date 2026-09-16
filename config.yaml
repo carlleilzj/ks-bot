@@ -20,6 +20,15 @@ subtitle:
   margin_v_ratio: 0.07    # 距底部距离 = 视频高 * 0.07
   bold: true
 
+# AI 画面质检开关
+# 2026-09-16 起改为「手动发链接」模式：素材由人工筛选，真人检测已无必要。
+# real_person_check: false = 完全停用真人检测（发现层不再丢弃真人候选、
+#                            转码层不再跳过真人镜头），视频照常走完流水线。
+# real_person_check: true  = 恢复真人检测（上方 discovery.filters.reject_real_person
+#                            也需为 true 才会在发现层生效）。
+vision:
+  real_person_check: false
+
 # 水印擦除（烧录在画面像素里的固定位置水印，用 ffmpeg delogo 取周边像素插值填充）
 # 注意：只能擦固定位置水印；delogo 需重编码视频，画质有轻微损失。
 # 坐标 [x, y, w, h]：数值全 <=1 视为相对比例（推荐，自动适配任意分辨率）。
@@ -106,8 +115,9 @@ discovery:
     min_score: 1000       # 热度阈值（YouTube view_count；频道页/RSS 用发布顺序近似）
     keyword_whitelist: ["ai", "animal", "cat", "dog", "puppy", "kitten", "animated", "animation", "3d", "cgi", "pixar", "story"]
     keyword_blacklist: ["reaction", "recap", "compilation", "full episode", "how to make", "tutorial", "podcast", "mukbang"]
-    # 封面 AI 质检（推荐开）：一次 vision 调用判三项——真人/水印/是否动画，
-    # 动物动画赛道三项全过才进审核；检测异常放行进人工审核，不误杀
+    # 封面 AI 质检：一次 vision 调用判三项——真人/水印/是否动画。
+    # 2026-09-16 起改为手动发链接模式，真人检测已由下方 vision.real_person_check
+    # 统一关闭；此开关保留但不再产生真人拦截（水印/动画判定同样受总开关控制）。
     # 需在 .env 配 VISION_MODEL（gemini-2.5-flash 已实测可用；grok 全系不支持图片输入）
     # 注：键名沿用 reject_real_person（历史原因），实际含义见上
     reject_real_person: true
