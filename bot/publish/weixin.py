@@ -16,7 +16,7 @@ from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
-from ..config import DATA_DIR
+from ..config import DATA_DIR, LOGS_DIR
 from .base import (
     UA,
     LoginExpired,
@@ -91,6 +91,70 @@ def _has_login_cookies(context) -> bool:
                      "wxid", "sessionid"} & names)
     except Exception:
         return False
+
+
+def login_qr_image(out_path: Path | None = None,
+                   state_path: Path = STATE_PATH,
+                   wait_sec: int = 300) -> bool:
+    """无头环境下登录：把二维码导成图片 + 轮询等待扫码，成功后保存登录态。
+
+    用途：发布 worker 跑在阿里云（无桌面），没法弹有头浏览器扫码。
+    这个函数用无头浏览器打开登录页 → 截出二维码区域存成 PNG →
+    把 PNG 交给 Telegram/人工，用手机微信扫 → 轮询到登录成功即保存 state。
+
+    返回是否登录成功。
+    """
+    import base64
+    out_path = out_path or (LOGS_DIR / "weixin_qr.png")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        browser = launch_chromium(p, headless=True)
+        context = browser.new_context(
+            user_agent=UA,
+            viewport={"width": 1440, "height": 900},
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+        )
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        page = context.new_page()
+        try:
+            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(6)
+
+            # 找二维码并截图（优先用元素截图，退化为整页）
+            qr_sel = "img.qrcode, .qrcode-img, [class*='qrcode'] img, [class*='qrcode']"
+            shot_ok = False
+            try:
+                qr = page.locator(qr_sel).first
+                if qr.count():
+                    qr.screenshot(path=str(out_path))
+                    shot_ok = True
+                    log.info("二维码已导出：%s", out_path)
+            except Exception as e:
+                log.warning("二维码元素截图失败：%s", str(e)[:120])
+            if not shot_ok:
+                page.screenshot(path=str(out_path), full_page=False)
+                log.warning("未定位到二维码元素，已截整页：%s", out_path)
+
+            print(f"\n>>> 二维码已导出：{out_path}")
+            print(">>> 请用微信扫码登录视频号助手，登录成功后自动保存登录态\n")
+
+            deadline = time.time() + wait_sec
+            while time.time() < deadline:
+                if _is_logged_in(page) or _has_login_cookies(context):
+                    time.sleep(2)
+                    state_path.parent.mkdir(parents=True, exist_ok=True)
+                    context.storage_state(path=str(state_path))
+                    log.info("视频号登录成功，登录态已保存：%s", state_path)
+                    print(f">>> 登录成功！登录态已保存到 {state_path}")
+                    return True
+                time.sleep(2)
+            log.warning("等待扫码超时（%ds），未保存登录态", wait_sec)
+            print(">>> 等待扫码超时，未保存登录态")
+            return False
+        finally:
+            context.close()
 
 
 # ---------- 登录 ----------

@@ -658,6 +658,10 @@ def main() -> None:
     parser.add_argument("--setup", action="store_true", help="交互式初始化向导（IG token/ID、TG chat_id）")
     parser.add_argument("--login", nargs="?", const="kuaishou", default=None, metavar="PLATFORM",
                         help="扫码登录发布平台：kuaishou/douyin/xhs，可逗号分隔或 all（默认 kuaishou）")
+    parser.add_argument("--login-qr", nargs="?", const="weixin", default=None, metavar="PLATFORM",
+                        help="无头环境扫码登录：把二维码导成 PNG 并轮询等待扫码（发布端服务器用）")
+    parser.add_argument("--qr-wait", type=int, default=300, metavar="SEC",
+                        help="--login-qr 等待扫码的秒数（默认 300）")
     parser.add_argument("--status", action="store_true", help="查看任务列表")
     parser.add_argument("--retry-failed", action="store_true", help="重置失败任务并续跑")
     parser.add_argument("--abandon-unpublished", action="store_true",
@@ -681,6 +685,26 @@ def main() -> None:
         return
 
     db = Database()
+    if args.login_qr is not None:
+        # 无头登录：把二维码导成图片，人工用手机扫。用于发布端服务器（无桌面）。
+        from .publish.weixin import login_qr_image
+        names = [x.strip() for x in str(args.login_qr).split(",") if x.strip()]
+        ok_all = True
+        for name in names:
+            if name != "weixin":
+                print(f"⚠️  --login-qr 目前仅支持 weixin（收到 {name!r}）")
+                ok_all = False
+                continue
+            try:
+                pub = get_publisher(name)
+            except KeyError as e:
+                print(f"❌ {e}")
+                ok_all = False
+                continue
+            print(f"\n=== {pub.display_name} 二维码登录（{args.qr_wait}s 内有效）===")
+            ok_all &= bool(login_qr_image(state_path=pub.state_path,
+                                          wait_sec=args.qr_wait))
+        sys.exit(0 if ok_all else 1)
     if args.login is not None:
         names = list(all_publishers()) if args.login == "all" else \
             [x.strip() for x in args.login.split(",") if x.strip()]
