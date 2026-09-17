@@ -68,6 +68,15 @@ class WeixinError(PublishError):
 
 
 def _is_logged_in(page: Page) -> bool:
+    """判定当前页面是否已登录视频号助手。
+
+    2026-09-17 修正两处误判（登录成功后实测发现）：
+      1. 旧代码用 `[class*='qrcode']` 找二维码——这个选择器在**已登录**的
+         后台页面上也能命中 3 个元素（框架残留节点），导致恒判未登录。
+         改为只在明确的登录容器里找，且要求元素可见。
+      2. URL 判据 `"/platform/" in url` 漏掉不带尾斜杠的 `/platform`
+         （登录后重定向到的正是它）。改为前缀匹配。
+    """
     try:
         url = page.url.lower()
         if "login" in url or "passport" in url:
@@ -75,9 +84,13 @@ def _is_logged_in(page: Page) -> bool:
         for t in ("登录视频号助手", "扫码登录", "请使用微信扫码"):
             if page.get_by_text(t, exact=False).count():
                 return False
-        if page.locator("img.qrcode, .qrcode-img, [class*='qrcode']").count():
+        # 可见的登录二维码才算未登录（排除后台页面的框架残留节点）
+        if page.locator("img.qrcode:visible, .qrcode-img:visible").count():
             return False
-        return page.locator(SELECTORS["file_input"]).count() > 0 or "/platform/" in url
+        # 已登录的强信号：后台 URL 或上传用文件输入框
+        if url.startswith("https://channels.weixin.qq.com/platform"):
+            return True
+        return page.locator(SELECTORS["file_input"]).count() > 0
     except Exception:
         return False
 
