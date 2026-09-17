@@ -52,6 +52,27 @@ def _sel_texts(page: Page) -> list[str]:
     return out
 
 
+def _verified(page: Page, anchor_type: str, value: str) -> bool:
+    """回读表单确认挂载真的生效。
+
+    判据：
+      - 类型栏（index 2 附近）已显示 anchor_type，不再是「带货模式」占位
+      - 值栏出现了 value（城市名），或至少不再是 placeholder 文案
+    只信这个，不信点击动作的返回值。
+    """
+    texts = _sel_texts(page)
+    if anchor_type not in texts:
+        return False
+    kind, target = ANCHOR_TARGETS.get(anchor_type, ("", ""))
+    if not target:
+        return False
+    # 值栏应从 placeholder 变成真实值
+    if target in texts:
+        # 仍是 placeholder → 没填上
+        return False
+    return bool(value) and any(value in t for t in texts)
+
+
 def _scroll_to_tags(page: Page) -> None:
     for _ in range(9):
         page.mouse.wheel(0, 700)
@@ -81,19 +102,117 @@ def _anchor_type_dropdown(page: Page):
     return None
 
 
-def _pick_dropdown_option(page: Page, text: str, timeout_ms: int = 3000) -> bool:
-    """在展开的下拉里点选包含 text 的选项。"""
+def open_semi_select(locator, page: Page, settle_ms: int = 2000) -> bool:
+    """展开一个 semi-design 下拉。
+
+    2026-09-17 实测：semi-select 的 `span.semi-select-selection-text` 是纯文本
+    span，Playwright 的 `click()` 会因为「元素不可点击」等到 timeout（30s！），
+    而 `mousedown/mouseup/click` 三连派发能可靠展开。
+
+    这与快手星火用的 antd Select 是同一个坑（那边也是靠 mousedown 展开）。
+    抖音用 semi-design，事件语义相同。
+    """
+    try:
+        # 优先在真实 .semi-select 容器上派发（更接近用户操作）
+        locator.evaluate("""el => {
+            const box = el.closest('.semi-select') || el.parentElement || el;
+            for (const t of ['mousedown', 'mouseup', 'click']) {
+                box.dispatchEvent(new MouseEvent(t, {
+                    bubbles: true, cancelable: true, view: window, detail: 1
+                }));
+            }
+        }""")
+        page.wait_for_timeout(settle_ms)
+        return True
+    except Exception as e:
+        log.warning("派发 mousedown 展开下拉失败：%s", str(e)[:100])
+        return False
+
+
+def _visible_options(page: Page) -> list[str]:
+    """回读当前可见的下拉选项文本。
+
+    2026-09-17 实测 DOM 结构（semi-design v2）：
+        <div class="semi-select-option-list" role="listbox">
+          <div class="semi-select-option" role="option">
+            <div class="semi-select-option-icon">…tick svg…</div>
+            <div class="semi-select-option-text">带货模式</div>   ← 真正的文案在这
+          </div>
+        </div>
+
+    注意：页面里还有个 `div.select-dropdown-option-video`（挂载类型下拉的
+    触发器预留节点，rect 就是按钮本身），**不是选项**，必须排除——旧代码
+    用 [class*='select-dropdown-option'] 匹配到的正是这个，导致点了个假节点。
+    """
+    try:
+        return page.evaluate("""() => {
+            const out = [];
+            for (const o of document.querySelectorAll(
+                    ".semi-select-option, .semi-select-option-list [role='option']")) {
+                if (!(o.offsetParent || o.getClientRects().length)) continue;
+                const t = o.querySelector(".semi-select-option-text") || o;
+                const s = (t.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (s && !out.includes(s)) out.push(s);
+            }
+            return out;
+        }""") or []
+    except Exception:
+        return []
+
+
+def _click_option(page: Page, want: str) -> bool:
+    """点选 semi 下拉里文案等于 want 的选项（在真实 option 节点上派发鼠标事件）。"""
+    try:
+        return bool(page.evaluate("""(want) => {
+            const opts = [...document.querySelectorAll(".semi-select-option")];
+            // 精确匹配优先，其次包含
+            let hit = opts.find(o => {
+                const t = (o.querySelector('.semi-select-option-text') || o);
+                return (t.textContent || '').replace(/\\s+/g, ' ').trim() === want;
+            });
+            if (!hit) hit = opts.find(o => {
+                const t = (o.querySelector('.semi-select-option-text') || o);
+                return (t.textContent || '').replace(/\\s+/g, ' ').trim().includes(want);
+            });
+            if (!hit) return false;
+            // 派发到最内层有文本的节点，模拟真实点击
+            const target = hit.querySelector('.semi-select-option-text') || hit;
+            for (const node of [target, hit]) {
+                for (const ev of ['mousedown', 'mouseup', 'click']) {
+                    node.dispatchEvent(new MouseEvent(ev, {
+                        bubbles: true, cancelable: true, view: window, detail: 1
+                    }));
+                }
+            }
+            return true;
+        }""", want))
+    except Exception as e:
+        log.warning("点选选项 %r 异常：%s", want, str(e)[:80])
+        return False
+
+
+def _pick_dropdown_option(page: Page, text: str, timeout_ms: int = 3000,
+                          verify=None) -> bool:
+    """在展开的下拉里点选包含 text 的选项。
+
+    点完可选调用 verify() 回读确认——semi 的下拉有时会「点了但没选中」，
+    只信点击动作会造成假成功（实测踩过）。
+    """
     page.wait_for_timeout(timeout_ms)
-    for sel in ("[class*='select-dropdown-option']:visible",
-                "[class*='dropdown'] [class*='option']:visible",
-                "[role='option']:visible"):
-        try:
-            opt = page.locator(sel, has_text=text)
-            if opt.count():
-                opt.first.click()
-                return True
-        except Exception:
-            continue
+    deadline = time.time() + 6
+    while time.time() < deadline:
+        opts = _visible_options(page)
+        if opts:
+            hit = next((o for o in opts if o == text), None) or \
+                  next((o for o in opts if text in o), None)
+            if hit is not None and _click_option(page, hit):
+                if verify is None:
+                    return True
+                page.wait_for_timeout(900)
+                if verify():
+                    return True
+                log.warning("点选 %r 后回读未确认，重试", hit[:20])
+        page.wait_for_timeout(400)
     return False
 
 
@@ -109,40 +228,67 @@ def apply_anchor(page: Page, anchor_type: str, value: str) -> bool:
         log.warning("未找到「添加标签」下拉（页面可能已改版）")
         return False
 
-    # 1. 开下拉选类型
-    try:
-        dd.click()
-        page.wait_for_timeout(2000)
-    except Exception as e:
-        log.warning("打开挂载下拉失败：%s", str(e)[:100])
+    # 1. 开下拉选类型（semi-select 需派发 mousedown，click() 会超时 30s）
+    if not open_semi_select(dd, page):
+        log.warning("打开挂载下拉失败（mousedown 派发异常）")
         return False
 
-    if not _pick_dropdown_option(page, anchor_type, 1800):
+    if not _pick_dropdown_option(page, anchor_type, 1800,
+                                 verify=lambda: anchor_type in _sel_texts(page)):
         log.warning("下拉中无 %r 选项（账号可能未开通该权限）", anchor_type)
         page.keyboard.press("Escape")
         return False
     page.wait_for_timeout(3500)
+    if anchor_type not in _sel_texts(page):
+        log.warning("选中 %r 后类型栏未回读确认", anchor_type)
+        return False
 
     # 2. 填值
+    # 2026-09-17 实测：选中「位置」后出现的是**第二个 semi-select**
+    # （文本「输入地理位置」），不是 input。旧实现 get_by_placeholder 恒为 0 命中。
+    # 正确路径：展开这个二级 semi-select → 键盘输入关键词 → 在候选中点选。
     kind, target = ANCHOR_TARGETS[anchor_type]
     try:
-        if kind == "ph":
-            inp = page.get_by_placeholder(target)
-            if not inp.count():
-                inp = page.locator(f"input[placeholder*='{target[:5]}']")
-            if not inp.count():
-                log.warning("%r 选中后未出现输入框（placeholder=%r）", anchor_type, target)
-                return False
-            inp.first.click()
-            page.wait_for_timeout(600)
-            inp.first.fill(value)
-            page.wait_for_timeout(2800)
-            _pick_dropdown_option(page, value, 500)
-        else:
+        if kind != "ph":
             log.warning("%r 的输入方式未实现", anchor_type)
             return False
-        log.info("已挂载 %s：%s", anchor_type, str(value)[:40])
-        return True
+
+        # 找二级 semi-select（文本 == target）
+        sels = page.locator("span.semi-select-selection-text")
+        sub = None
+        for i in range(sels.count()):
+            try:
+                if (sels.nth(i).inner_text() or "").strip() == target:
+                    sub = sels.nth(i)
+                    break
+            except Exception:
+                continue
+        if sub is None:
+            log.warning("%r 选中后未出现二级下拉（文本=%r）", anchor_type, target)
+            return False
+
+        if not open_semi_select(sub, page, settle_ms=2500):
+            log.warning("%r 二级下拉展开失败", anchor_type)
+            return False
+
+        # 展开后列表自带热门候选；直接键盘输入可过滤（无独立 input 元素）
+        page.keyboard.type(str(value), delay=60)
+        page.wait_for_timeout(3000)
+
+        if _pick_dropdown_option(page, str(value), 800,
+                                 verify=lambda: _verified(page, anchor_type, str(value))):
+            log.info("已挂载 %s：%s（已回读校验）", anchor_type, str(value)[:40])
+            return True
+        # 兜底：候选里第一个不像类型名/占位的真实结果
+        opts = [o for o in _visible_options(page)
+                if o not in ANCHOR_TARGETS and len(o) > 2]
+        if opts and _pick_dropdown_option(page, opts[0], 300,
+                                          verify=lambda: _verified(page, anchor_type, str(value))):
+            log.info("已挂载 %s（首个候选）：%r", anchor_type, opts[0][:30])
+            return True
+        log.warning("%r 未能挂载（关键词=%r，回读未确认）", anchor_type, str(value)[:20])
+        page.keyboard.press("Escape")
+        return False
     except Exception as e:
         log.warning("填写挂载值失败（%s=%r）：%s", anchor_type, str(value)[:30], str(e)[:100])
         return False
@@ -168,8 +314,10 @@ def apply_hot_topic(page: Page, keyword: str) -> bool:
             log.warning("未找到热点 semi-select（placeholder=%r）", HOT_TOPIC_PLACEHOLDER)
             return False
 
-        target.click()
-        page.wait_for_timeout(2500)
+        # 展开热点 semi-select（同样需 mousedown）
+        if not open_semi_select(target, page, settle_ms=2500):
+            log.warning("打开热点下拉失败")
+            return False
 
         # 展开后有搜索输入框
         typed = False
@@ -184,16 +332,18 @@ def apply_hot_topic(page: Page, keyword: str) -> bool:
             page.keyboard.type(keyword, delay=40)
         page.wait_for_timeout(3000)
 
-        if _pick_dropdown_option(page, keyword, 500):
-            log.info("已关联热点：%s", keyword[:30])
+        # 回读判据：热点栏不再是 placeholder「点击输入热点词」
+        def _hot_ok() -> bool:
+            return HOT_TOPIC_PLACEHOLDER not in _sel_texts(page)
+
+        if _pick_dropdown_option(page, keyword, 500, verify=_hot_ok):
+            log.info("已关联热点：%s（已回读校验）", keyword[:30])
             return True
         # 兜底：点第一个可见候选
-        for sel2 in ("[class*='dropdown'] [class*='option']:visible",
-                     "[role='option']:visible"):
-            opts = page.locator(sel2)
-            if opts.count():
-                opts.first.click()
-                log.info("已关联热点（首个候选）：%s", keyword[:30])
+        opts = _visible_options(page)
+        if opts:
+            if _pick_dropdown_option(page, opts[0], 200, verify=_hot_ok):
+                log.info("已关联热点（首个候选）：%s → %r", keyword[:30], opts[0][:30])
                 return True
         log.warning("热点 %r 无候选项", keyword[:30])
         page.keyboard.press("Escape")
