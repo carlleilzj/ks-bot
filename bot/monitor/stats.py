@@ -49,7 +49,32 @@ class WorkStat:
 _DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}:\d{2})")
 _PLAY_RE = re.compile(r"播放\s*(\d+)")
 _LIKE_RE = re.compile(r"点赞\s*(\d+)")
-_TAG_RE = re.compile(r"#([^\s#]+)")
+# 话题：从「#」到**下一个 # 或开头**为止，取最左边一截。
+# 卡片文本是连续拼接的（"…#解压编辑作品设置权限作品置顶删除作品2026年…"），
+# 所以先按下一个 # / 到串首 切段，再把段内的 UI 文案剥掉。
+# 注意不能把空格当分隔 —— #无声视频 #治愈 之间是空格，那是合法的多个标签。
+_TAG_RE = re.compile(r"#(.+?)(?=\s*#|\Z)", re.S)
+
+# 卡片里跟在最后一个话题后面的固定 UI 文案，需要剥掉
+_TAIL_WORDS = ("编辑作品", "设置权限", "作品置顶", "删除作品", "取消置顶",
+               "查看详情", "导出数据", "已发布", "审核中", "未通过",
+               "仅自己可见", "流量减少", "播放", "点赞", "评论", "分享",
+               "收藏", "完播率", "2秒跳出率", "吸粉量", "作品合集")
+
+
+def _clean_tag(raw: str) -> str:
+    """剥掉话题尾巴上粘连的 UI 文案与日期。"""
+    t = raw.strip()
+    if not t:
+        return ""
+    # 切掉任何 UI 关键词及其之后的内容
+    for w in _TAIL_WORDS:
+        if w in t:
+            t = t.split(w)[0]
+    t = _DATE_RE.split(t)[0]
+    # 截断到第一个明显不是标签的字符（年月日数字串等）
+    t = re.split(r"\d{4}年|\d{2}:\d{2}", t)[0]
+    return t.strip()
 
 
 def parse_card_text(text: str) -> WorkStat | None:
@@ -74,10 +99,15 @@ def parse_card_text(text: str) -> WorkStat | None:
         y, mo, d, hm = dt_m.groups()
         st.published_at = f"{y}-{int(mo):02d}-{int(d):02d} {hm}"
 
-    # 话题：卡片里带 # 的词
-    st.tags = [x for x in _TAG_RE.findall(t) if x][:10]
+    # 话题：剥掉粘连的 UI 文案尾巴
+    tags: list[str] = []
+    for raw in _TAG_RE.findall(t):
+        tag = _clean_tag(raw)
+        if not tag or len(tag) > 12 or tag in tags:
+            continue
+        tags.append(tag)
+    st.tags = tags[:10]
 
-    # 标题提示：取卡片开头到「编辑作品」之前的那段
     head = t.split("编辑作品")[0].strip()
     st.title_hint = head[:80]
 

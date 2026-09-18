@@ -42,6 +42,34 @@ class TestParseCardText:
         assert st.play_count == 100
         assert st.like_count is None
 
+    def test_tags_strip_trailing_ui_text(self):
+        """回归：卡片文本是连续拼接的，话题尾巴会粘连 UI 文案。
+
+        实测脏数据长这样：
+            #解压编辑作品设置权限作品置顶删除作品2026年09月18日
+        必须剥成干净的「解压」，否则话题统计全被污染。
+        """
+        text = ("标题 编辑作品 设置权限 作品置顶 删除作品 "
+                "2026年09月18日 10:03 已发布 播放488 点赞33 "
+                "#无声视频 #治愈 #纯享放松 #解压"
+                "编辑作品设置权限作品置顶删除作品2026年09月18日")
+        st = sm.parse_card_text(text)
+        assert st.tags == ["无声视频", "治愈", "纯享放松", "解压"], \
+            f"话题应剥离 UI 尾巴，实际 {st.tags}"
+
+    def test_tags_without_spaces_between(self):
+        """话题之间没有空格时也要正确切分（实测平台会这样输出）。"""
+        text = ("播放1080 2026年09月16日 12:08 "
+                "#无声高能#细节控必看#神反转编辑作品设置权限")
+        st = sm.parse_card_text(text)
+        assert st.tags == ["无声高能", "细节控必看", "神反转"], st.tags
+
+    def test_overlong_tag_rejected(self):
+        """超过 12 字的"标签"是切分失败的产物，应丢弃。"""
+        text = "播放100 2026年09月18日 10:03 #这是一个非常非常长的不合法标签名字啊啊啊啊"
+        st = sm.parse_card_text(text)
+        assert all(len(t) <= 12 for t in st.tags), st.tags
+
     def test_strips_whitespace_and_newlines(self):
         st = sm.parse_card_text("播放\n  488\n  #测试\n2026年09月18日 10:03")
         assert st.play_count == 488
