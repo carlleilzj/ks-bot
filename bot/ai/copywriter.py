@@ -18,8 +18,9 @@ from . import tag_quality
 
 log = logging.getLogger(__name__)
 
-# IP 专栏前缀定义
-IP_PREFIXES = ["【无声治愈】", "【无声小剧场】", "【纯享放松】"]
+# IP 专栏前缀定义（2026-09-19 起统一为固定前缀【有点视频】，He 指定）
+IP_PREFIX = "【有点视频】"
+IP_PREFIXES = [IP_PREFIX]
 
 # 口吻套话：这些是**说话方式**上的烂梗，继续封。
 # 注意：情绪化标签（#笑到肚子疼 / #无声也精彩 类）已按实测数据放开
@@ -96,18 +97,23 @@ def _system_prompt(profile: PlatformProfile) -> str:
 2. 识别视频的主角（例如小猫、小狗、毛毛虫、小鸟、兔子等）和核心情节（如破茧成蝶、互相取暖、抢食物、失误翻车等）。
 3. 严禁无中生有！严禁捏造与原文无关的人类琐事（绝对禁止编造：做饭、带娃、写作业、婆媳、家庭主妇等无关剧情）。
 
-【标题 IP 规范（极其重要）】
-标题必须在 3 个专栏标签中按视频属性选择最契合的一个作为开头：
-1. 【无声治愈】—— 适用于温情救助、动物互助、破茧成长、安静陪伴等暖心内容。
-   例：【无声治愈】放慢脚步看毛毛虫破茧成蝶，被最后那一幕美到了
-   例：【无声治愈】暴风雨里互相依偎的小家伙，看完心里暖暖的
-2. 【无声小剧场】—— 适用于幽默滑稽、小动物搞笑走位、争夺食物、意外反转等逗趣内容。
-   例：【无声小剧场】两只小家伙抢一根玉米，下一秒直接原地翻车
-   例：【无声小剧场】本以为是个身法大师，结果帅不过三秒
-3. 【纯享放松】—— 适用于丝滑循环、唯美视效、治愈节律、专注小动作等视觉纯享。
-   例：【纯享放松】全程没有一句嘈杂，看它安安静静忙完太解压了
+【标题规范（极其重要）】
+1. **固定前缀**：所有标题一律以「【有点视频】」开头，无例外。
+2. 前缀之后接一句**精练的简介式钩子**，要求：
+   - 直接点出画面里最有戏剧性的瞬间/主体，让人一眼知道看点；
+   - 有吸引力、勾着人往下看，但**不准剧透结局**（留悬念是点开率的命根子）；
+   - 不准用疑问句套话结尾（「你会怎么做？」「评论区告诉我」这类烂梗禁用）；
+   - 口语化、有画面感，像朋友转述时说的话，不是新闻标题。
+   好的例子：
+     【有点视频】小家伙憋了半天气，下一秒的动作全场最佳
+     【有点视频】两条毛毛虫过独木桥，走到一半发生意外
+     【有点视频】它守了这颗蛋整整一夜，天亮后的画面值了
+   差的例子（禁止）：
+     【有点视频】安静治愈的画面（没有具体看点，纯氛围词）
+     【有点视频】看小动物日常（空洞，没有戏剧性）
+     【有点视频】太解压了吧姐妹们（套话口吻）
 
-标题总字数严格不得超过 {profile.max_title_len} 字！
+标题总字数严格不得超过 {profile.max_title_len} 字（含前缀）！
 
 【严禁句式】
 严禁出现这些已被用烂的套话：{banned_str}，禁止以「姐妹们你们呢」等俗套口吻结尾。
@@ -179,14 +185,17 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
             matched_prefix = p
             break
     if not matched_prefix:
-        # 如果模型漏写了括号，尝试补齐
-        for clean_p in ["无声治愈", "无声小剧场", "纯享放松"]:
-            if title.startswith(clean_p):
-                title = f"【{clean_p}】" + title[len(clean_p):]
-                matched_prefix = f"【{clean_p}】"
+        # 模型漏写括号或用了旧前缀 → 统一归一到【有点视频】
+        for clean_p in ("有点视频", "无声治愈", "无声小剧场", "纯享放松"):
+            if title.startswith(clean_p) or title.startswith(f"【{clean_p}】"):
+                body = title.split("】", 1)[-1] if "】" in title[:12] else title[len(clean_p):]
+                title = IP_PREFIX + body
+                matched_prefix = IP_PREFIX
                 break
         if not matched_prefix:
-            title = f"【无声治愈】{title}"
+            title = IP_PREFIX + title
+    if not title.startswith(IP_PREFIX):
+        title = IP_PREFIX + title.lstrip("【】")
 
     title = title[:profile.max_title_len]
 

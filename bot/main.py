@@ -135,10 +135,19 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
         except Exception as e:
             log.warning("[%s] 水印擦除失败（继续发布）：%s", sc, str(e)[:150])
 
+    # 封面选优（2026-09-19 升级）：均匀抽 6 帧让 vision 打分选最佳，
+    # 替代旧的第 1 秒盲截帧。降级链见 bot/ai/cover_pick.py 模块 docstring。
     try:
-        ffmpeg.extract_cover(tc, cover)
-    except ffmpeg.FFmpegError as e:
-        log.warning("[%s] 封面抽取失败（不影响流程）：%s", sc, e)
+        from .ai.cover_pick import pick_best_cover
+        pick_best_cover(tc, WORK_DIR, sc, cover, s)
+        if not cover.exists():
+            raise FileNotFoundError("选优后封面仍不存在")
+    except Exception as e:
+        log.warning("[%s] 封面选优失败（退回旧截帧）：%s", sc, str(e)[:120])
+        try:
+            ffmpeg.extract_cover(tc, cover)
+        except ffmpeg.FFmpegError as e2:
+            log.warning("[%s] 封面抽取失败（不影响流程）：%s", sc, e2)
 
     db.update(task["id"], state=State.TRANSCODED, work_path=str(tc),
               cover_path=str(cover) if cover.exists() else None, error=None)

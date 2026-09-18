@@ -128,3 +128,53 @@ def test_publish_gate_window_and_limit(tmp_path):
     # 其他平台不受影响
     assert publish_gate(s, db, "douyin") is None
     db.close()
+
+
+# ---------------------------------------------------------------------------
+# 标题固定前缀【有点视频】（2026-09-19 He 指定，替代旧三前缀体系）
+# ---------------------------------------------------------------------------
+
+def test_title_prefix_fixed_when_correct():
+    profile = PLATFORM_PROFILES["kuaishou"]
+    out = _validate({"title": "【有点视频】小家伙憋了半天气，下一秒全场最佳",
+                     "description": "d", "tags": ["无声视频", "神反转"],
+                     "category": ""}, [], profile)
+    assert out["title"].startswith("【有点视频】")
+
+
+def test_title_prefix_migrates_legacy_prefixes():
+    """旧三前缀（无声治愈/无声小剧场/纯享放松）一律迁移到【有点视频】。"""
+    profile = PLATFORM_PROFILES["kuaishou"]
+    for legacy in ("【无声治愈】暴风雨里互相依偎的小家伙",
+                   "【无声小剧场】两只小家伙抢玉米",
+                   "【纯享放松】安静看完太解压"):
+        out = _validate({"title": legacy, "description": "d",
+                         "tags": ["无声视频"], "category": ""}, [], profile)
+        assert out["title"].startswith("【有点视频】"), legacy
+
+
+def test_title_prefix_migrates_bare_prefix():
+    """模型漏写【】也要能迁移。"""
+    profile = PLATFORM_PROFILES["kuaishou"]
+    out = _validate({"title": "无声小剧场两只小家伙抢玉米，下一秒翻车",
+                     "description": "d", "tags": ["无声视频"], "category": ""},
+                    [], profile)
+    assert out["title"].startswith("【有点视频】")
+
+
+def test_title_prefix_added_when_missing():
+    """完全没有前缀时自动补【有点视频】。"""
+    profile = PLATFORM_PROFILES["kuaishou"]
+    out = _validate({"title": "它守了这颗蛋整整一夜",
+                     "description": "d", "tags": ["无声视频"], "category": ""},
+                    [], profile)
+    assert out["title"].startswith("【有点视频】")
+
+
+def test_title_prefix_no_double_prefix():
+    """已经是【有点视频】时绝不出现双重前缀。"""
+    profile = PLATFORM_PROFILES["kuaishou"]
+    out = _validate({"title": "【有点视频】正常标题",
+                     "description": "d", "tags": ["无声视频"], "category": ""},
+                    [], profile)
+    assert out["title"].count("【有点视频】") == 1
