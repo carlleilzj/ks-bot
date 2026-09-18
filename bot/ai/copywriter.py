@@ -14,18 +14,21 @@ import re
 from dataclasses import dataclass
 
 from ..config import Settings
+from . import tag_quality
 
 log = logging.getLogger(__name__)
 
 # IP 专栏前缀定义
 IP_PREFIXES = ["【无声治愈】", "【无声小剧场】", "【纯享放松】"]
 
+# 口吻套话：这些是**说话方式**上的烂梗，继续封。
+# 注意：情绪化标签（#笑到肚子疼 / #无声也精彩 类）已按实测数据放开
+# （2026-09-19），不要再把它们加回本表。详见 bot/ai/tag_quality.py。
 BANNED_PATTERNS = [
     "心里踏实", "真踏实", "心里就踏实", "心里一下子",
     "喘口气", "歇口气",
     "姐妹们", "家人们", "兄弟们",
     "带娃做饭", "做饭带娃", "写作业", "做家务", "做饭",
-    "太上头了", "停不下来", "太绝了", "拉满",
 ]
 
 
@@ -109,12 +112,30 @@ def _system_prompt(profile: PlatformProfile) -> str:
 【严禁句式】
 严禁出现这些已被用烂的套话：{banned_str}，禁止以「姐妹们你们呢」等俗套口吻结尾。
 
+【话题（tags）多样性硬要求 —— 极其重要】
+你过去生成的话题退化成近义词排列组合，等于只投了一个流量池。实测对比：
+  话题多样（含长尾/情绪词）→ 播放 1000~1500
+  话题退化成通用词         → 播放 200~500
+所以必须遵守：
+1. **同一个意思只准出现一次**。「治愈 / 治愈系 / 治愈解压 / 治愈动画」是
+   同一个词，只能选 1 个；「解压 / 解压放松 / 解压视频」同理；
+   「纯享 / 纯享放松 / 视觉纯享」同理。选了「治愈」就不准再选「治愈系」。
+2. **禁止全部用泛词**。`无声视频/治愈/解压/放松` 这种纯泛词组合是最差解，
+   最多只能占 2 个坑。
+3. **必须至少有 2 个长尾或情绪化标签**，用于撬开细分流量池。
+   情绪化标签示例（这类**鼓励使用**，不要回避）：
+     #笑到肚子疼 #无声也精彩 #笑到停不下来 #看完必笑 #名场面
+     #细节控必看 #神反转 #萌到犯规 #治愈瞬间 #快乐源泉 #看一遍不够
+4. 长尾词要**具体**：`#萌宠日常`、`#小动物剧场`、`#3D动画`、`#毛毛虫`
+   优于 `#治愈系`。
+5. tags 里第 1 个固定是「无声视频」（账号辨识度），其余按上述规则选。
+
 【输出格式】
 只输出一个合法的 JSON 对象，不要输出任何代码块标记、思考过程或多余说明：
 {{
   "title": "【无声治愈】或【无声小剧场】或【纯享放松】+ 提炼自原文案真实剧情的一句话（不超过 {profile.max_title_len} 字）",
   "description": "{profile.desc_hint}（1~2句话，真实呼应视频内容）",
-  "tags": ["无声视频", "治愈", "相关标签（与内容强相关，如小动物/搞笑/动画等）"],
+  "tags": ["无声视频", "一个具体的长尾/情绪标签", "另一个不同维度的标签", "…"],
   {category_rule}
 }}
 
@@ -178,7 +199,13 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     # 基础 IP 标签保障
     if "无声视频" not in tags:
         tags.insert(0, "无声视频")
-    tags = [t for t in tags if t][:profile.max_tags]
+    tags = [t for t in tags if t]
+
+    # 话题多样性：同家族近义词去重，空缺用长尾情绪词补齐。
+    # 实测依据见 bot/ai/tag_quality.py 模块 docstring。
+    tags = tag_quality.enforce_diversity(
+        tags, profile.max_tags, title=title, base_tag="无声视频",
+    )
 
     category = str(obj.get("category", "")).strip()
     if profile.supports_category and categories:

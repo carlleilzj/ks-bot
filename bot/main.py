@@ -663,6 +663,12 @@ def main() -> None:
     parser.add_argument("--qr-wait", type=int, default=300, metavar="SEC",
                         help="--login-qr 等待扫码的秒数（默认 300）")
     parser.add_argument("--status", action="store_true", help="查看任务列表")
+    parser.add_argument("--fetch-stats", nargs="?", const="douyin", default=None,
+                        metavar="PLATFORM",
+                        help="抓取平台作品播放量并回写 tasks（douyin/kuaishou/all），"
+                             "供话题优化使用")
+    parser.add_argument("--stats-report", action="store_true",
+                        help="只看已回流数据的话题效果报表，不抓取")
     parser.add_argument("--retry-failed", action="store_true", help="重置失败任务并续跑")
     parser.add_argument("--abandon-unpublished", action="store_true",
                         help="放弃积压未发（流水线中任务 + PENDING/FAILED 平台 job），不补发")
@@ -685,14 +691,94 @@ def main() -> None:
         return
 
     db = Database()
+    if args.fetch_stats is not None:
+        # 播放量回流：抓平台后台 → 写回 tasks.play_count，供话题优化使用。
+        # 为什么要这一步：tasks 表原本没有播放量字段，AI 生成话题只能靠
+        # 先验审美，导致话题退化成「治愈/解压/纯享」近义词排列组合。
+        from .monitor import stats as stats_mod
+        from .publish.base import launch_chromium, new_context, goto_with_retry
+        from playwright.sync_api import sync_playwright
+
+        if args.fetch_stats == "all":
+            targets = ["douyin", "kuaishou"]
+        else:
+            targets = [x.strip() for x in str(args.fetch_stats).split(",") if x.strip()]
+
+        with sync_playwright() as p:
+            for name in targets:
+                try:
+                    pub = get_publisher(name)
+                except KeyError as e:
+                    print(f"❌ {e}")
+                    continue
+                if not pub.state_path.exists():
+                    print(f"⚠️  {name}: 无登录态，跳过")
+                    continue
+                browser = launch_chromium(p, headless=not args.headed)
+                ctx = new_context(browser, pub.state_path)
+                page = ctx.new_page()
+                try:
+                    if name == "douyin":
+                        goto_with_retry(page, stats_mod.DOUYIN_MANAGE_URL)
+                        got = stats_mod.fetch_douyin_stats(page)
+                    elif name == "kuaishou":
+                        goto_with_retry(page, stats_mod.KUAISHOU_MANAGE_URL)
+                        got = stats_mod.fetch_kuaishou_stats(page)
+                    else:
+                        print(f"⚠️  {name}: 暂不支持播放量抓取")
+                        continue
+                    print(f"\n=== {name}：抓到 {len(got)} 条 ===")
+                    s = stats_mod.summarize(got)
+                    if s.get("count"):
+                        print(f"    播放量 最高 {s['max']} / 中位 {s['median']} "
+                              f"/ 平均 {s['avg']} / 最低 {s['min']}")
+                    res = stats_mod.persist(db, got, platform=name)
+                    print(f"    回写 {res['updated']} 条（未匹配 {res['unmatched']}）")
+                finally:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+        sys.exit(0)
+
+    if args.stats_report:
+        import json as _json
+        with db._lock:
+            rows = db.conn.execute(
+                """SELECT id, title, tags, play_count, like_count, published_at
+                   FROM tasks WHERE play_count IS NOT NULL
+                   ORDER BY play_count DESC"""
+            ).fetchall()
+        if not rows:
+            print("尚无播放量数据。先跑：python -m bot.main --fetch-stats douyin")
+            sys.exit(0)
+        print(f"\n=== 话题效果报表（{len(rows)} 条有播放量）===\n")
+        print(f"{'播放':>7}  {'点赞':>5}  {'发布日期':<17} 话题")
+        print("-" * 78)
+        for r in rows:
+            try:
+                tags = _json.loads(r["tags"] or "[]")
+                tag_s = " ".join("#" + str(t) for t in tags)
+            except Exception:
+                tag_s = r["tags"] or ""
+            print(f"{r['play_count']:>7}  {r['like_count'] or 0:>5}  "
+                  f"{(r['published_at'] or '')[:16]:<17} {tag_s}")
+        sys.exit(0)
+
     if args.login_qr is not None:
         # 无头登录：把二维码导成图片，人工用手机扫。用于发布端服务器（无桌面）。
-        from .publish.weixin import login_qr_image
+        # 各平台的 login_qr_image 都在各自的 publish 模块里，签名一致。
+        from .publish.weixin import login_qr_image as weixin_qr
+        from .publish.kuaishou import login_qr_image as kuaishou_qr
+
+        _QR_IMPL = {"weixin": weixin_qr, "kuaishou": kuaishou_qr}
         names = [x.strip() for x in str(args.login_qr).split(",") if x.strip()]
         ok_all = True
         for name in names:
-            if name != "weixin":
-                print(f"⚠️  --login-qr 目前仅支持 weixin（收到 {name!r}）")
+            impl = _QR_IMPL.get(name)
+            if impl is None:
+                print(f"⚠️  --login-qr 暂不支持 {name!r}"
+                      f"（可用：{'/'.join(_QR_IMPL)}）")
                 ok_all = False
                 continue
             try:
@@ -701,9 +787,8 @@ def main() -> None:
                 print(f"❌ {e}")
                 ok_all = False
                 continue
-            print(f"\n=== {pub.display_name} 二维码登录（{args.qr_wait}s 内有效）===")
-            ok_all &= bool(login_qr_image(state_path=pub.state_path,
-                                          wait_sec=args.qr_wait))
+            ok_all &= bool(impl(state_path=pub.state_path,
+                                wait_sec=args.qr_wait))
         sys.exit(0 if ok_all else 1)
     if args.login is not None:
         names = list(all_publishers()) if args.login == "all" else \

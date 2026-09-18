@@ -14,7 +14,7 @@ from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
-from ..config import DATA_DIR, KS_STATE_PATH
+from ..config import DATA_DIR, LOGS_DIR, KS_STATE_PATH
 from .base import (
     LoginExpired,
     PublishError,
@@ -311,6 +311,82 @@ def login_interactive(state_path: Path = KS_STATE_PATH) -> bool:
         print(">>> 等待登录超时，未保存登录态")
         browser.close()
         return False
+
+
+def login_qr_image(out_path: Path | None = None, state_path: Path = KS_STATE_PATH,
+                   wait_sec: int = 300) -> bool:
+    """无头环境二维码登录：截图二维码 + 轮询等待扫码，成功即存登录态。
+
+    为什么需要这个：login_interactive 需要 headless=False 弹有头浏览器，
+    在服务器（无桌面）上跑不起来。快手登录态过期后只能人工上机，
+    实测 HK B 上的快手登录态已失效（2026-09-19），作品管理页跳回登录页。
+
+    产物：logs/kuaishou_qr.png（可直接发到手机扫）
+    """
+    if out_path is None:
+        out_path = LOGS_DIR / "kuaishou_qr.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = launch_chromium(p, headless=True)
+        context = new_context(browser, state_path)
+        page = context.new_page()
+        try:
+            page.goto(PUBLISH_URL, wait_until="domcontentloaded", timeout=60000)
+            settle(page)
+            page.wait_for_timeout(8000)
+
+            # 若已登录，直接保存并返回
+            if _has_login_cookies(context) or _is_logged_in(page):
+                context.storage_state(path=str(state_path))
+                print(f">>> 检测到已登录，登录态已刷新：{state_path}")
+                browser.close()
+                return True
+
+            # 找二维码：优先常见选择器，找不到就截整个视口
+            qr = None
+            for sel in ("img.qrcode", ".qrcode-img", "[class*='qrcode'] img",
+                        "[class*='qrcode']", "canvas"):
+                loc = page.locator(sel)
+                if loc.count():
+                    qr = loc.first
+                    break
+
+            if qr is not None:
+                try:
+                    qr.screenshot(path=str(out_path))
+                    log.info("二维码已导出：%s", out_path)
+                except Exception as e:
+                    log.warning("二维码元素截图失败（%s），改截全页", str(e)[:80])
+                    page.screenshot(path=str(out_path))
+            else:
+                page.screenshot(path=str(out_path))
+                log.info("未定位到二维码元素，已截全页：%s", out_path)
+
+            print(f"\n=== 快手 二维码登录（{wait_sec}s 内有效）===")
+            print(f">>> 二维码已导出：{out_path}")
+            print(">>> 请用快手 App 扫码登录创作者中心，登录成功后自动保存登录态")
+
+            deadline = time.time() + wait_sec
+            while time.time() < deadline:
+                if _has_login_cookies(context):
+                    time.sleep(2)   # 等登录跳转把 cookie 补齐
+                    context.storage_state(path=str(state_path))
+                    print(f"\n>>> 登录成功！登录态已保存到 {state_path}")
+                    browser.close()
+                    return True
+                time.sleep(2)
+
+            print(f"\n>>> 等待登录超时（{wait_sec}s），未保存登录态")
+            browser.close()
+            return False
+        except Exception as e:
+            log.warning("快手二维码登录异常：%s", str(e)[:150])
+            try:
+                browser.close()
+            except Exception:
+                pass
+            return False
 
 
 # ---------- 发布 ----------

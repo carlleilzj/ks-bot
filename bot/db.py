@@ -49,6 +49,7 @@ _COLUMNS = {
     "category", "ks_url", "copy_json", "raw_path", "work_path", "final_path",
     "cover_path", "srt_path", "published_at", "updated_at", "media_url",
     "source_url", "source_platform", "target_platforms", "source_tag",
+    "play_count", "like_count", "stats_at",
 }
 
 _SCHEMA = """
@@ -167,6 +168,16 @@ class Database:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN target_platforms TEXT")
         if "source_tag" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN source_tag TEXT")
+        # 播放量回流（2026-09-19）：话题优化需要"哪个话题跑得好"的实测数据。
+        # 之前 tasks 表完全没有播放量字段，AI 生成话题只能靠先验审美，
+        # 导致话题退化成「治愈/解压/纯享」近义词排列组合。
+        # 现在由定时任务从各平台后台抓取后写入，供 copywriter 做话题池参考。
+        if "play_count" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN play_count INTEGER")
+        if "like_count" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN like_count INTEGER")
+        if "stats_at" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN stats_at TEXT")
         # source_url 去重后建 UNIQUE 索引（NULL/空串允许多行）
         dups = self.conn.execute(
             """SELECT source_url FROM tasks
