@@ -241,11 +241,29 @@ def _upload_with_retry(page: Page, video, max_attempts: int = 3, timeout: int = 
 
 
 def _is_logged_in(page: Page) -> bool:
-    """发布页上的快速判定：不在登录页且能找到上传入口。"""
+    """发布页上的快速判定：不在登录页且能找到上传入口。
+
+    2026-09-19 修正：作品管理页（/article/manage/*）没有文件上传入口，
+    旧逻辑在那里恒判 False（cookie 实际有效）。补两条管理页判据：
+    URL 前缀 + 页面出现「作品管理」字样。
+    """
     try:
         if "passport.kuaishou.com" in page.url:
             return False
-        return page.locator(SELECTORS["file_input"]).count() > 0
+        url = page.url
+        if url.startswith(("https://cp.kuaishou.com/article/manage",
+                           "https://cp.kuaishou.com/article/publish")):
+            return True
+        if page.locator(SELECTORS["file_input"]).count() > 0:
+            return True
+        # 兜底：管理页正文里有「作品管理」导航
+        try:
+            body = page.locator("body").inner_text(timeout=5_000)
+            if "作品管理" in body or "共" and "个作品" in body:
+                return True
+        except Exception:
+            pass
+        return False
     except Exception:
         return False
 
@@ -398,21 +416,133 @@ def login_qr_image(out_path: Path | None = None, state_path: Path = KS_STATE_PAT
                 page.screenshot(path=str(out_path))
                 log.info("未定位到二维码元素，已截全页：%s", out_path)
 
-            print(f"\n=== 快手 二维码登录（{wait_sec}s 内有效）===")
+            print(f"\n=== 快手 二维码登录（最长等 {wait_sec}s，码过期自动刷新）===")
             print(f">>> 二维码已导出：{out_path}")
             print(">>> 请用快手 App 扫码登录创作者中心，登录成功后自动保存登录态")
 
+            # 直接推送到 Telegram：人不在电脑前也能扫（手机上看图扫码最快）。
+            # 失败不阻断登录流程 —— 文件照样落盘，仍可 scp 拉取。
+            try:
+                from ..config import load_settings
+                from ..notify import telegram
+                tg = load_settings()
+                telegram.send_photo(
+                    tg, out_path,
+                    "🟠 快手登录二维码（几分钟内有效，过期会自动刷新重发）\n"
+                    "用快手 App 扫码登录创作者中心")
+                log.info("二维码已推送到 Telegram")
+            except Exception as e:
+                log.debug("Telegram 推送失败（不影响登录）：%s", str(e)[:100])
+
+            # ---- 扫码等待循环（带过期自动刷新）----
+            # 背景（2026-09-19 实测）：快手服务端的码只活 2~3 分钟，
+            # 用户拿到图再扫经常已经灰了。与其反复人肉喊"重新生成"，
+            # 不如在这里自动检测失效并刷新，把新图持续覆盖到 out_path，
+            # 谁负责展示（scp/Telegram）谁就总能拿到最新的。
+            expired_streak = 0
+            refreshes = 0
             deadline = time.time() + wait_sec
+            next_check = 0.0
             while time.time() < deadline:
                 if _has_login_cookies(context):
                     time.sleep(2)   # 等登录跳转把 cookie 补齐
                     context.storage_state(path=str(state_path))
-                    print(f"\n>>> 登录成功！登录态已保存到 {state_path}")
+                    print(f"\n>>> 登录成功！登录态已保存到 {state_path}"
+                          + (f"（中途自动刷新 {refreshes} 次）" if refreshes else ""))
                     browser.close()
                     return True
+
+                # 每 15 秒查一次是否出现「已失效」灰层
+                now = time.time()
+                if now >= next_check:
+                    next_check = now + 15
+                    try:
+                        expired = page.evaluate("""() => {
+                            const t = document.body ? document.body.innerText : '';
+                            return /二维码已失效|二维码过期|已过期|请刷新|刷新重试/.test(t);
+                        }""")
+                    except Exception:
+                        expired = False
+
+                    if expired:
+                        expired_streak += 1
+                        # 找「刷新」按钮 / 点击二维码区域重出码
+                        refreshed = False
+                        for sel_txt in ("刷新", "点击刷新", "刷新重试", "重新获取"):
+                            btn = page.get_by_text(sel_txt, exact=False)
+                            if btn.count():
+                                try:
+                                    btn.first.click(timeout=5000)
+                                    refreshed = True
+                                    break
+                                except Exception:
+                                    continue
+                        if not refreshed and qr is not None:
+                            # 没有文字按钮时，点二维码本身通常也会触发刷新
+                            try:
+                                qr.click(timeout=5000)
+                                refreshed = True
+                            except Exception:
+                                pass
+                        if refreshed:
+                            page.wait_for_timeout(4000)
+                            try:
+                                if qr is not None:
+                                    qr.screenshot(path=str(out_path))
+                                else:
+                                    page.screenshot(path=str(out_path))
+                                refreshes += 1
+                                expired_streak = 0
+                                log.info("二维码已失效，已自动刷新（第 %d 次），新图已覆盖 %s",
+                                         refreshes, out_path)
+                                # 每次刷新都重推 Telegram，保证手机上是新码
+                                try:
+                                    telegram.send_photo(
+                                        tg, out_path,
+                                        f"♻️ 二维码已过期并自动刷新（第 {refreshes} 次），"
+                                        "请扫这张新图")
+                                except Exception:
+                                    pass
+                            except Exception as e:
+                                log.warning("刷新后重新截图失败：%s", str(e)[:80])
+                        else:
+                            # 实在刷不动：整页重载兜底
+                            if expired_streak >= 2:
+                                log.warning("刷新按钮不可用，整页重载重出码")
+                                try:
+                                    page.reload(wait_until="domcontentloaded")
+                                    page.wait_for_timeout(8000)
+                                    for label in ("立即登录", "登录/注册", "登录"):
+                                        b2 = page.get_by_text(label, exact=True)
+                                        if b2.count():
+                                            b2.first.click(timeout=6000)
+                                            page.wait_for_timeout(5000)
+                                            break
+                                    for label in ("扫码登录", "二维码登录"):
+                                        t2 = page.get_by_text(label, exact=True)
+                                        if t2.count():
+                                            t2.first.click(timeout=6000)
+                                            page.wait_for_timeout(4000)
+                                            break
+                                    for sel in ("img.qrcode", ".qrcode-img",
+                                                "[class*='qrcode'] img",
+                                                "[class*='qrcode']"):
+                                        loc = page.locator(sel)
+                                        if loc.count() and loc.first.is_visible():
+                                            loc.first.screenshot(path=str(out_path))
+                                            qr = loc.first
+                                            refreshes += 1
+                                            expired_streak = 0
+                                            log.info("整页重载后重新导出二维码（第 %d 次）", refreshes)
+                                            break
+                                except Exception as e:
+                                    log.warning("整页重载失败：%s", str(e)[:80])
+
                 time.sleep(2)
 
-            print(f"\n>>> 等待登录超时（{wait_sec}s），未保存登录态")
+            print(f"\n>>> 等待登录超时（{wait_sec}s）"
+                  + (f"，中途刷新 {refreshes} 次" if refreshes else "")
+                  + "，未保存登录态")
             browser.close()
             return False
         except Exception as e:

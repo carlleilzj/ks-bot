@@ -243,6 +243,26 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
         f"{caption.strip() or '（无外文简介，请按无声治愈/纯享短片构思）'}\n\n"
         f"【语音转录文本】\n{raw or '（视频无对白/无人声，纯画面叙事）'}\n\n"
     )
+    # 动态话题榜：把回流播放量算出的 Top-N 注入 prompt（每次生成现查现注入）。
+    # 榜单为空（新库/没抓过数据）时返回空串，自然跳过 —— 数据回流是增强不是依赖。
+    try:
+        from ..db import Database
+        from .hot_tags import top_tags, format_for_prompt
+        ranked = top_tags(Database(), min_play=500, limit=10,
+                          exclude={"无声视频"})
+        hot_block = format_for_prompt(ranked)
+        if hot_block:
+            user_content += (
+                f"\n\n【近期实测高播放话题榜（来自本账号真实数据，动态更新）】\n"
+                f"{hot_block}\n"
+                f"以上话题已被验证能进对应流量池。你可以直接选用其中与视频内容"
+                f"相符的（相符才用，硬凑会伤账号），也可以用新的长尾词，"
+                f"但必须遵守上面的多样性硬要求。\n"
+            )
+    except Exception as e:
+        # 榜单失败绝不阻塞生成 —— 打日志后按无榜单处理
+        log.debug("话题榜注入跳过：%s", str(e)[:100])
+
     if profile.supports_category and categories:
         user_content += f"【{profile.display_name}可选分区列表】\n{'、'.join(categories)}"
     else:

@@ -316,7 +316,76 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
 # 审核巡检节流与发布追踪调度
 _last_audit_at: float = 0.0
 AUDIT_INTERVAL = 30 * 60  # 30 分钟兜底巡检
+STATS_INTERVAL = 6 * 3600  # 播放量回流：6 小时一次足够（播放数据变化慢）
+_last_stats_at: float = 0.0
 _scheduled_audits: list[float] = []
+
+
+def maybe_refresh_stats(s: Settings) -> None:
+    """周期性抓播放量回写库（供话题榜使用，失败静默）。
+
+    架构约束（实测踩过）：抖音登录态在阿里云、published_at 记录在 HK B，
+    两库不互通。本函数跑在**有登录态的机器**上（阿里云 publish worker），
+    只抓数据；而 persist 匹配需要 published_at —— 登录态与库不在同一台时
+    匹配不上。所以策略是：本机库里有已发布记录才跑，否则跳过。
+    阿里云侧的回流由手动两段式（dump → HK B apply）补足。
+    """
+    global _last_stats_at
+    now = time.time()
+    if now - _last_stats_at < STATS_INTERVAL:
+        return
+    _last_stats_at = now
+
+    from .db import Database
+    db = Database()
+    try:
+        n = db.conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE published_at IS NOT NULL"
+        ).fetchone()[0]
+    except Exception:
+        return
+    if not n:
+        log.debug("本机库无已发布记录（记录在 HK B），跳过播放量抓取")
+        return
+
+    from pathlib import Path
+    from .monitor import stats as stats_mod
+    from .publish.base import launch_chromium, new_context, goto_with_retry
+    from playwright.sync_api import sync_playwright
+
+    targets = []
+    for name in ("douyin", "kuaishou"):
+        try:
+            pub = get_publisher(name)
+        except KeyError:
+            continue
+        if pub.state_path.exists():
+            targets.append((name, pub))
+    if not targets:
+        return
+
+    refreshed = 0
+    with sync_playwright() as p:
+        for name, pub in targets:
+            try:
+                browser = launch_chromium(p, headless=True)
+                ctx = new_context(browser, pub.state_path)
+                page = ctx.new_page()
+                try:
+                    url = (stats_mod.DOUYIN_MANAGE_URL if name == "douyin"
+                           else stats_mod.KUAISHOU_MANAGE_URL)
+                    goto_with_retry(page, url, timeout=60000)
+                    got = (stats_mod.fetch_douyin_stats(page) if name == "douyin"
+                           else stats_mod.fetch_kuaishou_stats(page))
+                    if got:
+                        res = stats_mod.persist(db, got, platform=name)
+                        refreshed += res["updated"]
+                finally:
+                    browser.close()
+            except Exception as e:
+                log.debug("播放量抓取失败（%s，忽略）：%s", name, str(e)[:100])
+    if refreshed:
+        log.info("播放量回流完成：更新 %d 条（话题榜在下次生成时自动重算）", refreshed)
 
 
 def schedule_douyin_audit(delay_seconds: int, reason: str = "") -> None:
@@ -381,6 +450,7 @@ def run_once(base: str, s: Settings) -> int:
             n += 1
             time.sleep(5)  # 平台间小间隔
     maybe_audit(base, s)
+    maybe_refresh_stats(s)
     return n
 
 
