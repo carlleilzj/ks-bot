@@ -118,14 +118,20 @@ def run_audit_check(base: str, s: Settings, dry_run: bool = False) -> int:
             log.error("审核巡检出错：%s", r["error"][:150])
             continue
         matched = r.get("matched")
+        # 兼容两种来源：通知类结果带 'notice'，作品类结果带 'cand'。
+        # 原来硬取 r['notice'] 会在作品类结果上抛 KeyError（实测踩到）。
+        notice = r.get("notice") or {}
+        cand = r.get("cand") or {}
+        detail = (notice.get("text") or cand.get("reason")
+                  or cand.get("title") or "")
         note = (f"标题：{(matched or {}).get('title', '')[:60]}｜"
                 f"发布：{(matched or {}).get('published_at', '')}｜"
-                f"原因：{r['notice'].get('text', '')[:200]}")
+                f"原因：{detail[:200]}")
         if not matched:
-            log.warning("违规通知未匹配到作品，仅告警：%s", r["notice"].get("text", "")[:120])
+            log.warning("违规项未匹配到作品，仅告警：%s", detail[:120])
             try:
-                telegram.notify_info(s, f"⚠️ 抖音审核违规通知（未匹配到本地作品）\n"
-                                        f"{r['notice'].get('text', '')[:300]}")
+                telegram.notify_info(s, f"⚠️ 抖音审核违规（未匹配到本地作品）\n"
+                                        f"{detail[:300]}")
             except Exception:
                 pass
             continue

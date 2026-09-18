@@ -97,19 +97,98 @@ def _load_manage(page, tries: int = 4) -> str:
 
 
 def _switch_tab(page, name: str) -> str:
-    """切到指定 tab，返回切换后的正文。"""
+    """切换到指定审核状态筛选，返回切换后的正文。
+
+    2026-09-18 抖音创作者中心改版：原来是 `role=tab` 的一排 tab
+    （全部/已发布/审核中/未通过），现改为**「审核状态」下拉筛选器**。
+    role=tab 数量变成 0，旧代码 get_by_role("tab") 找不到就记一条
+    「未找到 tab」警告后返回空串，上层于是认为「无违规作品」——
+    **静默漏检**（实测页面上明明有「流量减少」的违规作品）。
+
+    新结构（实测）：
+        <div class="dy-creator-content-select-content-wrapper">
+          <span class="dy-creator-content-select-selection-text
+                       dy-creator-content-select-selection-placeholder">审核状态</span>
+        </div>
+      点击后展开：全部 / 已发布 / 审核中 / 未通过
+
+    策略：先试新下拉，再兼容旧的 role=tab。
+    """
+    # ---- 路径 A：新版「审核状态」下拉 ----
+    try:
+        # 找触发器：**不能靠文字** —— 占位文本「审核状态」在选中一次后
+        # 就被替换成当前值（如「未通过」），第二次调用就找不到它了。
+        # 用结构定位：工具栏里第 1 个 .dy-creator-content-select-selection。
+        trig_ok = page.evaluate("""() => {
+            const sels = [...document.querySelectorAll(
+                '.dy-creator-content-select-selection, [class*="select-selection"]')]
+                .filter(e => e.offsetParent || e.getClientRects().length);
+            if (!sels.length) return false;
+            const s = sels[0];
+            for (const ev of ['mousedown', 'mouseup', 'click']) {
+                s.dispatchEvent(new MouseEvent(ev, {
+                    bubbles: true, cancelable: true, view: window, detail: 1
+                }));
+            }
+            return true;
+        }""")
+        if trig_ok:
+            page.wait_for_timeout(2500)
+            # 展开后点选目标项。
+            # 实测结构（2026-09-18）：
+            #   <div class="dy-creator-content-select-option">
+            #     <div class="dy-creator-content-select-option-text">未通过</div>
+            #   </div>
+            picked = page.evaluate("""(want) => {
+                const opts = [...document.querySelectorAll(
+                    '.dy-creator-content-select-option, [class*="select-option"]')];
+                let hit = null;
+                for (const o of opts) {
+                    if (!(o.offsetParent || o.getClientRects().length)) continue;
+                    const t = (o.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (t === want) { hit = o; break; }
+                }
+                if (!hit) {
+                    for (const e of document.querySelectorAll('*')) {
+                        if (!(e.offsetParent || e.getClientRects().length)) continue;
+                        const t = (e.textContent || '').replace(/\\s+/g, ' ').trim();
+                        if (t === want && e.children.length === 0) { hit = e; break; }
+                    }
+                }
+                if (!hit) return false;
+                const target = hit.querySelector('[class*="option-text"]') || hit;
+                for (const node of [target, hit]) {
+                    for (const ev of ['mousedown', 'mouseup', 'click']) {
+                        node.dispatchEvent(new MouseEvent(ev, {
+                            bubbles: true, cancelable: true, view: window, detail: 1
+                        }));
+                    }
+                }
+                return true;
+            }""", name)
+            if picked:
+                page.wait_for_timeout(7000)
+                log.info("已按「审核状态 = %s」筛选", name)
+                return page.locator("body").inner_text(timeout=15_000)
+            log.debug("审核状态下拉里没找到 %r 选项", name)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(800)
+    except Exception as e:
+        log.debug("审核状态下拉路径失败（回落 tab）：%s", str(e)[:100])
+
+    # ---- 路径 B：旧版 role=tab ----
     try:
         t = page.get_by_role("tab", name=name)
         if not t.count():
             t = page.get_by_text(name, exact=True)
         if not t.count():
-            log.warning("未找到 tab %r", name)
+            log.warning("未找到「审核状态」筛选项 %r（新版下拉与旧版 tab 都没命中）", name)
             return ""
         t.first.click()
         page.wait_for_timeout(7000)
         return page.locator("body").inner_text(timeout=15_000)
     except Exception as e:
-        log.warning("切换 tab %r 失败：%s", name, str(e)[:100])
+        log.warning("切换筛选 %r 失败：%s", name, str(e)[:100])
         return ""
 
 
