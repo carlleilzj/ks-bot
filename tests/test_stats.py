@@ -70,6 +70,42 @@ class TestParseCardText:
         st = sm.parse_card_text(text)
         assert all(len(t) <= 12 for t in st.tags), st.tags
 
+    def test_ks_block_cn_number_and_dash_date(self):
+        """回归：快手卡片是 短横线日期 + 中文数字缩写 + 三列裸数字。
+
+        与抖音完全不同：没有「播放」字样、日期不是中文格式。
+        实测样例（2026-09-19）：
+            1.7万 → 17000；3,590 → 3590；11.4万 → 114000
+        三列顺序固定 播放/评论/点赞（67.4万播放配 98/2784，
+        只能是评论98、点赞2784，反了不合常理）。
+        """
+        blk = ("00:49\n"
+               "【纯享放松】安安静静看完全程 #无声视频 #纯享放松 #治愈系 #视觉解压\n"
+               "已发布\n2026-09-18 10:06\n 1.7万\n 3\n 83")
+        from bot.monitor.stats import _parse_ks_block
+        st = _parse_ks_block(blk)
+        assert st.play_count == 17000, st.play_count
+        assert st.like_count == 83
+        assert st.published_at == "2026-09-18 10:06"
+        assert st.tags == ["无声视频", "纯享放松", "治愈系", "视觉解压"]
+
+    def test_ks_block_comma_number(self):
+        from bot.monitor.stats import _parse_ks_block
+        blk = ("00:30\n【纯享放松】看毛茸茸小家伙 #无声视频 #治愈动画\n"
+               "已发布\n2026-09-17 18:20\n 3,590\n 0\n 8")
+        st = _parse_ks_block(blk)
+        assert st.play_count == 3590
+        assert st.like_count == 8
+
+    def test_ks_block_wan_scale(self):
+        """11.4万 → 114000；67.4万+置顶行也能解析。"""
+        from bot.monitor.stats import _parse_ks_block
+        blk = ("00:26\n【纯享放松】静静感受宁静\n置顶\n"
+               "已发布\n2026-08-28 18:12\n流量助推\n 67.4万\n 98\n 2,784")
+        st = _parse_ks_block(blk)
+        assert st.play_count == 674000
+        assert st.like_count == 2784
+
     def test_strips_whitespace_and_newlines(self):
         st = sm.parse_card_text("播放\n  488\n  #测试\n2026年09月18日 10:03")
         assert st.play_count == 488

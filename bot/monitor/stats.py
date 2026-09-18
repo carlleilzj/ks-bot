@@ -47,8 +47,28 @@ class WorkStat:
 # ---------------------------------------------------------------------------
 
 _DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2}:\d{2})")
+# 快手日期是短横线格式：2026-09-18 12:12（与抖音的中文格式不同）
+_DATE_DASH_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}:\d{2})")
 _PLAY_RE = re.compile(r"播放\s*(\d+)")
 _LIKE_RE = re.compile(r"点赞\s*(\d+)")
+# 快手卡片没有「播放」标签，三列裸数字（播放/评论/点赞）直接跟在日期后面，
+# 且数字用中文缩写：267 / 3,590 / 1.7万 / 11.4万。
+_NUM_LINE_RE = re.compile(r"^(\d+(?:,\d{3})*(?:\.\d+)?)(万)?$")
+# 判定列序的依据（2026-09-19 实测）：67.4万 播放的作品三列是 98 / 2,784 ——
+# 98 只能是评论、2784 是点赞；反过来（98赞2784评论）不合常理。
+# 所以列序固定：播放 / 评论 / 点赞。
+
+
+def _parse_cn_number(s: str) -> int:
+    """'267' → 267；'3,590' → 3590；'1.7万' → 17000；'11.4万' → 114000。"""
+    s = (s or "").strip().replace(",", "")
+    m = re.match(r"^(\d+(?:\.\d+)?)(万)?$", s)
+    if not m:
+        return 0
+    val = float(m.group(1))
+    if m.group(2):
+        val *= 10000
+    return int(val)
 # 话题：从「#」到**下一个 # 或开头**为止，取最左边一截。
 # 卡片文本是连续拼接的（"…#解压编辑作品设置权限作品置顶删除作品2026年…"），
 # 所以先按下一个 # / 到串首 切段，再把段内的 UI 文案剥掉。
@@ -171,7 +191,21 @@ def fetch_douyin_stats(page, settle_ms: int = 10_000) -> list[WorkStat]:
 
 
 def fetch_kuaishou_stats(page, settle_ms: int = 12_000) -> list[WorkStat]:
-    """从快手作品管理页抓数据（需登录态有效）。"""
+    """从快手作品管理页抓数据（需登录态有效）。
+
+    快手卡片结构与抖音完全不同（2026-09-19 实测）：
+
+        00:49                        ← MM:SS 时长行 = 卡片天然分界
+        【纯享放松】安安静静看完全程… #无声视频 #纯享放松 #治愈系 #视觉解压
+        已发布
+        2026-09-18 10:06             ← 短横线日期
+         1.7万                        ← 播放（中文缩写，无「播放」字样）
+         3                            ← 评论
+         83                           ← 点赞
+
+    三列裸数字固定顺序：播放 / 评论 / 点赞。列序判定依据：67.4万 播放的
+    作品三列是 98 / 2,784 —— 98 只能是评论、2784 是点赞，反了不合常理。
+    """
     try:
         page.wait_for_timeout(settle_ms)
         body = page.locator("body").inner_text(timeout=15_000)
@@ -184,16 +218,74 @@ def fetch_kuaishou_stats(page, settle_ms: int = 12_000) -> list[WorkStat]:
         log.warning("快手登录态已失效，跳过作品数据抓取")
         return []
 
-    # 快手卡片结构与抖音不同，先按「播放」分块粗解析
+    # 按 MM:SS / H:MM:SS 时长行切块（每块 = 一张作品卡片的完整文本）
+    blocks = re.split(r"(?m)^(?=\d{1,2}:\d{2}(?::\d{2})?\s*$)", body)
+
     stats: list[WorkStat] = []
-    blocks = re.split(r"(?=播放)", body)
-    for b in blocks:
-        st = parse_card_text(b[:600])
+    for blk in blocks:
+        st = _parse_ks_block(blk)
         if st:
             stats.append(st)
     stats = _dedupe(stats)
     log.info("快手作品数据：解析到 %d 条", len(stats))
     return stats
+
+
+def _parse_ks_block(blk: str) -> WorkStat | None:
+    """解析单张快手卡片文本块。"""
+    t = re.sub(r"[ \t]+", " ", blk).strip()
+    if not t:
+        return None
+
+    st = WorkStat()
+
+    # 日期：短横线格式（快手的与抖音中文格式不同）
+    dm = _DATE_DASH_RE.search(t)
+    if dm:
+        y, mo, d, hm = dm.groups()
+        st.published_at = f"{y}-{int(mo):02d}-{int(d):02d} {hm}"
+    else:
+        # 兼容中文格式（万一页面结构变体）
+        dm2 = _DATE_RE.search(t)
+        if dm2:
+            y, mo, d, hm = dm2.groups()
+            st.published_at = f"{y}-{int(mo):02d}-{int(d):02d} {hm}"
+
+    # 话题：# 开头到下一个 # / 行尾
+    st.tags = []
+    for raw in re.findall(r"#([^\s#]+)", t):
+        tag = raw.strip()
+        if tag and len(tag) <= 12 and tag not in st.tags:
+            st.tags.append(tag)
+    st.tags = st.tags[:10]
+
+    # 三列数字：日期行之后的裸数字行（可带万缩写），固定 播放/评论/点赞
+    date_end = dm.end() if dm else 0
+    nums: list[int] = []
+    for line in t[date_end:].splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = _NUM_LINE_RE.match(line)
+        if m:
+            nums.append(_parse_cn_number(line))
+        elif nums:
+            break   # 数字列结束了
+    if len(nums) >= 3:
+        st.play_count = nums[0]
+        st.like_count = nums[2]
+    elif len(nums) == 1:
+        # 只有播放列（评论/点赞为 0 时页面可能不渲染）
+        st.play_count = nums[0]
+
+    if not st.play_count or not st.published_at:
+        return None
+
+    # 标题提示：时长行之后、日期之前的第一段长文本
+    head = t.split("已发布")[0]
+    st.title_hint = head[:80]
+
+    return st
 
 
 # ---------------------------------------------------------------------------
