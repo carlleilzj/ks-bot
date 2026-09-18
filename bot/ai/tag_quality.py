@@ -128,14 +128,19 @@ def enforce_diversity(
     max_tags: int,
     title: str = "",
     base_tag: str = "无声视频",
+    fixed_tags: list[str] | None = None,
 ) -> list[str]:
     """让话题保持多样性：同家族去重，空缺用长尾情绪词补齐。
 
     参数
-        tags      —— 原始标签（不含 #）
-        max_tags  —— 该平台标签上限
-        title     —— 用于判断情感极性
-        base_tag  —— 固定占位的基础 IP 标签（默认「无声视频」）
+        tags       —— 原始标签（不含 #）
+        max_tags   —— 该平台标签上限
+        title      —— 用于判断情感极性
+        base_tag   —— 固定占位的基础 IP 标签（默认「无声视频」）
+        fixed_tags —— He 指定的固定话题（2026-09-19：#搞笑日常 #沙雕视频
+                      #搞笑动画 #笑到肚子疼）。非空时话题完全固定：
+                      base_tag + fixed_tags 截到 max_tags，AI 生成的
+                      tags 全部忽略。快手 max_tags=4 恰好放下这四个。
 
     返回
         新的标签列表，长度 <= max_tags，**已去家族重复**。
@@ -147,6 +152,11 @@ def enforce_diversity(
         4. 若全部标签都属于**同一个**家族且无其他家族可选，
            则保留原样（避免把唯一有效信息也删掉）。
     """
+    # 话题完全固定模式（He 2026-09-19 指定）：不做去重补齐那套，
+    # 直接 固定组合 截断返回 —— AI 选的话题再好也不如数据验证过的稳。
+    if fixed_tags:
+        return ([base_tag] + list(fixed_tags))[:max_tags]
+
     clean: list[str] = []
     for t in tags or []:
         n = _norm(t)

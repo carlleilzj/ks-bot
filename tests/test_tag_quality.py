@@ -157,3 +157,39 @@ class TestPolarity:
 
     def test_healing_detection(self):
         assert tq.detect_polarity(["治愈", "放松"], "安静的午后") == "healing"
+
+
+# ---------------------------------------------------------------------------
+# 固定话题组合（2026-09-19 He 指定：#搞笑日常 #沙雕视频 #搞笑动画 #笑到肚子疼）
+# ---------------------------------------------------------------------------
+
+def test_fixed_tags_ks_four_slots():
+    """快手 4 坑：无声视频 + 指定三项。AI 生成的 tags 全部忽略。"""
+    out = tq.enforce_diversity(["治愈", "解压", "纯享放松"], 4,
+                            fixed_tags=["搞笑日常", "沙雕视频", "搞笑动画",
+                                        "笑到肚子疼"])
+    assert out == ["无声视频", "搞笑日常", "沙雕视频", "搞笑动画"], out
+
+
+def test_fixed_tags_dy_five_slots():
+    """抖音 5 坑：多放下「笑到肚子疼」。"""
+    out = tq.enforce_diversity(["治愈"], 5,
+                            fixed_tags=["搞笑日常", "沙雕视频", "搞笑动画",
+                                        "笑到肚子疼"])
+    assert out == ["无声视频", "搞笑日常", "沙雕视频", "搞笑动画", "笑到肚子疼"]
+
+
+def test_fixed_tags_empty_input():
+    """AI 没生成 tags 也照样输出固定组合（不回退 [base_tag]）。"""
+    out = tq.enforce_diversity([], 4,
+                            fixed_tags=["搞笑日常", "沙雕视频", "搞笑动画"])
+    assert out == ["无声视频", "搞笑日常", "沙雕视频", "搞笑动画"]
+
+
+def test_fixed_tags_none_keeps_old_behavior():
+    """fixed_tags=None 时走原有多样性逻辑（回归保护）。"""
+    out = tq.enforce_diversity(["无声视频", "治愈", "治愈系", "治愈解压"], 4)
+    # 旧逻辑：同家族去重 + 补齐
+    assert out[0] == "无声视频"
+    assert out.count("治愈") + out.count("治愈系") + out.count("治愈解压") == 1 \
+        or len(out) == 4   # 补齐路径也允许
