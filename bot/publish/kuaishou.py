@@ -343,14 +343,49 @@ def login_qr_image(out_path: Path | None = None, state_path: Path = KS_STATE_PAT
                 browser.close()
                 return True
 
-            # 找二维码：优先常见选择器，找不到就截整个视口
+            # 未登录时 PUBLISH_URL 会落到**营销落地页**（不是登录页），
+            # 页面上没有二维码，只有一个「立即登录」按钮，必须点进去。
+            # 实测（2026-09-19）：不点它，截出来的只有平台介绍页，无码可扫。
+            for label in ("立即登录", "登录/注册", "登录"):
+                btn = page.get_by_text(label, exact=True)
+                if btn.count():
+                    try:
+                        btn.first.click(timeout=8000)
+                        log.info("已点击「%s」，等待跳转到登录页", label)
+                        page.wait_for_timeout(6000)
+                        break
+                    except Exception as e:
+                        log.debug("点击「%s」失败：%s", label, str(e)[:80])
+
+            # 登录页默认是**密码登录**（手机号+密码输入框），
+            # 必须先切到「扫码登录」标签才会显示二维码。
+            # 实测（2026-09-19）：不切标签，截图里只有密码输入框。
+            for label in ("扫码登录", "二维码登录"):
+                tab = page.get_by_text(label, exact=True)
+                if tab.count():
+                    try:
+                        tab.first.click(timeout=8000)
+                        log.info("已切到「%s」标签", label)
+                        page.wait_for_timeout(5000)
+                        break
+                    except Exception as e:
+                        log.debug("切换「%s」失败：%s", label, str(e)[:80])
+
+            # 找二维码：优先常见选择器（要求可见），找不到就截整个视口
             qr = None
             for sel in ("img.qrcode", ".qrcode-img", "[class*='qrcode'] img",
+                        "[class*='qr-code']", "img[src*='qr']",
                         "[class*='qrcode']", "canvas"):
                 loc = page.locator(sel)
-                if loc.count():
-                    qr = loc.first
-                    break
+                if not loc.count():
+                    continue
+                try:
+                    if loc.first.is_visible():
+                        qr = loc.first
+                        log.info("定位到二维码元素：%s", sel)
+                        break
+                except Exception:
+                    continue
 
             if qr is not None:
                 try:
