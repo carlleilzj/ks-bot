@@ -95,10 +95,94 @@ def video_info(path: Path) -> dict:
     return info
 
 
+# 短视频平台信息流是 9:16。宽于该比例（16:9 / 4:3 / 1:1）必须铺竖屏，
+# 否则快手/抖音用首帧当封面时上下黑边被当成「黑封面」。
+VERTICAL_W, VERTICAL_H = 720, 1280
+LANDSCAPE_ASPECT = 0.70          # w/h > 0.70 视为需要铺竖屏（9:16=0.5625）
+BLACK_LUMA_MAX = 18.0            # YAVG 低于此视为黑帧
+
+
+def is_landscape(width: int, height: int) -> bool:
+    """画面宽于竖屏信息流（含 16:9 / 4:3 / 1:1），需要铺 9:16。"""
+    if width <= 0 or height <= 0:
+        return False
+    return (width / height) > LANDSCAPE_ASPECT
+
+
+def _parse_yavg(text: str) -> float | None:
+    """从 ffmpeg signalstats 日志里抠 YAVG。"""
+    for line in (text or "").splitlines():
+        if "YAVG" not in line:
+            continue
+        try:
+            return float(line.split("YAVG")[-1].split("=")[-1].strip().split()[0])
+        except (IndexError, ValueError):
+            continue
+    return None
+
+
+def mean_luma(path: Path) -> float | None:
+    """读一张图的平均亮度 0~255；读失败返回 None。"""
+    if not path.exists():
+        return None
+    try:
+        proc = subprocess.run(
+            [_ffmpeg(), "-i", str(path),
+             "-vf", "scale=64:64,signalstats,metadata=print:file=-",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=30,
+        )
+        return _parse_yavg((proc.stderr or "") + (proc.stdout or ""))
+    except Exception:
+        return None
+
+
+def is_black_frame(path: Path, luma_max: float = BLACK_LUMA_MAX) -> bool:
+    """文件过小或平均亮度过低 → 黑帧。"""
+    if not path.exists():
+        return True
+    if path.stat().st_size < 2500:
+        return True
+    y = mean_luma(path)
+    return y is not None and y < luma_max
+
+
+def _vertical_pad_filter() -> str:
+    """模糊铺底 + 原片居中，输出 720x1280。"""
+    return (
+        f"[0:v]split=2[orig][copy];"
+        f"[copy]scale={VERTICAL_W}:{VERTICAL_H}:force_original_aspect_ratio=increase,"
+        f"crop={VERTICAL_W}:{VERTICAL_H},boxblur=20:1[bg];"
+        f"[orig]scale={VERTICAL_W}:{VERTICAL_H}:force_original_aspect_ratio=decrease[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p"
+    )
+
+
+def pad_image_to_vertical(src: Path, dst: Path) -> Path:
+    """把封面图铺成 9:16（模糊铺底），横图不再上下留黑边。"""
+    if not src.exists():
+        return dst
+    tmp = dst.with_name(dst.stem + ".pad.jpg")
+    try:
+        _run([
+            _ffmpeg(), "-y", "-i", str(src),
+            "-filter_complex", _vertical_pad_filter(),
+            "-frames:v", "1", "-q:v", "2", str(tmp),
+        ], timeout=60)
+        tmp.replace(dst)
+    except FFmpegError:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        if src != dst:
+            dst.write_bytes(src.read_bytes())
+    return dst
+
+
 def ensure_compatible(src: Path, dst: Path) -> Path:
     """确保视频为快手网页上传最稳的 H.264/AAC + faststart，分辨率不高于 1080p。
 
-    已兼容时仅 remux（秒级），否则转码。幂等：dst 已存在直接返回。
+    横屏（YouTube 16:9 等）会铺成 720x1280 竖屏（模糊铺底 + 原片居中），
+    避免平台拿片头当封面时出现整块黑边。已兼容的竖屏仅 remux。幂等。
     """
     if dst.exists():
         return dst
@@ -106,10 +190,24 @@ def ensure_compatible(src: Path, dst: Path) -> Path:
     too_tall = info["height"] > 1080
     bad_video = info["vcodec"] not in ("h264", "avc")
     bad_audio = info["has_audio"] and info["acodec"] not in ("aac",)
+    need_pad = is_landscape(info["width"], info["height"])
     tmp = dst.with_name(dst.stem + ".tmp.mp4")
 
-    if not (too_tall or bad_video or bad_audio):
+    if need_pad:
+        cmd = [
+            _ffmpeg(), "-y", "-i", str(src),
+            "-filter_complex", _vertical_pad_filter(),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+        ]
+        if info["has_audio"]:
+            cmd += ["-c:a", "aac", "-b:a", "128k"]
+        else:
+            cmd += ["-an"]
+        cmd += ["-movflags", "+faststart", str(tmp)]
+        mode = "竖屏铺底"
+    elif not (too_tall or bad_video or bad_audio):
         cmd = [_ffmpeg(), "-y", "-i", str(src), "-c", "copy", "-movflags", "+faststart", str(tmp)]
+        mode = "remux"
     else:
         cmd = [_ffmpeg(), "-y", "-i", str(src)]
         if too_tall or bad_video:
@@ -121,10 +219,11 @@ def ensure_compatible(src: Path, dst: Path) -> Path:
         if info["has_audio"]:
             cmd += ["-c:a", "aac", "-b:a", "128k"]
         cmd += ["-movflags", "+faststart", str(tmp)]
+        mode = "转码"
+
     _run(cmd)
     tmp.rename(dst)
-    log.info("视频处理完成 %s（%dx%d, %s）", dst.name, info["width"], info["height"],
-             "remux" if not (too_tall or bad_video or bad_audio) else "转码")
+    log.info("视频处理完成 %s（%dx%d → %s）", dst.name, info["width"], info["height"], mode)
     return dst
 
 
@@ -148,15 +247,32 @@ def strip_metadata(src: Path, dst: Path) -> Path:
 
 
 def extract_cover(src: Path, dst: Path, at: float = 1.0) -> Path:
-    if dst.exists():
+    """抽封面；片头黑帧时向后探测，抽到非黑帧为止。"""
+    if dst.exists() and not is_black_frame(dst):
         return dst
-    for t in (at, 0.0):
+    info = video_info(src) if src.exists() else {}
+    duration = float(info.get("duration") or 0) or 30.0
+    # 优先用户指定点，再 10%/25%/50%，最后才 0s
+    candidates = [at, duration * 0.10, duration * 0.25, duration * 0.50, 2.0, 0.5, 0.0]
+    seen: set[float] = set()
+    last_ok: Path | None = None
+    for t in candidates:
+        t = max(0.0, min(t, max(duration - 0.05, 0.0)))
+        key = round(t, 2)
+        if key in seen:
+            continue
+        seen.add(key)
         try:
             _run([_ffmpeg(), "-y", "-ss", str(t), "-i", str(src),
                   "-frames:v", "1", "-q:v", "2", str(dst)], timeout=120)
-            return dst
         except FFmpegError:
             continue
+        if dst.exists():
+            last_ok = dst
+            if not is_black_frame(dst):
+                return dst
+    if last_ok is not None:
+        return last_ok
     raise FFmpegError(f"无法从 {src.name} 抽取封面")
 
 

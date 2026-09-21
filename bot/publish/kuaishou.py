@@ -1001,10 +1001,19 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
 
 
 def _upload_cover(page: Page, cover: Path) -> None:
+    """上传自定义封面；必须点到 file input 才算成功。
+
+    旧实现：点到「编辑封面」文案就打「已上传自定义封面」，即使没选中
+    input[type=file]——YouTube 横屏片头黑帧就会被平台当封面。
+    """
     try:
-        for text in ("编辑封面", "修改封面", "更换封面", "设置封面"):
-            btn = page.get_by_text(text, exact=False).first
-            if btn.count() and btn.is_visible():
+        img_input = page.locator(SELECTORS["cover_input"]).first
+        opened = img_input.count() > 0
+        if not opened:
+            for text in ("编辑封面", "修改封面", "更换封面", "设置封面", "上传封面"):
+                btn = page.get_by_text(text, exact=False).first
+                if not (btn.count() and btn.is_visible()):
+                    continue
                 btn.click()
                 rand_sleep()
                 up = page.get_by_text("上传封面", exact=False).first
@@ -1013,16 +1022,21 @@ def _upload_cover(page: Page, cover: Path) -> None:
                     rand_sleep()
                 img_input = page.locator(SELECTORS["cover_input"]).first
                 if img_input.count():
-                    img_input.set_input_files(str(cover))
-                    rand_sleep(1.0, 2.0)
-                    for t in ("完成", "确定"):
-                        b = page.get_by_text(t, exact=True).first
-                        if b.count() and b.is_visible():
-                            b.click()
-                            break
-                    log.info("已上传自定义封面")
-                    return
-        log.info("未找到封面上传入口，使用平台自动封面")
+                    opened = True
+                    break
+        if not opened or not img_input.count():
+            log.info("未找到封面上传入口，使用平台自动封面")
+            shot(page, "ks_cover_no_input")
+            return
+        img_input.set_input_files(str(cover))
+        rand_sleep(1.0, 2.0)
+        for t in ("完成", "确定"):
+            b = page.get_by_text(t, exact=True).first
+            if b.count() and b.is_visible():
+                b.click()
+                break
+        log.info("已上传自定义封面")
+        shot(page, "ks_cover_uploaded")
     except Exception as e:
         log.warning("封面上传失败（不影响发布）：%s", e)
         shot(page, "ks_cover_fail")

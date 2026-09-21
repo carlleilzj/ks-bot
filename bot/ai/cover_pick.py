@@ -68,8 +68,11 @@ def _extract_candidates(video: Path, work_dir: Path, sc: str) -> list[Path]:
                 ffmpeg._ffmpeg(), "-y", "-ss", f"{t:.2f}", "-i", str(video),
                 "-frames:v", "1", "-q:v", "2", str(f),
             ], timeout=120)
-            if f.exists():
+            if f.exists() and not ffmpeg.is_black_frame(f):
                 frames.append(f)
+            elif f.exists():
+                log.debug("[%s] 候选帧 t=%.1fs 是黑帧，跳过", sc, t)
+                f.unlink(missing_ok=True)
         except Exception as e:
             log.debug("[%s] 候选帧 t=%.1fs 抽取失败：%s", sc, t, str(e)[:80])
     return frames
@@ -156,8 +159,8 @@ def pick_best_cover(video: Path, work_dir: Path, sc: str,
     try:
         frames = _extract_candidates(video, work_dir, sc)
         if not frames:
-            # 完全抽不出候选帧 → 旧行为兜底
             ffmpeg.extract_cover(video, out_path, at=1.0)
+            _maybe_pad_cover(video, out_path)
             return out_path
 
         ranked = _vision_rank(frames, s)
@@ -167,16 +170,44 @@ def pick_best_cover(video: Path, work_dir: Path, sc: str,
             log.info("[%s] 封面选定：%s（%.1f 分，共 %d 候选）",
                      sc, best.name, score, len(frames))
         else:
-            # vision 挂了 → 取 25% 处那帧（通常已进正片，比片头强）
             mid = frames[min(1, len(frames) - 1)]
             out_path.write_bytes(mid.read_bytes())
             log.info("[%s] vision 不可用，封面退化为候选第 2 帧", sc)
+        _maybe_pad_cover(video, out_path)
         return out_path
     except Exception as e:
-        # 最后兜底：旧行为，再失败就让调用方走原 extract_cover 的异常路径
         log.warning("[%s] 封面选优异常（退回第 1 秒截帧）：%s", sc, str(e)[:120])
         try:
             ffmpeg.extract_cover(video, out_path, at=1.0)
+            _maybe_pad_cover(video, out_path)
         except Exception:
             pass
         return out_path
+
+
+def _maybe_pad_cover(video: Path, cover: Path) -> None:
+    """横屏视频 / 横图封面铺成 9:16，避免平台预览上下黑边。"""
+    if not cover.exists():
+        return
+    try:
+        w = h = 0
+        if video.exists():
+            info = ffmpeg.video_info(video)
+            w = info.get("width") or 0
+            h = info.get("height") or 0
+        cw = ch = 0
+        try:
+            import json as _json
+            proc = ffmpeg._run([  # noqa: SLF001
+                ffmpeg._ffprobe(), "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height", "-of", "json", str(cover),
+            ], timeout=20)
+            st = (_json.loads(proc.stdout).get("streams") or [{}])[0]
+            cw = int(st.get("width") or 0)
+            ch = int(st.get("height") or 0)
+        except Exception:
+            pass
+        if ffmpeg.is_landscape(w, h) or ffmpeg.is_landscape(cw, ch):
+            ffmpeg.pad_image_to_vertical(cover, cover)
+    except Exception:
+        pass

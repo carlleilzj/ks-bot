@@ -48,6 +48,7 @@ SELECTORS = {
     "editor": "div[contenteditable='true']",
     # 标题是独立 input（semi-input），2026-09 改版后简介编辑器不再承载标题
     "title_input": "input[placeholder*='标题']",
+    "cover_input": "input[type='file'][accept*='image']",
     "publish_btn_text": "发布",
     "upload_done_texts": ["上传完成", "已上传完成"],
     "upload_fail_texts": ["上传失败", "上传出错", "上传中断"],
@@ -173,7 +174,7 @@ def publish(
     description: str,
     tags: list[str],
     category: str | None,       # 抖音无分区，忽略
-    cover: Path | None = None,  # 抖音封面编辑复杂，暂用平台自动封面
+    cover: Path | None = None,
     headless: bool = True,
     state_path: Path = STATE_PATH,
     manual_verify: bool = False,  # True=有头模式，短信验证弹窗由人工在窗口里完成
@@ -222,6 +223,10 @@ def publish(
             editor = page.locator(SELECTORS["editor"]).first
             fill_editor(page, content, shot_prefix="dy_desc", candidates=[editor])
 
+            # 3.4 上传自定义封面（横 4:3 + 竖 3:4）。失败不阻断发布。
+            if cover and Path(cover).exists():
+                _upload_cover(page, Path(cover))
+
             # 3.5 挂载标签（商品/位置/小程序/团购/热点），失败不阻塞发布
             if anchors or hot_topic:
                 try:
@@ -250,6 +255,55 @@ def publish(
         finally:
             context.close()
             browser.close()
+
+
+def _upload_cover(page: Page, cover: Path) -> None:
+    """给抖音横 4:3 / 竖 3:4 两个封面位塞同一张图。
+
+    平台自动封面会吃到 YouTube 片头黑帧；自定义封面必须显式上传。
+    失败不阻断发布。
+    """
+    try:
+        img_inputs = page.locator(SELECTORS["cover_input"])
+        n = img_inputs.count()
+        if n == 0:
+            # 点「选择封面 / 设置封面 / 上传封面」再找 file input
+            for text in ("选择封面", "设置封面", "上传封面", "更换封面"):
+                btn = page.get_by_text(text, exact=False)
+                if btn.count():
+                    try:
+                        btn.first.click(timeout=1500)
+                        rand_sleep(0.4, 0.8)
+                    except Exception:
+                        pass
+            img_inputs = page.locator(SELECTORS["cover_input"])
+            n = img_inputs.count()
+        if n == 0:
+            log.info("未找到抖音封面上传入口，使用平台自动封面")
+            return
+        uploaded = 0
+        for i in range(min(n, 2)):
+            try:
+                img_inputs.nth(i).set_input_files(str(cover))
+                uploaded += 1
+                rand_sleep(0.6, 1.2)
+            except Exception as e:
+                log.debug("抖音封面位 %d 上传失败：%s", i, str(e)[:80])
+        for t in ("完成", "确定", "确认"):
+            b = page.get_by_text(t, exact=True).first
+            if b.count() and b.is_visible():
+                try:
+                    b.click(timeout=1500)
+                    break
+                except Exception:
+                    pass
+        if uploaded:
+            log.info("已上传抖音自定义封面（%d 个封面位）", uploaded)
+        else:
+            log.info("抖音封面位存在但未能写入文件，使用平台自动封面")
+    except Exception as e:
+        log.warning("抖音封面上传失败（不影响发布）：%s", e)
+        shot(page, "dy_cover_fail")
 
 
 def _sms_dialog_present(page: Page) -> bool:
