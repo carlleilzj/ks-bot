@@ -230,11 +230,13 @@ def publish(
             # 3.5 挂载标签（商品/位置/小程序/团购/热点），失败不阻塞发布
             if anchors or hot_topic:
                 try:
-                    # 「标记万物: auto」→ 按视频标题/标签自动选品（家庭主妇刚需品）
+                    # 商品/标记万物 = auto → 全国日用商品（默认抽纸）
                     _anchors = dict(anchors or {})
-                    if str(_anchors.get("标记万物", "")).lower() == "auto":
-                        _anchors["标记万物"] = pick_goods_for(f"{title} {description} {' '.join(tags or [])}")
-                        log.info("自动选品：%s", _anchors["标记万物"])
+                    for k in ("标记万物", "商品", "团购"):
+                        if str(_anchors.get(k, "")).lower() in ("auto", "全国"):
+                            _anchors[k] = pick_goods_for(
+                                f"{title} {description} {' '.join(tags or [])}")
+                            log.info("自动选品（%s）：%s", k, _anchors[k])
                     done = apply_anchors(page, _anchors, hot_topic)
                     if done:
                         log.info("抖音挂载完成：%s", "/".join(done))

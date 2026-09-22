@@ -222,3 +222,39 @@ def test_pick_without_verify_trusts_click():
     """不传 verify 时保持旧语义（兼容其他调用点）。"""
     page = FakePage(options=["位置"], click_ok=True)
     assert da._pick_dropdown_option(page, "位置", timeout_ms=0) is True
+
+
+def test_pick_goods_for_nationwide_default():
+    assert da.pick_goods_for("搞笑动画无声视频") == "抽纸"
+    assert da.pick_goods_for("") == "抽纸"
+
+
+def test_pick_goods_for_pet_still_dogfood():
+    assert da.pick_goods_for("小猫追毛线") == "狗粮"
+
+
+def test_search_anchor_types_include_goods():
+    assert "商品" in da.SEARCH_ANCHOR_TYPES
+    assert "标记万物" in da.SEARCH_ANCHOR_TYPES
+    assert da.DEFAULT_NATIONWIDE_GOODS == "抽纸"
+
+
+def test_apply_anchors_auto_resolves_to_tissue(monkeypatch):
+    """商品=auto → 抽纸，并走搜索框路径。"""
+    called = {}
+
+    def fake_search(page, keyword):
+        called["kw"] = keyword
+        return True
+
+    monkeypatch.setattr(da, "apply_tag_search", fake_search)
+    monkeypatch.setattr(da, "apply_anchor", lambda *a, **k: False)
+    monkeypatch.setattr(da, "apply_hot_topic", lambda *a, **k: False)
+    out = da.apply_anchors(FakePage(), {"商品": "auto"}, hot_topic="")
+    assert out == ["商品"]
+    assert called["kw"] == "抽纸"
+
+
+def test_tag_search_verified_matches_keyword():
+    page = FakePage(sel_texts=["抽纸 维达 120抽"])
+    assert da._tag_search_verified(page, "抽纸", "维达抽纸家庭装") is True

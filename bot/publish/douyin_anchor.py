@@ -1,22 +1,12 @@
-"""抖音发布页「添加标签」挂载能力（v2，实测校准）。
+"""抖音发布页「添加标签」挂载能力（v3，2026-09-22 改版校准）。
 
-发布页结构（2026-09 实测，creator.douyin.com/creator-micro/content/upload）：
+2026-09-22 发布页截图：扩展信息不再有「位置 / 标记万物 / 带货模式」二级下拉，
+「添加标签」变成搜索框，输入后直接出话题/商品候选（含全国可挂的日用品）。
+旧 v2 路径（semi-select 选类型 → 二级下拉填值）每天都报
+「标记万物选中后未出现二级下拉」，只热点挂得上。
 
-    扩展信息
-      添加标签
-        <semi-select  #N>   ← 挂载类型下拉，选项：
-            位置       → 「输入地理位置」semi-select
-            团购       → 「全国 / 请选择团购商品」
-            影视演艺    → 「请选择」
-            小程序      → 「粘贴抖音小程序链接」
-            游戏手柄    → 「添加作品同款游戏」
-            标记万物    → 「请输入或选择标记的物品」INPUT
-        关联热点  → <semi-select placeholder「点击输入热点词」>
-
-关键：**「关联热点」本身也是一个 semi-select**，不是普通 input。
-所有 semi-select-selection-text 列表：
-    [0] 合集 / [1] 请选择合集 / [2] 位置(挂载类型) / [3] 带货模式 /
-    [4] 输入地理位置 / [5] 点击输入热点词
+新路径：在「添加标签」搜索框输入全国商品关键词 → 点第一个商品候选。
+旧路径保留作兜底（账号若还露出类型下拉仍能走）。
 """
 from __future__ import annotations
 
@@ -31,13 +21,25 @@ log = logging.getLogger("douyin_anchor")
 ANCHOR_TARGETS = {
     "位置": ("ph", "输入地理位置"),
     "团购": ("ph", "请选择团购商品"),
+    "商品": ("ph", "请选择团购商品"),   # 新版搜索框别名，全国商品推广
     "影视演艺": ("ph", "请选择"),
     "小程序": ("ph", "粘贴抖音小程序链接"),
     "游戏手柄": ("ph", "添加作品同款游戏"),
     "标记万物": ("ph", "请输入或选择标记的物品"),
 }
 
+# 走搜索框、不走类型下拉的类型（2026-09-22 新版「添加标签」）
+SEARCH_ANCHOR_TYPES = ("商品", "团购", "标记万物")
+
+# 全国可挂的日用商品（不绑门店）。抽纸搜索结果稳定、全平台有货。
+DEFAULT_NATIONWIDE_GOODS = "抽纸"
+
 HOT_TOPIC_PLACEHOLDER = "点击输入热点词"
+HOT_TOPIC_PLACEHOLDERS = (
+    "点击输入热点词",
+    "关联热点，有机会享现金和流量激励",
+    "关联热点",
+)
 HINT_PLACEHOLDER = "输入地理位置"   # 挂在类型下拉旁的提示项，用于识别正确索引
 
 
@@ -294,8 +296,144 @@ def apply_anchor(page: Page, anchor_type: str, value: str) -> bool:
         return False
 
 
+def apply_tag_search(page: Page, keyword: str) -> bool:
+    """新版「添加标签」搜索框：输入全国商品关键词，点第一个商品候选。
+
+    2026-09-22 截图：下拉里混着话题和商品（「小林制药即贴暖宝宝  身体护理」）。
+    优先点含「护理/日用/纸/清洁/食品」的商品行，否则点第一个非纯分类词。
+    """
+    if not keyword:
+        return False
+    try:
+        _scroll_to_tags(page)
+        inp = _find_tag_search_input(page)
+        if inp is None:
+            log.warning("未找到「添加标签」搜索框（页面可能还是旧版类型下拉）")
+            return False
+        try:
+            inp.click(timeout=2000)
+        except Exception:
+            pass
+        try:
+            inp.fill("")
+            inp.fill(str(keyword))
+        except Exception:
+            page.keyboard.type(str(keyword), delay=50)
+        page.wait_for_timeout(2500)
+
+        opts = _visible_options(page) or _visible_search_rows(page)
+        if not opts:
+            log.warning("添加标签搜索 %r 无候选项", keyword[:20])
+            page.keyboard.press("Escape")
+            return False
+
+        product_hints = ("护理", "日用", "纸", "清洁", "食品", "零食", "家居",
+                         "厨房", "洗护", "母婴", "数码", "百货")
+        hit = next((o for o in opts if any(h in o for h in product_hints)), None)
+        if hit is None:
+            hit = next((o for o in opts if keyword in o), None)
+        if hit is None:
+            skip = {"社会科学", "自然科学", "添加标签", "关联热点", "视频章节"}
+            hit = next((o for o in opts if o not in skip and len(o) > 1), opts[0])
+
+        if not _click_option(page, hit):
+            # 搜索结果不一定是 semi-select-option，按可见文本再点一次
+            if not _click_visible_text(page, hit):
+                log.warning("添加标签候选 %r 点不到", hit[:30])
+                page.keyboard.press("Escape")
+                return False
+        page.wait_for_timeout(900)
+        if _tag_search_verified(page, keyword, hit):
+            log.info("已挂全国商品（搜索框）：%s → %s", keyword[:20], hit[:40])
+            return True
+        log.warning("添加标签点选 %r 后回读未确认", hit[:30])
+        return False
+    except Exception as e:
+        log.warning("添加标签搜索失败：%s", str(e)[:120])
+        return False
+
+
+def _find_tag_search_input(page: Page):
+    """定位「添加标签」旁边的搜索/输入框。"""
+    # 1) placeholder 含 标签/搜索/商品
+    for ph in ("搜索标签", "添加标签", "搜索商品", "输入标签", "搜索"):
+        loc = page.locator(f"input[placeholder*='{ph}']:visible")
+        if loc.count():
+            return loc.first
+    # 2) 文案「添加标签」右侧最近的可见 input
+    try:
+        handle = page.evaluate_handle("""() => {
+            const labels = [...document.querySelectorAll('*')].filter(
+                e => (e.childNodes.length && [...e.childNodes].some(
+                    n => n.nodeType === 3 && (n.textContent || '').trim() === '添加标签')));
+            const lab = labels[0];
+            if (!lab) return null;
+            const root = lab.closest('div') || lab.parentElement;
+            const inp = (root && root.querySelector('input'))
+                     || lab.parentElement?.querySelector('input');
+            return inp || null;
+        }""")
+        el = handle.as_element() if handle else None
+        if el:
+            return el
+    except Exception:
+        pass
+    # 3) 扩展信息区域第一个可见 input
+    loc = page.locator("input:visible")
+    n = min(loc.count(), 8)
+    for i in range(n):
+        try:
+            ph = (loc.nth(i).get_attribute("placeholder") or "")
+            if "热点" in ph or "章节" in ph or "标题" in ph:
+                continue
+            return loc.nth(i)
+        except Exception:
+            continue
+    return None
+
+
+def _visible_search_rows(page: Page) -> list[str]:
+    """搜索下拉不一定是 semi-select-option，再扫一遍可见列表行。"""
+    try:
+        return page.evaluate("""() => {
+            const out = [];
+            const nodes = document.querySelectorAll(
+                "[role='option'], [class*='option'], [class*='suggest'], [class*='search-item']");
+            for (const o of nodes) {
+                if (!(o.offsetParent || o.getClientRects().length)) continue;
+                const s = (o.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (s && s.length < 40 && !out.includes(s)) out.push(s);
+            }
+            return out;
+        }""") or []
+    except Exception:
+        return []
+
+
+def _click_visible_text(page: Page, text: str) -> bool:
+    try:
+        loc = page.get_by_text(text, exact=False)
+        if loc.count():
+            loc.first.click(timeout=1500)
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _tag_search_verified(page: Page, keyword: str, picked: str) -> bool:
+    """搜索挂载回读：页面出现关键词或所选商品名。"""
+    needles = [keyword, picked[:8]]
+    try:
+        body = page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        body = ""
+    texts = " ".join(_sel_texts(page) + [body[:2000]])
+    return any(n and n in texts for n in needles)
+
+
 def apply_hot_topic(page: Page, keyword: str) -> bool:
-    """关联热点：点开 semi-select（placeholder「点击输入热点词」）→ 搜词 → 选第一项。"""
+    """关联热点：点开 semi-select → 搜词 → 选第一项。"""
     if not keyword:
         return False
     try:
@@ -305,13 +443,13 @@ def apply_hot_topic(page: Page, keyword: str) -> bool:
         for i in range(sel.count()):
             try:
                 t = (sel.nth(i).inner_text() or "").strip()
-                if t == HOT_TOPIC_PLACEHOLDER:
+                if t in HOT_TOPIC_PLACEHOLDERS or HOT_TOPIC_PLACEHOLDER in t or t.startswith("关联热点"):
                     target = sel.nth(i)
                     break
             except Exception:
                 continue
         if target is None:
-            log.warning("未找到热点 semi-select（placeholder=%r）", HOT_TOPIC_PLACEHOLDER)
+            log.warning("未找到热点 semi-select（placeholder=%r）", HOT_TOPIC_PLACEHOLDERS)
             return False
 
         # 展开热点 semi-select（同样需 mousedown）
@@ -332,9 +470,13 @@ def apply_hot_topic(page: Page, keyword: str) -> bool:
             page.keyboard.type(keyword, delay=40)
         page.wait_for_timeout(3000)
 
-        # 回读判据：热点栏不再是 placeholder「点击输入热点词」
+        # 回读判据：热点栏不再是空占位（新旧两版文案都算空）
         def _hot_ok() -> bool:
-            return HOT_TOPIC_PLACEHOLDER not in _sel_texts(page)
+            texts = _sel_texts(page)
+            return not any(
+                t in HOT_TOPIC_PLACEHOLDERS or t.startswith("关联热点")
+                for t in texts
+            )
 
         if _pick_dropdown_option(page, keyword, 500, verify=_hot_ok):
             log.info("已关联热点：%s（已回读校验）", keyword[:30])
@@ -354,14 +496,23 @@ def apply_hot_topic(page: Page, keyword: str) -> bool:
 
 
 def apply_anchors(page: Page, anchors: dict | None, hot_topic: str = "") -> list[str]:
-    """批量挂载。anchors: {类型: 值}。返回成功的项（类型名或 '热点'）。"""
+    """批量挂载。anchors: {类型: 值}。返回成功的项（类型名或 '热点'）。
+
+    商品/团购/标记万物优先走新版搜索框（全国商品）；失败再走旧类型下拉。
+    """
     done: list[str] = []
     if anchors:
         for atype, val in anchors.items():
             if not val:
                 continue
+            v = DEFAULT_NATIONWIDE_GOODS if str(val).lower() in ("auto", "全国") else str(val)
             try:
-                if apply_anchor(page, atype, str(val)):
+                ok = False
+                if atype in SEARCH_ANCHOR_TYPES:
+                    ok = apply_tag_search(page, v)
+                if not ok:
+                    ok = apply_anchor(page, atype, v)
+                if ok:
                     done.append(atype)
             except Exception as e:
                 log.warning("挂载 %s 异常：%s", atype, str(e)[:100])
@@ -376,10 +527,10 @@ def apply_anchors(page: Page, anchors: dict | None, hot_topic: str = "") -> list
 
 
 def pick_goods_for(text: str = "") -> str:
-    """根据视频文本推荐带货关键词（标记万物）。"""
+    """全国可挂的日用商品关键词。宠物向仍用狗粮，其余默认抽纸。"""
     lower = (text or "").lower()
     if any(k in lower for k in ("狗", "猫", "宠", "动物", "pet", "dog", "cat", "puppy", "kitten")):
         return "狗粮"
     if any(k in lower for k in ("洗", "洁", "净", "刷", "拖", "收纳")):
-        return "清洁用品"
-    return "生活日用"
+        return "抽纸"
+    return DEFAULT_NATIONWIDE_GOODS
