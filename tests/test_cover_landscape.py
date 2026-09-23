@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from bot.media.ffmpeg import is_black_frame, is_landscape
+from bot.media.ffmpeg import (
+    COVER_LANDSCAPE,
+    COVER_PORTRAIT,
+    cover_scale_crop_filter,
+    is_black_frame,
+    is_landscape,
+)
 
 
 def test_landscape_16_9():
@@ -33,3 +39,20 @@ def test_black_frame_tiny_file(tmp_path):
     p = tmp_path / "tiny.jpg"
     p.write_bytes(b"x" * 100)
     assert is_black_frame(p) is True
+
+
+def test_cover_crop_sizes():
+    assert COVER_PORTRAIT == (960, 1280)
+    assert COVER_LANDSCAPE == (1280, 960)
+
+
+def test_cover_scale_crop_filter_3_4():
+    f = cover_scale_crop_filter(960, 1280)
+    assert "960:1280" in f
+    assert "crop=960:1280" in f
+
+
+def test_cover_scale_crop_filter_4_3():
+    f = cover_scale_crop_filter(1280, 960)
+    assert "1280:960" in f
+    assert "force_original_aspect_ratio=increase" in f

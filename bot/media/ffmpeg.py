@@ -158,6 +158,55 @@ def _vertical_pad_filter() -> str:
     )
 
 
+def cover_scale_crop_filter(width: int, height: int) -> str:
+    """居中铺满后裁成目标尺寸（抖音竖 3:4 / 横 4:3、快手 ≥1280×960）。"""
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},setsar=1"
+    )
+
+
+def crop_cover(src: Path, dst: Path, width: int, height: int) -> Path:
+    """把选优封面裁成平台格子要的比例。失败时原样拷贝。"""
+    if not src.exists():
+        return dst
+    tmp = dst.with_name(dst.stem + ".crop.jpg")
+    try:
+        _run([
+            _ffmpeg(), "-y", "-i", str(src),
+            "-vf", cover_scale_crop_filter(width, height),
+            "-frames:v", "1", "-q:v", "2", str(tmp),
+        ], timeout=60)
+        tmp.replace(dst)
+    except FFmpegError:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        if src != dst:
+            dst.write_bytes(src.read_bytes())
+    return dst
+
+
+# 抖音竖封面 3:4、横封面 4:3；快手官方建议不低于 1280×960
+COVER_PORTRAIT = (960, 1280)     # 3:4
+COVER_LANDSCAPE = (1280, 960)    # 4:3，同时满足快手 1280×960
+
+
+def prepare_platform_covers(src: Path) -> dict[str, Path]:
+    """从选优封面切出竖 3:4 和横 4:3。缺文件时返回空 dict。"""
+    if not src or not src.exists():
+        return {}
+    portrait = src.with_name(src.stem + "_34.jpg")
+    landscape = src.with_name(src.stem + "_43.jpg")
+    crop_cover(src, portrait, *COVER_PORTRAIT)
+    crop_cover(src, landscape, *COVER_LANDSCAPE)
+    out: dict[str, Path] = {}
+    if portrait.exists():
+        out["portrait"] = portrait
+    if landscape.exists():
+        out["landscape"] = landscape
+    return out
+
+
 def pad_image_to_vertical(src: Path, dst: Path) -> Path:
     """把封面图铺成 9:16（模糊铺底），横图不再上下留黑边。"""
     if not src.exists():

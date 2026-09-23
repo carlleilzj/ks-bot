@@ -223,7 +223,7 @@ def publish(
             editor = page.locator(SELECTORS["editor"]).first
             fill_editor(page, content, shot_prefix="dy_desc", candidates=[editor])
 
-            # 3.4 上传自定义封面（横 4:3 + 竖 3:4）。失败不阻断发布。
+            # 3.4 点进竖 3:4 / 横 4:3 格子上传选优封面。失败不阻断发布。
             if cover and Path(cover).exists():
                 _upload_cover(page, Path(cover))
 
@@ -260,52 +260,81 @@ def publish(
 
 
 def _upload_cover(page: Page, cover: Path) -> None:
-    """给抖音横 4:3 / 竖 3:4 两个封面位塞同一张图。
+    """点进「竖封面 3:4」「横封面 4:3」两个格子，分别塞选优图的裁切版。
 
-    平台自动封面会吃到 YouTube 片头黑帧；自定义封面必须显式上传。
-    失败不阻断发布。
+    旧实现只往页面上 accept=image 的 file input 塞一张 9:16，格子仍空，
+    发文助手报「横/竖封面缺失」，平台回退视频首帧。失败不阻断发布。
     """
+    from ..media.ffmpeg import prepare_platform_covers
+
     try:
-        img_inputs = page.locator(SELECTORS["cover_input"])
-        n = img_inputs.count()
-        if n == 0:
-            # 点「选择封面 / 设置封面 / 上传封面」再找 file input
-            for text in ("选择封面", "设置封面", "上传封面", "更换封面"):
-                btn = page.get_by_text(text, exact=False)
-                if btn.count():
-                    try:
-                        btn.first.click(timeout=1500)
-                        rand_sleep(0.4, 0.8)
-                    except Exception:
-                        pass
-            img_inputs = page.locator(SELECTORS["cover_input"])
-            n = img_inputs.count()
-        if n == 0:
-            log.info("未找到抖音封面上传入口，使用平台自动封面")
-            return
+        variants = prepare_platform_covers(cover)
+        portrait = variants.get("portrait") or cover
+        landscape = variants.get("landscape") or cover
         uploaded = 0
-        for i in range(min(n, 2)):
-            try:
-                img_inputs.nth(i).set_input_files(str(cover))
+        for label, img in (("竖封面", portrait), ("横封面", landscape)):
+            if _fill_douyin_cover_slot(page, label, img):
                 uploaded += 1
-                rand_sleep(0.6, 1.2)
-            except Exception as e:
-                log.debug("抖音封面位 %d 上传失败：%s", i, str(e)[:80])
-        for t in ("完成", "确定", "确认"):
-            b = page.get_by_text(t, exact=True).first
-            if b.count() and b.is_visible():
-                try:
-                    b.click(timeout=1500)
-                    break
-                except Exception:
-                    pass
         if uploaded:
             log.info("已上传抖音自定义封面（%d 个封面位）", uploaded)
         else:
-            log.info("抖音封面位存在但未能写入文件，使用平台自动封面")
+            log.info("抖音封面格子未写入，平台将用视频帧")
+        shot(page, "dy_cover_uploaded" if uploaded else "dy_cover_missing")
+        try:
+            body = page.locator("body").inner_text(timeout=3000) or ""
+        except Exception:
+            body = ""
+        if "封面缺失" in body:
+            log.warning("抖音发文助手仍报封面缺失（格子可能没点上）")
     except Exception as e:
         log.warning("抖音封面上传失败（不影响发布）：%s", e)
         shot(page, "dy_cover_fail")
+
+
+def _fill_douyin_cover_slot(page: Page, label: str, img: Path) -> bool:
+    """点开一个封面格子 → set_input_files → 点完成。"""
+    if not img.exists():
+        return False
+    try:
+        clicked = page.evaluate("""(label) => {
+            const nodes = [...document.querySelectorAll('div, span, button, p')];
+            const n = nodes.find(e => {
+                const t = (e.innerText || '').replace(/\\s+/g, '');
+                return t.includes(label) && (t.includes('封面') || t.includes('3:4')
+                    || t.includes('4:3') || t.includes('选择'));
+            });
+            if (!n) return false;
+            const box = n.closest('div') || n;
+            box.click();
+            return true;
+        }""", label)
+        if not clicked:
+            btn = page.get_by_text(label, exact=False)
+            if btn.count():
+                btn.first.click(timeout=1500)
+            else:
+                return False
+        rand_sleep(0.5, 0.9)
+        inp = page.locator(SELECTORS["cover_input"])
+        if inp.count() == 0:
+            inp = page.locator("input[type='file']")
+        if inp.count() == 0:
+            return False
+        inp.last.set_input_files(str(img))
+        rand_sleep(0.8, 1.4)
+        for t in ("完成", "确定", "确认", "应用"):
+            b = page.get_by_text(t, exact=True)
+            if b.count():
+                try:
+                    b.last.click(timeout=1500)
+                    break
+                except Exception:
+                    pass
+        rand_sleep(0.3, 0.6)
+        return True
+    except Exception as e:
+        log.debug("抖音封面格 %s 失败：%s", label, str(e)[:80])
+        return False
 
 
 def _sms_dialog_present(page: Page) -> bool:

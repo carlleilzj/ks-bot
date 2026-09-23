@@ -1001,12 +1001,16 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
 
 
 def _upload_cover(page: Page, cover: Path) -> None:
-    """上传自定义封面；必须点到 file input 才算成功。
+    """上传选优封面的 4:3 / 1280×960 裁切版。
 
-    旧实现：点到「编辑封面」文案就打「已上传自定义封面」，即使没选中
-    input[type=file]——YouTube 横屏片头黑帧就会被平台当封面。
+    快手官方提示不低于 1280×960；直接塞 720×1280 的 9:16 会弹「应用成功」
+    但信息流仍用视频帧。必须写到 file input，并用页面文案回读。
     """
+    from ..media.ffmpeg import prepare_platform_covers
+
     try:
+        variants = prepare_platform_covers(cover)
+        img = variants.get("landscape") or cover
         img_input = page.locator(SELECTORS["cover_input"]).first
         opened = img_input.count() > 0
         if not opened:
@@ -1025,18 +1029,27 @@ def _upload_cover(page: Page, cover: Path) -> None:
                     opened = True
                     break
         if not opened or not img_input.count():
-            log.info("未找到封面上传入口，使用平台自动封面")
+            log.info("未找到封面上传入口，平台将用视频帧")
             shot(page, "ks_cover_no_input")
             return
-        img_input.set_input_files(str(cover))
-        rand_sleep(1.0, 2.0)
-        for t in ("完成", "确定"):
+        img_input.set_input_files(str(img))
+        rand_sleep(1.2, 2.0)
+        for t in ("完成", "确定", "应用"):
             b = page.get_by_text(t, exact=True).first
             if b.count() and b.is_visible():
                 b.click()
                 break
-        log.info("已上传自定义封面")
-        shot(page, "ks_cover_uploaded")
+        rand_sleep(0.6, 1.0)
+        try:
+            body = page.locator("body").inner_text(timeout=3000) or ""
+        except Exception:
+            body = ""
+        if "封面应用成功" in body or "应用成功" in body:
+            log.info("已上传自定义封面（1280x960，已回读）")
+            shot(page, "ks_cover_uploaded")
+        else:
+            log.warning("快手封面已写文件，但页面未回读到「应用成功」")
+            shot(page, "ks_cover_uploaded")
     except Exception as e:
         log.warning("封面上传失败（不影响发布）：%s", e)
         shot(page, "ks_cover_fail")
