@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from bot.ai.copywriter import PLATFORM_PROFILES, _validate
+from bot.publish.douyin import _strip_leading_title
 from bot.config import Settings
 from bot.db import Database, JobState
 from bot.main import publish_gate
@@ -178,3 +179,31 @@ def test_title_prefix_no_double_prefix():
                      "description": "d", "tags": ["无声视频"], "category": ""},
                     [], profile)
     assert out["title"].count("【有点视频】") == 1
+
+
+def test_validate_strips_title_from_description():
+    """简介抄标题时校验层先砍掉，避免抖音双框叠句。"""
+    profile = PLATFORM_PROFILES["douyin"]
+    title = "【有点视频】它自以为走位天衣无缝，直到下一秒啪唧摔出原形"
+    out = _validate({"title": title, "description": title + "全程偷感拉满。",
+                     "tags": ["无声视频"], "category": ""}, [], profile)
+    assert not out["description"].startswith(title)
+    assert "全程偷感拉满" in out["description"]
+
+
+def test_strip_leading_title_exact():
+    title = "【有点视频】它迈着六亲不认的步伐，结果下一秒帅不过三秒"
+    desc = title + " 走出了最神气的姿势。"
+    assert _strip_leading_title(title, desc) == "走出了最神气的姿势。"
+
+
+def test_strip_leading_title_hook_only():
+    title = "【有点视频】它迈着六亲不认的步伐"
+    desc = "它迈着六亲不认的步伐，下一刻却当场破功。"
+    assert _strip_leading_title(title, desc) == "下一刻却当场破功。"
+
+
+def test_strip_leading_title_keeps_unique_desc():
+    title = "【有点视频】走位翻车"
+    desc = "全程无声却浑身是戏。"
+    assert _strip_leading_title(title, desc) == desc

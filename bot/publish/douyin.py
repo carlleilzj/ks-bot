@@ -67,6 +67,25 @@ class DouyinError(PublishError):
     pass
 
 
+def _strip_leading_title(title: str, description: str) -> str:
+    """简介若以标题或同一钩子开头，去掉这段，避免发布页标题+简介重复。"""
+    desc = (description or "").strip()
+    t = (title or "").strip()
+    if not desc:
+        return ""
+    if t and desc.startswith(t):
+        desc = desc[len(t):].lstrip(" \n，。；;:：")
+    # 标题去掉前缀后的钩子再出现在简介开头
+    hook = t
+    for p in ("【有点视频】", "【无声治愈】", "【无声小剧场】", "【纯享放松】"):
+        if hook.startswith(p):
+            hook = hook[len(p):].strip()
+            break
+    if hook and len(hook) >= 6 and desc.startswith(hook):
+        desc = desc[len(hook):].lstrip(" \n，。；;:：")
+    return desc.strip()
+
+
 def _has_captcha(page: Page) -> bool:
     """是否出现滑块/验证码（抖音风控）。"""
     try:
@@ -185,9 +204,11 @@ def publish(
     if not Path(state_path).exists():
         raise LoginExpired("未找到抖音登录态，请先运行: python -m bot.main --login douyin")
 
-    # 标题(≤55字) + 简介 + 话题标签，都写进同一个编辑器；话题用 # 引出
+    # 标题走独立 input；简介编辑器只放描述 + 话题，不再把标题拼进去
+    # （旧逻辑 title+desc 写进同一框，发布页就会出现重复句子）
     tag_str = " ".join(f"#{t}" for t in tags if t)
-    content = "\n".join(x for x in (title, description, tag_str) if x)
+    desc_body = _strip_leading_title(title, description)
+    content = "\n".join(x for x in (desc_body, tag_str) if x)
 
     with sync_playwright() as p:
         browser = launch_chromium(p, headless=headless)
@@ -213,13 +234,18 @@ def publish(
             # 3. 填标题+简介+话题
             #    抖音改版后标题为独立 input（placeholder='填写作品标题，为作品获得更多流量'），
             #    简介为 contenteditable（placeholder='添加作品简介'）。两者分开填。
+            title_ok = False
             title_input = page.locator(SELECTORS["title_input"]).first
             try:
                 title_input.click(force=True)
                 title_input.fill(title)
+                title_ok = True
                 log.info("已填写标题（%d 字）", len(title))
             except Exception as e:
                 log.warning("标题输入框填写失败（可能改版）：%s", str(e)[:100])
+            if not title_ok:
+                # 标题框没填上才把标题塞回简介，避免发布页没标题
+                content = "\n".join(x for x in (title, desc_body, tag_str) if x)
             editor = page.locator(SELECTORS["editor"]).first
             fill_editor(page, content, shot_prefix="dy_desc", candidates=[editor])
 

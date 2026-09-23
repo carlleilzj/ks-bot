@@ -194,6 +194,12 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     title = title[:profile.max_title_len]
 
     description = str(obj.get("description", "")).strip()[:400]
+    # 简介不要再抄一遍标题（抖音标题框 + 简介框会叠成重复句子）
+    if description.startswith(title):
+        description = description[len(title):].lstrip(" \n，。；;:：")
+    hook = title[len(IP_PREFIX):].strip() if title.startswith(IP_PREFIX) else ""
+    if hook and len(hook) >= 6 and description.startswith(hook):
+        description = description[len(hook):].lstrip(" \n，。；;:：")
     tags_raw = obj.get("tags") or []
     if not isinstance(tags_raw, list):
         tags_raw = []
