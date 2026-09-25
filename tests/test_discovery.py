@@ -60,6 +60,30 @@ def test_filter_reject_blacklist_keyword():
     assert "黑名单" in reason
 
 
+def test_filter_reject_heartwarming_rescue():
+    """已发作品是滑稽翻车，暖心救援/苦情剧情要拦掉。"""
+    rules = FilterRules.from_dict({
+        "keyword_whitelist": ["funny", "animal", "animation", "3d"],
+        "keyword_blacklist": ["heartwarming", "rescue", "emotional", "trapped"],
+    })
+    chain = FilterChain(rules)
+    ok, reason = chain.keep(_make_cand(
+        title="Tiny Turtle Saves Baby Ducklings | Heartwarming Rescue Story"))
+    assert not ok
+    assert "黑名单" in reason
+
+
+def test_filter_pass_funny_animal_short():
+    rules = FilterRules.from_dict({
+        "keyword_whitelist": ["funny", "animal", "animation", "3d", "fail"],
+        "keyword_blacklist": ["heartwarming", "rescue"],
+        "max_duration": 90,
+    })
+    chain = FilterChain(rules)
+    ok, _ = chain.keep(_make_cand(title="funny 3d animal fail animation short", duration=45))
+    assert ok
+
+
 def test_filter_require_whitelist():
     rules = FilterRules.from_dict({"keyword_whitelist": ["anime", "animation"]})
     chain = FilterChain(rules)

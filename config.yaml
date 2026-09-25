@@ -110,10 +110,10 @@ discovery:
 
   filters:
     min_duration: 5       # 短视频最短时长（秒）
-    max_duration: 320     # AI 动物剧情动画多为 1-5 分钟；>320s 是长合集，排除
+    max_duration: 90      # 已发作品是十几秒到一分半的无声短片；长剧情合集不要
     min_score: 1000       # 热度阈值（YouTube view_count；频道页/RSS 用发布顺序近似）
-    keyword_whitelist: ["ai", "animal", "cat", "dog", "puppy", "kitten", "animated", "animation", "3d", "cgi", "pixar", "story"]
-    keyword_blacklist: ["reaction", "recap", "compilation", "full episode", "how to make", "tutorial", "podcast", "mukbang"]
+    keyword_whitelist: ["funny", "fail", "slapstick", "comedy", "cartoon", "animal", "cat", "dog", "puppy", "kitten", "animated", "animation", "3d", "cgi", "pixar", "ai"]
+    keyword_blacklist: ["reaction", "recap", "compilation", "full episode", "full story", "how to make", "tutorial", "podcast", "mukbang", "heartwarming", "rescue", "emotional", "sad story", "crying", "flood", "trapped", "saves", "save her", "step mom", "disney"]
     # 封面 AI 质检：一次 vision 调用判三项——真人/水印/是否动画。
     # 2026-09-16 起改为手动发链接模式，真人检测已由下方 vision.real_person_check
     # 统一关闭；此开关保留但不再产生真人拦截（水印/动画判定同样受总开关控制）。
@@ -122,19 +122,11 @@ discovery:
     reject_real_person: true
 
   sources:
-    # YouTube 关键词搜索：对准「AI 生成 3D 动物剧情/搞笑动画」赛道
+    # YouTube 关键词搜索：对准已发作品同款——无声 3D 动物滑稽翻车，不要暖心救援/猫妈苦情
     - type: youtube_search
       queries:
-        - "ai cats story animation"
-        - "ai animal rescue story animated"
+        - "funny animal 3d animation short"
+        - "funny animal fail animation"
+        - "3d cartoon animal slapstick short"
+        - "funny cgi animal short film"
         - "funny animal ai animation short"
-        - "ai generated animal short film"
-    # YouTube 频道订阅：AI 动物剧情动画高产频道（走 yt-dlp 频道页，tab=shorts 取短视频）
-    - type: youtube_channel
-      tab: shorts
-      channels:
-        - UC3HP8a40b5n_WXot8qAHe5w   # mini meownmeow（AI 猫咪变装/剧情，11万粉）
-        - UC-T_MoYrpZt-qwn2vFK81uQ   # Meow Patrol Force（AI 猫咪剧情，2.3万粉）
-        - UCV17hLOXd76ovdaYClpUd_A   # Ginger's Daily Meow（AI 猫妈妈故事）
-        - UC20ckSa1wPc8alZYqkt9muA   # Mama Cat Story（AI 猫咪旅行/剧情）
-        - UCNrt_21RJZw1EPxRpNBvt8w   # Cozy Catmeow（AI 猫狗暖心故事）
