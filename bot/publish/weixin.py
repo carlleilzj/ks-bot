@@ -113,13 +113,55 @@ def login_qr_image(out_path: Path | None = None,
 
     用途：发布 worker 跑在阿里云（无桌面），没法弹有头浏览器扫码。
     这个函数用无头浏览器打开登录页 → 截出二维码区域存成 PNG →
-    把 PNG 交给 Telegram/人工，用手机微信扫 → 轮询到登录成功即保存 state。
+    把 PNG 推给 Telegram，用手机微信扫 → 轮询到登录成功即保存 state。
+
+    二维码会过期，所以带自动刷新：检测到失效就重载页面重新截码并重发 TG，
+    否则人拿到图时码已经灰了（快手那边实测过这个坑）。
 
     返回是否登录成功。
     """
-    import base64
     out_path = out_path or (LOGS_DIR / "weixin_qr.png")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _push_tg(caption: str) -> None:
+        """推二维码到 TG；失败只记日志，不阻断登录（文件照样落盘可 scp）。"""
+        try:
+            from ..config import load_settings
+            from ..notify import telegram
+            telegram.send_photo(load_settings(), out_path, caption)
+            log.info("二维码已推送到 Telegram")
+        except Exception as e:
+            log.debug("Telegram 推送失败（不影响登录）：%s", str(e)[:100])
+
+    def _grab_qr(page, path: Path) -> bool:
+        """截二维码元素；找不到退化为整页截图。"""
+        for sel in ("img.qrcode", ".qrcode-img", "[class*='qrcode'] img",
+                    "[class*='qrcode']", "canvas"):
+            loc = page.locator(sel)
+            if not loc.count():
+                continue
+            try:
+                if loc.first.is_visible():
+                    loc.first.screenshot(path=str(path))
+                    return True
+            except Exception:
+                continue
+        try:
+            page.screenshot(path=str(path))
+        except Exception:
+            return False
+        return False
+
+    def _qr_expired(page) -> bool:
+        """页面出现「已失效/已过期/点击刷新」即为码过期。"""
+        for t in ("二维码已失效", "二维码已过期", "已失效", "点击刷新", "重新获取"):
+            try:
+                if page.get_by_text(t, exact=False).count():
+                    return True
+            except Exception:
+                continue
+        return False
+
     with sync_playwright() as p:
         browser = launch_chromium(p, headless=True)
         context = browser.new_context(
@@ -134,40 +176,48 @@ def login_qr_image(out_path: Path | None = None,
         try:
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
             time.sleep(6)
-
-            # 找二维码并截图（优先用元素截图，退化为整页）
-            qr_sel = "img.qrcode, .qrcode-img, [class*='qrcode'] img, [class*='qrcode']"
-            shot_ok = False
-            try:
-                qr = page.locator(qr_sel).first
-                if qr.count():
-                    qr.screenshot(path=str(out_path))
-                    shot_ok = True
-                    log.info("二维码已导出：%s", out_path)
-            except Exception as e:
-                log.warning("二维码元素截图失败：%s", str(e)[:120])
-            if not shot_ok:
-                page.screenshot(path=str(out_path), full_page=False)
-                log.warning("未定位到二维码元素，已截整页：%s", out_path)
-
+            _grab_qr(page, out_path)
             print(f"\n>>> 二维码已导出：{out_path}")
             print(">>> 请用微信扫码登录视频号助手，登录成功后自动保存登录态\n")
+            _push_tg("🟢 视频号登录二维码（几分钟内有效，过期会自动刷新重发）\n"
+                     "用微信扫码登录视频号助手，登录成功后自动保存登录态")
 
             deadline = time.time() + wait_sec
+            next_check = 0.0
+            refreshes = 0
             while time.time() < deadline:
                 if _is_logged_in(page) or _has_login_cookies(context):
-                    time.sleep(2)
+                    time.sleep(2)   # 等登录跳转把 cookie 补齐
                     state_path.parent.mkdir(parents=True, exist_ok=True)
                     context.storage_state(path=str(state_path))
                     log.info("视频号登录成功，登录态已保存：%s", state_path)
-                    print(f">>> 登录成功！登录态已保存到 {state_path}")
+                    print(f">>> 登录成功！登录态已保存到 {state_path}"
+                          + (f"（中途自动刷新 {refreshes} 次）" if refreshes else ""))
                     return True
+
+                # 每 12 秒查一次是否过期，过期就重载页面重新截码重发
+                now = time.time()
+                if now >= next_check:
+                    next_check = now + 12
+                    try:
+                        if _qr_expired(page):
+                            refreshes += 1
+                            log.info("二维码已过期，第 %d 次刷新", refreshes)
+                            page.reload(wait_until="domcontentloaded", timeout=45000)
+                            time.sleep(6)
+                            _grab_qr(page, out_path)
+                            _push_tg(f"🔄 视频号登录二维码（已刷新 {refreshes} 次，请扫这张）\n"
+                                     "用微信扫码登录视频号助手")
+                    except Exception as e:
+                        log.debug("刷新二维码失败：%s", str(e)[:100])
                 time.sleep(2)
+
             log.warning("等待扫码超时（%ds），未保存登录态", wait_sec)
             print(">>> 等待扫码超时，未保存登录态")
             return False
         finally:
             context.close()
+            browser.close()
 
 
 # ---------- 登录 ----------
