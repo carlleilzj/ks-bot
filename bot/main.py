@@ -126,6 +126,26 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
     # 去除元数据里的作者/来源痕迹（IG 视频会带 title/comment 标签）
     ffmpeg.strip_metadata(tc, tc)
 
+    # 二创变换（可选）：抖音「原创性不足」对策。画面帧特征 + 音频 + 编码
+    # 参数三层随机化，必须在抽封面与烧字幕之前做，保证封面取自成片画面。
+    if s.transform.enabled:
+        try:
+            params = ffmpeg.transform_creative(tc, tc, opts={
+                "crop_pct": s.transform.crop_pct,
+                "zoom_pct": s.transform.zoom_pct,
+                "hflip_prob": s.transform.hflip_prob,
+                "hue_deg": s.transform.hue_deg,
+                "sat": s.transform.sat,
+                "bright": s.transform.bright,
+                "contrast": s.transform.contrast,
+                "fps": s.transform.fps,
+                "tempo": s.transform.tempo,
+                "crf": s.transform.crf,
+            })
+            log.info("[%s] 二创参数：%s", sc, params)
+        except Exception as e:
+            log.warning("[%s] 二创变换失败（按原片继续）：%s", sc, str(e)[:150])
+
     # 水印擦除（可选）：在转码阶段擦掉固定位置的烧录水印
     watermark_removed = False
     if s.watermark.enabled and s.watermark.regions:

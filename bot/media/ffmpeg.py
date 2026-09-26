@@ -276,6 +276,122 @@ def ensure_compatible(src: Path, dst: Path) -> Path:
     return dst
 
 
+# ---------- 二创变换（抖音「原创性不足」） ----------
+
+# 平台查重比对的是：画面帧特征 + 音频波形 + 字幕文本 + 关键帧哈希。
+# 只 remux/转码 + 去元数据，画面逐像素等于源片，判搬运是一眼的。
+# 下面按帧特征 / 音频 / 编码参数三层做随机化，且每条片子参数独立随机，
+# 避免「同一模板批量产出」反而触发同质化判定。
+TRANSFORM_DEFAULTS = {
+    "crop_pct": (0.02, 0.05),      # 四边裁切比例区间（改变构图与帧哈希）
+    "zoom_pct": (1.02, 1.06),      # 轻微放大后裁回原尺寸
+    "hflip_prob": 0.5,             # 水平镜像概率
+    "hue_deg": (-4.0, 4.0),        # 色相偏移
+    "sat": (0.96, 1.06),           # 饱和度
+    "bright": (-0.03, 0.03),       # 亮度
+    "contrast": (0.97, 1.05),      # 对比度
+    "fps": (29.5, 30.0),           # 微改帧率，打乱关键帧抽取
+    "tempo": (0.97, 1.03),         # 音调/语速微调（音频指纹）
+    "crf": (19, 24),               # 码率随机，避免固定编码指纹
+}
+
+
+def _rand_uniform(rng, lo_hi) -> float:
+    lo, hi = lo_hi
+    return rng.uniform(float(lo), float(hi))
+
+
+def transform_filter(rng, info: dict, opts: dict | None = None) -> tuple[str, dict]:
+    """生成随机化二创滤镜链。返回 (vf, 参数快照)。
+
+    保持输出尺寸与源一致（裁切/放大后都 scale 回原宽高），
+    这样 9:16 竖屏、720x1280 等既有约束和封面比例都不受影响。
+    """
+    o = dict(TRANSFORM_DEFAULTS)
+    o.update(opts or {})
+    w, h = int(info.get("width") or 0), int(info.get("height") or 0)
+    if w <= 0 or h <= 0:
+        return "", {}
+
+    crop_pct = _rand_uniform(rng, o["crop_pct"])
+    zoom = _rand_uniform(rng, o["zoom_pct"])
+    # 裁切像素必须是偶数，否则 yuv420p 会报错
+    cw = max(2, int(w * zoom) - 2 * (int(w * crop_pct) // 2 * 2))
+    ch = max(2, int(h * zoom) - 2 * (int(h * crop_pct) // 2 * 2))
+    cw -= cw % 2
+    ch -= ch % 2
+    x = max(0, (int(w * zoom) - cw) // 2)
+    y = max(0, (int(h * zoom) - ch) // 2)
+    x -= x % 2
+    y -= y % 2
+
+    chain = [
+        f"scale={int(w * zoom)}:{int(h * zoom)}:flags=bicubic",
+        f"crop={cw}:{ch}:{x}:{y}",
+        f"scale={w}:{h}:flags=bicubic",
+    ]
+    params: dict = {"crop_pct": round(crop_pct, 4), "zoom": round(zoom, 4)}
+
+    if rng.random() < float(o["hflip_prob"]):
+        chain.append("hflip")
+        params["hflip"] = True
+
+    hue = _rand_uniform(rng, o["hue_deg"])
+    sat = _rand_uniform(rng, o["sat"])
+    bright = _rand_uniform(rng, o["bright"])
+    contrast = _rand_uniform(rng, o["contrast"])
+    chain.append(
+        f"eq=brightness={bright:.4f}:contrast={contrast:.4f}:saturation={sat:.4f}"
+    )
+    if abs(hue) >= 0.5:
+        chain.append(f"hue=h={hue:.2f}")
+    params.update({"hue": round(hue, 2), "sat": round(sat, 4),
+                   "bright": round(bright, 4), "contrast": round(contrast, 4)})
+    return ",".join(chain), params
+
+
+def transform_creative(src: Path, dst: Path, opts: dict | None = None,
+                       seed: int | None = None) -> dict:
+    """对已转码视频做一次随机化二创变换（画面 + 音频 + 编码参数）。
+
+    原地覆盖：src == dst 时先写临时文件再替换。返回本次使用的参数（写日志/审计）。
+    """
+    if not src.exists():
+        raise FFmpegError(f"待变换的视频不存在: {src}")
+    import random as _random
+    rng = _random.Random(seed)
+    info = video_info(src)
+    if info["width"] <= 0 or info["height"] <= 0:
+        raise FFmpegError(f"无法获取视频尺寸: {src}")
+
+    vf, params = transform_filter(rng, info, opts)
+    if not vf:
+        raise FFmpegError("二创滤镜生成失败（尺寸未知）")
+
+    fps = round(_rand_uniform(rng, (opts or {}).get("fps", TRANSFORM_DEFAULTS["fps"])), 3)
+    crf = int(round(_rand_uniform(rng, (opts or {}).get("crf", TRANSFORM_DEFAULTS["crf"]))))
+    tempo = round(_rand_uniform(rng, (opts or {}).get("tempo", TRANSFORM_DEFAULTS["tempo"])), 4)
+
+    tmp = dst.with_name(dst.stem + ".tf.mp4") if dst == src else dst
+    cmd = [_ffmpeg(), "-y", "-i", str(src), "-vf", vf, "-r", str(fps)]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+            "-pix_fmt", "yuv420p", "-g", str(int(fps * 2))]
+    if info["has_audio"]:
+        # atempo 改语速（顺带改音频指纹）；±3% 听不出差异
+        cmd += ["-af", f"atempo={tempo}", "-c:a", "aac", "-b:a", "128k"]
+    else:
+        cmd += ["-an"]
+    cmd += ["-movflags", "+faststart", str(tmp)]
+    _run(cmd, timeout=TRANSCODE_TIMEOUT)
+    if dst == src:
+        tmp.replace(dst)
+    params.update({"fps": fps, "crf": crf, "tempo": tempo, "seed": seed})
+    log.info("二创变换完成 %s（%dx%d，裁切%.2f%% 缩放%.3f 翻转=%s fps=%.3f crf=%d tempo=%.3f）",
+             dst.name, info["width"], info["height"], params.get("crop_pct", 0),
+             params.get("zoom", 1.0), params.get("hflip", False), fps, crf, tempo)
+    return params
+
+
 def strip_metadata(src: Path, dst: Path) -> Path:
     """去除视频元数据里的作者/来源/标签等痕迹（IG 视频会带 title、comment 标签）。
 

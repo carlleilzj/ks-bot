@@ -62,6 +62,28 @@ PRESET_REGIONS: dict[str, list] = {
 
 
 @dataclass
+class TransformConfig:
+    """二创变换：抖音「原创性不足」扣分对策。
+
+    平台查重比对画面帧特征 + 音频波形 + 关键帧哈希。只转码 + 去元数据时
+    成片逐像素等于源片，判搬运是一眼的。开启后每条片子按区间随机取值，
+    参数独立，避免固定模板反而触发同质化判定。
+    """
+
+    enabled: bool = False
+    crop_pct: tuple = (0.02, 0.05)     # 四边裁切比例区间
+    zoom_pct: tuple = (1.02, 1.06)     # 放大后裁回原尺寸
+    hflip_prob: float = 0.5            # 水平镜像概率
+    hue_deg: tuple = (-4.0, 4.0)
+    sat: tuple = (0.96, 1.06)
+    bright: tuple = (-0.03, 0.03)
+    contrast: tuple = (0.97, 1.05)
+    fps: tuple = (29.5, 30.0)
+    tempo: tuple = (0.97, 1.03)
+    crf: tuple = (19, 24)
+
+
+@dataclass
 class SubtitleConfig:
     enabled: bool = True
     font: str = "PingFang SC"
@@ -147,6 +169,7 @@ class Settings:
     # 行为
     poll_interval_min: int = 5
     subtitle: SubtitleConfig = field(default_factory=SubtitleConfig)
+    transform: TransformConfig = field(default_factory=TransformConfig)
     watermark: WatermarkConfig = field(default_factory=WatermarkConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
@@ -226,6 +249,27 @@ def _build_subtitle(raw: dict) -> SubtitleConfig:
     return cfg
 
 
+def _build_transform(raw: dict | None) -> TransformConfig:
+    """解析 transform 段。区间项写成 [lo, hi]，单值项直接给数。"""
+    raw = raw or {}
+    cfg = TransformConfig(enabled=bool(raw.get("enabled", False)))
+    ranges = ("crop_pct", "zoom_pct", "hue_deg", "sat", "bright", "contrast",
+              "fps", "tempo", "crf")
+    for key in ranges:
+        val = raw.get(key)
+        if isinstance(val, (list, tuple)) and len(val) == 2:
+            try:
+                setattr(cfg, key, (float(val[0]), float(val[1])))
+            except (TypeError, ValueError):
+                log.warning("transform.%s 区间格式错误，用默认值：%r", key, val)
+    if "hflip_prob" in raw:
+        try:
+            cfg.hflip_prob = max(0.0, min(1.0, float(raw["hflip_prob"])))
+        except (TypeError, ValueError):
+            pass
+    return cfg
+
+
 def _build_publish(raw: dict) -> PublishConfig:
     cfg = PublishConfig()
     for key in ("headless", "daily_limit", "min_gap_hours"):
@@ -295,6 +339,7 @@ def load_settings() -> Settings:
         s.asr_local_compute = str(asr_raw.get("local_compute") or "int8").strip() or "int8"
 
     s.subtitle = _build_subtitle(raw.get("subtitle") or {})
+    s.transform = _build_transform(raw.get("transform"))
     s.watermark = _build_watermark(raw.get("watermark"))
     s.vision = _build_vision(raw.get("vision"))
     s.publish = _build_publish(raw.get("publish") or {})

@@ -207,3 +207,42 @@ def test_strip_leading_title_keeps_unique_desc():
     title = "【有点视频】走位翻车"
     desc = "全程无声却浑身是戏。"
     assert _strip_leading_title(title, desc) == desc
+
+
+# ---------------------------------------------------------------------------
+# 二创变换配置（抖音「原创性不足」）
+# ---------------------------------------------------------------------------
+
+def test_build_transform_defaults_off():
+    from bot.config import _build_transform
+    cfg = _build_transform(None)
+    assert cfg.enabled is False
+
+
+def test_build_transform_parses_ranges():
+    from bot.config import _build_transform
+    cfg = _build_transform({
+        "enabled": True,
+        "crop_pct": [0.02, 0.05],
+        "tempo": [0.97, 1.03],
+        "crf": [19, 24],
+        "hflip_prob": 0.5,
+    })
+    assert cfg.enabled is True
+    assert cfg.crop_pct == (0.02, 0.05)
+    assert cfg.tempo == (0.97, 1.03)
+    assert cfg.crf == (19.0, 24.0)
+    assert cfg.hflip_prob == 0.5
+
+
+def test_build_transform_clamps_hflip():
+    from bot.config import _build_transform
+    assert _build_transform({"hflip_prob": 5}).hflip_prob == 1.0
+    assert _build_transform({"hflip_prob": -2}).hflip_prob == 0.0
+
+
+def test_build_transform_bad_range_falls_back():
+    """区间写错不能崩，退回默认值。"""
+    from bot.config import TransformConfig, _build_transform
+    cfg = _build_transform({"crop_pct": ["a", "b"]})
+    assert cfg.crop_pct == TransformConfig().crop_pct
