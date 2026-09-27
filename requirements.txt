@@ -5,3 +5,10 @@ python-dotenv>=1.0
 pyyaml>=6.0
 instaloader>=4.15
 yt-dlp>=2024.1
+# yt-dlp 的 impersonate（浏览器指纹）依赖 —— 缺了它所有链接处理都会失败：
+#   Impersonate target "chrome" is not available.
+# 2026-09-27 实测：Hetzner 迁移时漏装此包，导致投链全部报错。
+# 不写进 requirements 就会在每次换机时重演，务必保留。
+curl_cffi>=0.11
+# 封面处理（ffmpeg.py 里 from PIL import Image 用于 pad_image_to_vertical）
+pillow>=10.0

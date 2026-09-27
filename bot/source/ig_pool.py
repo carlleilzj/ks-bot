@@ -135,21 +135,51 @@ def remove_account(username: str) -> bool:
 
 # ---------- 选择与轮换 ----------
 
+def _has_sessionid(cf: Path) -> bool:
+    """cookie 文件是否含 IG 的登录凭据 sessionid。
+
+    2026-09-27 事故：data/cookies.d/carllei2026.txt 只有匿名 cookie
+    （datr/ig_did/mid/csrftoken…），没有 sessionid，池里却照样选中它 ——
+    结果是自研 IG 解析必然失败、回退 yt-dlp 兜底。选号时必须排除这种
+    「看着有文件、实际没登录」的账号。
+    """
+    try:
+        with cf.open("r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if line.startswith("#") or not line.strip():
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) >= 7 and parts[5] == "sessionid" and parts[6].strip():
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def pick_cookiefile(rotate_every: int = DEFAULT_ROTATE_EVERY) -> Path | None:
     """选一个可用账号的 cookie 文件。
 
     规则：
       1. 过滤掉 disabled / 冷却中的账号
-      2. 优先取 use_count 最小且 cookie 文件存在的（负载均衡）
-      3. use_count 达到 rotate_every 的账号自动让位（等价降权）
-      4. 池为空时回退到遗留的单 cookie 文件
+      2. **优先带 sessionid 的账号**（自研解析器需要登录态；只有匿名 cookie
+         的账号只能走 yt-dlp 兜底，属降级）
+      3. 同级内按 use_count 升序（负载均衡），达到 rotate_every 的让位
+      4. 池内无可用账号时，才扫描 cookie 目录；扫描同样排除已禁用的账号
+      5. 最后回退遗留单 cookie 文件
 
-    cookie 文件的 mtime 也参与：越久没更新的越优先刷新过，这里只做选择不做刷新。
+    2026-09-27 事故：data/cookies.d/carllei2026.txt 只有匿名 cookie
+    （datr/ig_did/mid/csrftoken…），没有 sessionid，池里却照样优先选中它 ——
+    自研 IG 解析必然失败。但注意**不能因此直接踢掉它**：实测它在 yt-dlp
+    路径下仍能抓到公开 Reel。正确做法是让它降级、排在登录态账号之后。
     """
     now = time.time()
     accounts = _load_accounts()
 
-    usable = []
+    # 显式禁用的账号（如被 IG 限制的主号）任何路径都不得选中
+    disabled = {a.get("username") for a in accounts if not a.get("enabled", True)}
+
+    logged_in: list[tuple[dict, Path]] = []
+    anonymous: list[tuple[dict, Path]] = []
     for a in accounts:
         if not a.get("enabled", True):
             continue
@@ -158,16 +188,32 @@ def pick_cookiefile(rotate_every: int = DEFAULT_ROTATE_EVERY) -> Path | None:
         cf = _cookiefile_for(a["username"])
         if not cf.exists() or cf.stat().st_size == 0:
             continue
-        usable.append((a, cf))
+        if _has_sessionid(cf):
+            logged_in.append((a, cf))
+        else:
+            log.info("IG 账号 %s 的 cookie 缺 sessionid，降级为匿名（yt-dlp 兜底）",
+                     a["username"])
+            anonymous.append((a, cf))
 
-    if usable:
-        # use_count 升序、超过 rotate_every 的排到最后
-        usable.sort(key=lambda t: (t[0].get("use_count", 0) >= rotate_every,
-                                   t[0].get("use_count", 0)))
-        acct, cf = usable[0]
-        log.debug("IG 账号池选中：%s（已用 %d 次）", acct["username"],
-                  acct.get("use_count", 0))
-        return cf
+    def _order(pairs: list[tuple[dict, Path]]) -> list[tuple[dict, Path]]:
+        return sorted(pairs, key=lambda t: (t[0].get("use_count", 0) >= rotate_every,
+                                            t[0].get("use_count", 0)))
+
+    for group in (logged_in, anonymous):
+        if group:
+            acct, cf = _order(group)[0]
+            log.debug("IG 账号池选中：%s（已用 %d 次，登录态=%s）",
+                      acct["username"], acct.get("use_count", 0),
+                      "是" if group is logged_in else "否")
+            return cf
+
+    # 池内无可用账号：扫目录，但排除已禁用的用户名
+    for cf in sorted(_COOKIE_DIR.glob("*.txt")):
+        if cf.stem in disabled:
+            continue
+        if cf.stat().st_size > 0 and _has_sessionid(cf):
+            log.info("账号池无可用账号，兜底选用带 sessionid 的 cookie：%s", cf.name)
+            return cf
 
     # 兜底：遗留单 cookie
     if _LEGACY_COOKIE.exists() and _LEGACY_COOKIE.stat().st_size > 0:

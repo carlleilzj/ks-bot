@@ -35,6 +35,22 @@ def _pick_cookies(url: str) -> tuple[Path | None, str]:
     return None, ""
 
 
+def _impersonate_available() -> bool:
+    """curl_cffi 是否可用（yt-dlp impersonate 的硬依赖）。
+
+    2026-09-27 事故：Hetzner 迁移时 curl_cffi 没写进 requirements.txt，
+    而本函数原来无条件设置 impersonate=chrome，导致**所有**链接处理都
+    失败在 "Impersonate target chrome is not available"。现在先探测再设置：
+    没装就跳过 impersonate（IG 等平台通常仍可下载，只是 YouTube 容易
+    被风控），并在日志里明确提示，而不是让整条投链报错。
+    """
+    try:
+        import curl_cffi  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _base_opts(url: str = "") -> tuple[dict, str]:
     """所有 yt-dlp 会话共用的基础选项（含 cookies，若文件存在）。
 
@@ -47,7 +63,11 @@ def _base_opts(url: str = "") -> tuple[dict, str]:
         log.info("yt-dlp 启用 cookies：%s%s", cf, f"（IG 账号 {acct}）" if acct else "")
     # YouTube 需要：浏览器指纹（curl_cffi）+ JS 运行时（deno）+ PO Token（bgutil 脚本）
     # + n-challenge 远程组件（等价 CLI 的 --remote-components ejs:github）
-    opts["impersonate"] = yt_dlp.networking.impersonate.ImpersonateTarget("chrome")
+    if _impersonate_available():
+        opts["impersonate"] = yt_dlp.networking.impersonate.ImpersonateTarget("chrome")
+    else:
+        log.warning("curl_cffi 未安装，已跳过浏览器指纹（impersonate）。"
+                    "YouTube 可能触发风控，建议 pip install curl_cffi")
     opts["remote_components"] = ["ejs:github"]  # 顶层参数（YoutubeDL params），非 extractor_args
     opts["extractor_args"] = {
         "youtube": {
