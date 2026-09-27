@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from bot.ai.copywriter import PLATFORM_PROFILES, _validate
+from bot.ai.copywriter import PLATFORM_PROFILES, _check_cliche, _validate
 from bot.publish.douyin import _strip_leading_title
 from bot.config import Settings
 from bot.db import Database, JobState
@@ -246,3 +246,115 @@ def test_build_transform_bad_range_falls_back():
     from bot.config import TransformConfig, _build_transform
     cfg = _build_transform({"crop_pct": ["a", "b"]})
     assert cfg.crop_pct == TransformConfig().crop_pct
+
+
+# ---------------------------------------------------------------------------
+# 标题套话拦截（文案与内容牛头不对马嘴的对策）
+# 实测基线：40 条已发标题里「下一秒」47%、「天衣无缝」25%、「自以为」22%
+# ---------------------------------------------------------------------------
+
+def test_cliche_catches_next_second():
+    assert _check_cliche("【有点视频】本以为是个王者，下一秒直接翻车")
+
+
+def test_cliche_catches_all_banned_words():
+    for w in ("走位", "翻车", "滑跪", "脸刹", "天衣无缝", "王者",
+              "帅不过", "下一秒", "自以为", "原地", "打滑", "起飞"):
+        assert _check_cliche(f"【有点视频】它{w}了"), w
+
+
+def test_cliche_catches_bad_opening():
+    assert any("开头" in h for h in _check_cliche("【有点视频】它觉得自己藏得很好"))
+    assert any("开头" in h for h in _check_cliche("【有点视频】它以为没人看见"))
+    assert any("开头" in h for h in _check_cliche("【有点视频】本以为稳了"))
+
+
+def test_cliche_passes_clean_title():
+    """照实描述画面的标题必须放行。"""
+    assert _check_cliche("【有点视频】蜥蜴和小蛇在丛林里赛跑，半路杀出个河马") == []
+    assert _check_cliche("【有点视频】鬣狗滚成球冲下悬崖，青蛙看傻了") == []
+
+
+def test_cliche_allows_bad_word_mid_sentence():
+    """套话词在句中一样拦——它们是词，不是句式。"""
+    hits = _check_cliche("【有点视频】这波走位我给满分")
+    assert "走位" in hits
+
+
+# ---------------------------------------------------------------------------
+# 画面内容探针
+# ---------------------------------------------------------------------------
+
+def test_content_probe_caches_result(tmp_path):
+    """探针结果要落盘缓存，重跑不重复调 vision。"""
+    import json
+
+    from bot.ai import content_probe
+
+    sc = "test_sc"
+    cache = tmp_path / f"{sc}_content.json"
+    cache.write_text(json.dumps({"summary": "缓存命中", "subject": "猫"}),
+                     encoding="utf-8")
+
+    class _S:
+        ai_base_url = ""
+        ai_api_key = ""
+        vision_api_key = ""
+        vision_model = ""
+        ai_model = ""
+
+    # 缓存存在时直接返回，不应触碰 video 存在性检查
+    data = content_probe.describe_video(tmp_path / "nope.mp4", _S(), tmp_path, sc)
+    assert data["summary"] == "缓存命中"
+
+
+def test_content_probe_missing_video_returns_empty(tmp_path):
+    from bot.ai import content_probe
+
+    class _S:
+        ai_base_url = ""
+        ai_api_key = ""
+        vision_api_key = ""
+        vision_model = ""
+        ai_model = ""
+
+    assert content_probe.describe_video(tmp_path / "nope.mp4", _S(), tmp_path, "sc2") == {}
+
+
+def test_generate_copy_accepts_content_kwarg():
+    """generate_copy 必须接受 content 参数（画面探针结果）。"""
+    import inspect
+
+    from bot.ai.copywriter import generate_copy
+    sig = inspect.signature(generate_copy)
+    assert "content" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# 真人素材兜底判定（task 241 混入真人婴儿视频的教训）
+# ---------------------------------------------------------------------------
+
+def test_real_person_footage_detected():
+    from bot.ai.content_probe import is_real_person_footage
+    assert is_real_person_footage({"is_animation": False, "has_real_person": True})
+
+
+def test_real_person_footage_animation_exempt():
+    """动画里的角色不算真人。"""
+    from bot.ai.content_probe import is_real_person_footage
+    assert not is_real_person_footage({"is_animation": True, "has_real_person": False})
+
+
+def test_real_person_footage_missing_fields_not_flagged():
+    """字段缺失时不误杀——宁可漏判也不能把正常素材拦掉。"""
+    from bot.ai.content_probe import is_real_person_footage
+    assert not is_real_person_footage({})
+    assert not is_real_person_footage(None)
+    assert not is_real_person_footage({"summary": "小猫在跳舞"})
+    assert not is_real_person_footage({"has_real_person": None, "is_animation": None})
+
+
+def test_real_person_footage_animation_unknown_but_person_true():
+    """没判定动画、但明确有真人 → 按真人处理。"""
+    from bot.ai.content_probe import is_real_person_footage
+    assert is_real_person_footage({"has_real_person": True})

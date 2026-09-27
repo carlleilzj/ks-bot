@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 from ..config import Settings
@@ -91,35 +92,32 @@ def _system_prompt(profile: PlatformProfile) -> str:
 特点：视频多为 AI 3D 动画、萌宠小动物剧情、静音幽默小短片，专为想要安静解压、放松心情的读者提供优质视觉内容。
 
 【输入信息】
-用户会提供该视频的 Instagram/YouTube 原文案（通常为英文/西语/葡语等外文）和语音转录（可能无声）。
-你必须：
-1. 仔细阅读并理解原文案的真实含义（包括 emoji、动植物角色、具体事件）。
-2. 识别视频的主角（例如小猫、小狗、毛毛虫、小鸟、兔子等）和核心情节（如破茧成蝶、互相取暖、抢食物、失误翻车等）。
-3. 严禁无中生有！严禁捏造与原文无关的人类琐事（绝对禁止编造：做饭、带娃、写作业、婆媳、家庭主妇等无关剧情）。
+你会拿到三份材料，**可信度从高到低**：
+1. 【画面实际内容】—— 由视觉模型逐帧看片后的客观描述（最高可信，以此为准）
+2. 【视频来源文案】—— 发布者写的外文简介（含真实剧情线索，但常混引流话术，需甄别）
+3. 【语音转录文本】—— 多为空（本专栏素材 92% 是无声视频）
+
+你的任务：
+1. 从【画面实际内容】里认出主角（具体物种/外貌特征）和它真正做了什么；
+   来源文案若与画面冲突，一律以画面为准。
+2. 来源文案里只提取**剧情线索**，忽略 Follow/Link in bio/话题标签等引流话术。
+3. 严禁无中生有！严禁捏造与画面无关的人类琐事（绝对禁止编造：做饭、带娃、写作业、婆媳、家庭主妇等无关剧情）。
 
 【标题规范（极其重要）】
 1. **固定前缀**：所有标题一律以「【有点视频】」开头，无例外。
 2. 前缀之后是一句**夸张、幽默风趣的钩子**，人设是「正在看视频憋笑/震惊，
    恨不得抓着朋友衣袖让他赶紧看」的旁观众。要求：
-   - **夸而不假**：可以夸张（「我承认我笑得很大声」「这操作我给满分」），
-     但夸张必须建立在画面真实内容上，不是空喊；
+   - **夸而不假**：可以夸张，但夸张必须建立在**画面真实内容**上，不是空喊；
    - **有具体看点**：钩子里必须能看出「谁 + 干了什么离谱/可爱/过分的事」，
      纯情绪词（「太绝了」「好可爱」单独出现）等于没说；
-   - **留悬念**：把最炸的一幕咽住不说 —— 「直到下一秒」「结果它的反应」
-     「第 3 秒开始不对劲」这类断点是好东西；
-   - **口语化**：像弹幕/朋友转述，不像新闻标题；给小动物写拟人内心戏
-     是好招（「它觉得自己藏得很好」）。
-   好的例子：
-     【有点视频】它觉得自己藏得天衣无缝，尾巴：是吗
-     【有点视频】抢玉米抢出残影，下一秒输得毫无尊严
-     【有点视频】我发誓这毛毛虫走路比我上班还有仪式感
-     【有点视频】装睡装了三分钟，就为等主人走过这一步
-     【有点视频】这蛋孵出来的瞬间，我直接原谅了今天所有破事
-   差的例子（禁止）：
-     【有点视频】安静治愈的画面（纯氛围词，没看点）
-     【有点视频】看小动物日常（空洞）
-     【有点视频】你会怎么做？（疑问句套话，禁止）
-     【有点视频】太解压了吧家人们（空喊情绪，没有内容）
+   - **留悬念**：把最炸的一幕咽住不说，用断点勾人；
+   - **口语化**：像弹幕/朋友转述，不像新闻标题；给小动物写拟人内心戏是好招。
+   - **每条必须不一样**：主角物种、动作、场景都要照实写。下面这些词因为
+     被用烂了，一律禁止出现在标题里：
+       走位、翻车、滑跪、脸刹、天衣无缝、王者、帅不过、下一秒、自以为、
+       原地、打滑、起飞、六亲不认、残影
+     也不要用「它觉得/它以为/本以为」开头的句式（已占 22%）。
+     换个说法表达同样的意思，比如不说「翻车」说具体发生了什么。
 
 标题总字数严格不得超过 {profile.max_title_len} 字（含前缀）！
 
@@ -245,18 +243,59 @@ def _check_hallucination(title: str, desc: str) -> list[str]:
     return hits
 
 
+# 标题套话：实测基线（2026-09-27，40 条已发标题）
+#   下一秒 47%、直接 35%、天衣无缝 25%、自以为 22%、走位 20%
+# 成因是这些词就写在 system prompt 的示例里，模型零输入时直接照抄。
+# 这里硬拦截并重试，光在 prompt 里劝是不够的。
+CLICHE_WORDS = [
+    "走位", "翻车", "滑跪", "脸刹", "天衣无缝", "王者",
+    "帅不过", "下一秒", "自以为", "原地", "打滑", "起飞",
+    "六亲不认", "残影",
+]
+CLICHE_PREFIXES = ["它觉得", "它以为", "本以为"]
+
+
+def _check_cliche(title: str) -> list[str]:
+    """拦截被用烂的标题套话，返回命中的词表（空表=通过）。"""
+    hits = [w for w in CLICHE_WORDS if w in title]
+    hook = title[len(IP_PREFIX):].strip() if title.startswith(IP_PREFIX) else title
+    for p in CLICHE_PREFIXES:
+        if hook.startswith(p):
+            hits.append(f"开头「{p}」")
+    return hits
+
+
 def generate_copy(transcript: str, caption: str, categories: list[str], s: Settings,
-                  platform: str = "kuaishou") -> dict:
-    """生成具备统一【无声/治愈/搞笑】IP 标识并与视频内容高度相关的文案。"""
+                  platform: str = "kuaishou", content: dict | None = None) -> dict:
+    """生成具备统一 IP 标识并与视频画面高度相关的文案。
+
+    content: 画面内容探针结果（bot.ai.content_probe.describe_video 的返回）。
+             有它时文案基于真实画面生成；没有则退化为「源文案 + 转录」。
+    """
     profile = PLATFORM_PROFILES.get(platform) or PLATFORM_PROFILES["kuaishou"]
     from .asr import _NOISE_RE
     raw = (transcript or "").strip()
     if raw and _NOISE_RE.search(raw) and len(raw) < 40:
         raw = ""
 
+    # 画面描述放在最前：它是唯一能反映视频真实内容的输入。
+    # 实测（2026-09-27）：caption 常是引流话术、transcript 92% 为空，
+    # 只靠这两样时模型会照抄 system prompt 里的示例词。
+    content_block = ""
+    if content and content.get("summary"):
+        content_block = (
+            f"【画面实际内容（视觉模型逐帧看片所得，以此为准）】\n"
+            f"主角：{content.get('subject') or '未知'}\n"
+            f"动作：{content.get('action') or '未知'}\n"
+            f"场景：{content.get('setting') or '未知'}\n"
+            f"情节：{content.get('beats') or '未知'}\n"
+            f"看点：{content.get('summary')}\n\n"
+        )
+
     user_content = (
-        f"【视频来源文案（请重点分析其描述的动植物角色与故事真相）】\n"
-        f"{caption.strip() or '（无外文简介，请按无声治愈/纯享短片构思）'}\n\n"
+        content_block
+        + f"【视频来源文案（仅取剧情线索，忽略引流话术与话题标签）】\n"
+        f"{caption.strip() or '（无外文简介）'}\n\n"
         f"【语音转录文本】\n{raw or '（视频无对白/无人声，纯画面叙事）'}\n\n"
     )
     # 动态话题榜：把回流播放量算出的 Top-N 注入 prompt（每次生成现查现注入）。
@@ -292,19 +331,41 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     ]
 
     last_err = ""
+    last_result: dict | None = None
     for attempt in range(1, 4):
         try:
             resp = client.chat.completions.create(
                 model=s.ai_model, messages=messages, temperature=0.7,
             )
+            # 上游（中转/内容审核）可能返回空 choices，直接取 [0] 会抛
+            # "list index out of range" —— 完全看不出是内容被拦还是接口抽风。
+            if not getattr(resp, "choices", None):
+                last_err = "接口返回空 choices（多为内容审核拦截或上游限流）"
+                log.warning("[%s] 第 %d 次：%s", profile.name, attempt, last_err)
+                time.sleep(2)
+                continue
             content = resp.choices[0].message.content or ""
             result = _validate(_extract_json(content), categories, profile)
+            last_result = result
 
             banned = _check_hallucination(result["title"], result["description"])
             if banned:
                 last_err = "；".join(banned)
                 log.warning("[%s] 文案命中禁用词（第 %d 次）：%s", profile.name, attempt, last_err)
                 messages.append({"role": "user", "content": f"上次生成违规：{last_err}。请绝对不要出现任何做饭、带娃或俗套套话，只针对原文案角色与事件重新输出。"})
+                continue
+
+            cliche = _check_cliche(result["title"])
+            if cliche:
+                last_err = "、".join(cliche)
+                log.warning("[%s] 标题命中套话（第 %d 次）：%s | %r",
+                            profile.name, attempt, last_err, result["title"])
+                messages.append({"role": "user", "content": (
+                    f"上次标题用了这些被用烂的词：{last_err}。"
+                    f"请重新写：直接说**这个画面里具体发生了什么**"
+                    f"（主角是什么动物、在做什么动作、结果怎样），"
+                    f"不要用那些套话词。标题：{result['title']}"
+                )})
                 continue
 
             log.info("[%s] IP文案生成完成：标题=%r 标签=%s 分区=%s",
@@ -315,9 +376,15 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
             log.warning("[%s] 文案输出解析失败（第 %d 次）：%s", profile.name, attempt, last_err)
             messages.append({"role": "user", "content": f"输出格式错误：{last_err}，请只输出纯 JSON 对象。"})
         except Exception as e:
-            raise CopywriterError(f"调用文案生成接口失败：{e}") from e
+            last_err = f"调用接口失败：{e}"
+            log.warning("[%s] 文案接口异常（第 %d 次）：%s", profile.name, attempt, str(e)[:150])
+            time.sleep(2)
 
-    # 兜底
-    log.warning("[%s] 3 次生成均触发校验，进行兜底返回", profile.name)
-    content = resp.choices[0].message.content or ""
-    return _validate(_extract_json(content), categories, profile)
+    # 兜底：优先复用最后一次成功解析的结果（可能是命中套话的那版），
+    # 比抛异常阻断整条流水线好 —— 套话顶多是文案不够出彩，
+    # 而 CopywriterError 会让任务卡在 TRANSCRIBED 永远发不出去。
+    if last_result:
+        log.warning("[%s] 3 次均未通过校验（%s），复用最后一次结果：%r",
+                    profile.name, last_err, last_result["title"])
+        return last_result
+    raise CopywriterError(f"文案生成失败（3 次重试后）：{last_err}")

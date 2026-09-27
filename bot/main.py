@@ -242,19 +242,44 @@ def step_transcribe(s: Settings, db: Database, task: dict) -> None:
 
 
 def step_copywrite(s: Settings, db: Database, task: dict) -> None:
-    """为每个启用平台生成专属文案。去痕迹：不传原 caption，只用 ASR 转录文本。
+    """为每个启用平台生成专属文案。
+
+    输入三份材料：画面内容探针（vision 看片）+ 源文案 + ASR 转录。
+    实测（2026-09-27）：此前只传 transcript 且 caption 硬编码为空串，
+    而素材 92% 是无声视频 —— 模型拿到零输入，只能照抄 prompt 里的示例词，
+    导致 47% 的标题含「下一秒」。现在以画面探针为最高可信输入。
 
     copy_json 存 {platform: {title, description, tags, category}}；
     同时把快手套写进 legacy 列（title/description/tags/category），兼容 --status 和旧数据。
     """
     sc = task["shortcode"]
     transcript = task.get("transcript") or ""
+    caption = (task.get("caption") or "").strip()
+
+    # 画面探针：抽帧 + vision 识别真实内容。失败返回 {}，不阻塞文案生成。
+    content: dict = {}
+    work_path = task.get("work_path")
+    if work_path and Path(work_path).exists():
+        try:
+            from .ai.content_probe import describe_video, is_real_person_footage
+            content = describe_video(Path(work_path), s, WORK_DIR, sc)
+            # 真人素材提醒（不拦截 —— 手动投链模式下由 He 决定是否发）。
+            # 实测 task 241 是真人婴儿抚触视频混进队列：既不符账号定位，
+            # 还会触发上游内容审核（文案接口返回空 choices 直接报错）。
+            if is_real_person_footage(content):
+                log.warning("[%s] ⚠️ 画面疑似实拍真人素材（非动画）：%s",
+                            sc, str(content.get("summary", ""))[:120])
+        except Exception as e:
+            log.warning("[%s] 内容探针异常（按无画面描述继续）：%s", sc, str(e)[:150])
+
     copy_all: dict[str, dict] = {}
     for pub in _task_platforms(s, task):
         cats = s.platforms.get(pub.name).categories if s.platforms.get(pub.name) else []
-        copy_all[pub.name] = generate_copy(transcript, "", cats, s, platform=pub.name)
+        copy_all[pub.name] = generate_copy(transcript, caption, cats, s,
+                                           platform=pub.name, content=content)
     if not copy_all:  # 没有启用平台时兜底生成快手套，流水线才能继续走
-        copy_all["kuaishou"] = generate_copy(transcript, "", s.categories, s, platform="kuaishou")
+        copy_all["kuaishou"] = generate_copy(transcript, caption, s.categories, s,
+                                             platform="kuaishou", content=content)
     (WORK_DIR / f"{sc}_copy.json").write_text(
         json.dumps(copy_all, ensure_ascii=False, indent=2), encoding="utf-8")
     ks = copy_all.get("kuaishou") or next(iter(copy_all.values()))
@@ -262,8 +287,8 @@ def step_copywrite(s: Settings, db: Database, task: dict) -> None:
               description=ks["description"], tags=" ".join(ks["tags"]),
               category=ks["category"],
               copy_json=json.dumps(copy_all, ensure_ascii=False), error=None)
-    log.info("[%s] 文案生成完成（%d 个平台，全新生成无原痕迹）：%s",
-             sc, len(copy_all), ks["title"])
+    log.info("[%s] 文案生成完成（%d 个平台，画面探针=%s）：%s",
+             sc, len(copy_all), "有" if content else "无", ks["title"])
 
 
 def step_subtitle(s: Settings, db: Database, task: dict) -> None:
@@ -280,7 +305,12 @@ def step_subtitle(s: Settings, db: Database, task: dict) -> None:
 
 
 def _platform_copy(s: Settings, db: Database, task: dict, pub) -> dict:
-    """取该平台文案；copy_json 里没有（平台后启用/旧任务）就现场生成并补写。"""
+    """取该平台文案；copy_json 里没有（平台后启用/旧任务）就现场生成并补写。
+
+    补生成必须走和 step_copywrite 一样的输入（画面探针 + 源 caption），
+    否则新启用的平台会退回「零输入照抄示例词」的老毛病。
+    探针结果在磁盘上有缓存，这里复用不会重复调 vision。
+    """
     fresh = db.get(task["id"]) or task  # 重新读，避免循环里多个平台互相覆盖 copy_json
     data: dict = {}
     if fresh.get("copy_json"):
@@ -292,7 +322,21 @@ def _platform_copy(s: Settings, db: Database, task: dict, pub) -> dict:
     if copy and copy.get("title"):
         return copy
     cats = s.platforms.get(pub.name).categories if s.platforms.get(pub.name) else []
-    copy = generate_copy(task.get("transcript") or "", "", cats, s, platform=pub.name)
+
+    content: dict = {}
+    work_path = fresh.get("work_path") or task.get("work_path")
+    if work_path and Path(work_path).exists():
+        try:
+            from .ai.content_probe import describe_video
+            content = describe_video(Path(work_path), s, WORK_DIR,
+                                     fresh["shortcode"])
+        except Exception as e:
+            log.warning("[%s] 补生成文案时内容探针异常：%s",
+                        fresh["shortcode"], str(e)[:120])
+
+    copy = generate_copy(fresh.get("transcript") or "",
+                         (fresh.get("caption") or "").strip(),
+                         cats, s, platform=pub.name, content=content)
     data[pub.name] = copy
     db.update(task["id"], copy_json=json.dumps(data, ensure_ascii=False))
     return copy

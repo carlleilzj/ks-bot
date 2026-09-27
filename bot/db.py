@@ -45,10 +45,10 @@ class JobState:
 JOB_FINAL_STATES = (JobState.PUBLISHED, JobState.FAILED, JobState.SKIPPED)
 
 _COLUMNS = {
-    "state", "error", "retries", "transcript", "title", "description", "tags",
-    "category", "ks_url", "copy_json", "raw_path", "work_path", "final_path",
-    "cover_path", "srt_path", "published_at", "updated_at", "media_url",
-    "source_url", "source_platform", "target_platforms", "source_tag",
+    "state", "error", "retries", "transcript", "caption", "title", "description",
+    "tags", "category", "ks_url", "copy_json", "raw_path", "work_path",
+    "final_path", "cover_path", "srt_path", "published_at", "updated_at",
+    "media_url", "source_url", "source_platform", "target_platforms", "source_tag",
     "play_count", "like_count", "stats_at",
 }
 
