@@ -11,7 +11,7 @@ from bot.db import Database, JobState
 from bot.main import publish_gate
 from bot.publish.base import PROXY_ENV_KEYS, chromium_launch_env, chromium_launch_kwargs
 from bot.publish.kuaishou import pick_spark_title
-from bot.publish.weixin import _sanitize_weixin_url
+from bot.publish.weixin import _login_complete, _sanitize_weixin_url
 from bot.source.downloader import parse_url
 
 
@@ -358,3 +358,155 @@ def test_real_person_footage_animation_unknown_but_person_true():
     """没判定动画、但明确有真人 → 按真人处理。"""
     from bot.ai.content_probe import is_real_person_footage
     assert is_real_person_footage({"has_real_person": True})
+
+
+# ---------------------------------------------------------------------------
+# 视频号登录态完整性（2026-09-29 事故：约 24h 即失效，重扫后复发）
+# 实测更正：视频号只设 2 个 cookie（sessionid + wxuin），没有 slave_sid 等。
+# ---------------------------------------------------------------------------
+
+class _FakeCtx:
+    """模拟 Playwright context，只实现 cookies()。"""
+
+    def __init__(self, pairs):
+        self._c = [{"name": n, "value": v} for n, v in pairs]
+
+    def cookies(self, urls=None):
+        return self._c
+
+
+def test_login_complete_accepts_two_cookie_session():
+    """视频号真实登录态就是 sessionid + wxuin 两个。"""
+    ctx = _FakeCtx([("sessionid", "BgAA9B%2B8"), ("wxuin", "3983570754")])
+    assert _login_complete(ctx) is True
+
+
+def test_login_complete_accepts_extra_cookies():
+    """多出其他 cookie 也照样通过。"""
+    ctx = _FakeCtx([("sessionid", "x"), ("wxuin", "1"), ("slave_sid", "y")])
+    assert _login_complete(ctx) is True
+
+
+def test_login_complete_requires_sessionid():
+    """缺 sessionid 不算登录（wxuin 单独存在可能是残留）。"""
+    ctx = _FakeCtx([("wxuin", "1")])
+    assert _login_complete(ctx) is False
+
+
+def test_login_complete_requires_wxuin():
+    """缺 wxuin 也不算 —— 它标识账号身份，缺了会发错号。"""
+    ctx = _FakeCtx([("sessionid", "x")])
+    assert _login_complete(ctx) is False
+
+
+def test_login_complete_rejects_empty_values():
+    """空值 cookie 不计入。"""
+    ctx = _FakeCtx([("sessionid", ""), ("wxuin", "")])
+    assert _login_complete(ctx) is False
+
+
+def test_login_complete_handles_broken_context():
+    """context 异常不能崩，返回 False。"""
+    class _Boom:
+        def cookies(self, urls=None):
+            raise RuntimeError("boom")
+    assert _login_complete(_Boom()) is False
+
+
+def test_publish_persists_state_via_shared_helper():
+    """三个平台的 publish() 都必须回写登录态（用共享助手）。
+
+    注意：实测 sessionid 不轮换，回写不是「续期」机制；这里只保证
+    代码保留了该行为，避免未来误删。
+    """
+    import inspect
+
+    from bot.publish import douyin, kuaishou, weixin
+    for mod in (weixin, kuaishou, douyin):
+        src = inspect.getsource(mod.publish)
+        assert "persist_state_if_changed(" in src, mod.__name__
+
+
+# ---------------------------------------------------------------------------
+# persist_state_if_changed：只在 cookie 真变化时才落盘
+# 2026-09-29 事故：无条件回写会用失效 cookie 覆盖好文件并刷新 mtime，
+# 制造「刚刚更新过」的假象，误导了第一次诊断。
+# ---------------------------------------------------------------------------
+
+class _StateCtx:
+    """模拟带 cookies()/storage_state() 的 Playwright context。"""
+
+    def __init__(self, pairs, domain="channels.weixin.qq.com"):
+        self._c = [{"name": n, "value": v, "domain": domain} for n, v in pairs]
+        self.writes = 0
+
+    def cookies(self, urls=None):
+        return self._c
+
+    def storage_state(self, path=None):
+        self.writes += 1
+        if path:
+            import json
+            from pathlib import Path
+            Path(path).write_text(
+                json.dumps({"cookies": self._c, "origins": []}),
+                encoding="utf-8")
+        return {"cookies": self._c, "origins": []}
+
+
+def test_persist_writes_when_file_missing(tmp_path):
+    """文件不存在 → 应写入。"""
+    from bot.publish.base import persist_state_if_changed
+
+    ctx = _StateCtx([("sessionid", "a"), ("wxuin", "1")])
+    sp = tmp_path / "s.json"
+    assert persist_state_if_changed(ctx, sp, domains=["channels.weixin.qq.com"])
+    assert sp.exists()
+
+
+def test_persist_skips_when_unchanged(tmp_path):
+    """cookie 没变 → 不写入（避免刷新 mtime 造成假象）。"""
+    from bot.publish.base import persist_state_if_changed
+
+    ctx = _StateCtx([("sessionid", "a"), ("wxuin", "1")])
+    sp = tmp_path / "s.json"
+    persist_state_if_changed(ctx, sp, domains=["channels.weixin.qq.com"])
+    first = ctx.writes
+    assert first == 1
+
+    # 同样的 cookie 再来一次 → 不应再写
+    assert not persist_state_if_changed(ctx, sp, domains=["channels.weixin.qq.com"])
+    assert ctx.writes == 1
+
+
+def test_persist_writes_when_value_changed(tmp_path):
+    """cookie 值变化 → 应写入。"""
+    from bot.publish.base import persist_state_if_changed
+
+    ctx = _StateCtx([("sessionid", "a"), ("wxuin", "1")])
+    sp = tmp_path / "s.json"
+    persist_state_if_changed(ctx, sp, domains=["channels.weixin.qq.com"])
+
+    ctx._c[0]["value"] = "b"      # sessionid 变了
+    assert persist_state_if_changed(ctx, sp, domains=["channels.weixin.qq.com"])
+    assert ctx.writes == 2
+
+
+def test_persist_skips_empty_cookies(tmp_path):
+    """没有任何 cookie → 不写入（避免用空文件覆盖好文件）。"""
+    from bot.publish.base import persist_state_if_changed
+
+    ctx = _StateCtx([])
+    sp = tmp_path / "s.json"
+    assert not persist_state_if_changed(ctx, sp, domains=["channels.weixin.qq.com"])
+    assert not sp.exists()
+
+
+def test_persist_handles_corrupt_old_file(tmp_path):
+    """旧文件损坏 → 直接重写，不崩。"""
+    from bot.publish.base import persist_state_if_changed
+
+    sp = tmp_path / "s.json"
+    sp.write_text("{ this is not json", encoding="utf-8")
+    ctx = _StateCtx([("sessionid", "a"), ("wxuin", "1")])
+    assert persist_state_if_changed(ctx, sp, domains=["channels.weixin.qq.com"])

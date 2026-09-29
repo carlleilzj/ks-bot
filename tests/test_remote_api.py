@@ -158,7 +158,13 @@ def test_claim_and_report_flow(api_env):
     assert db.get(tid)["state"] == State.PUBLISHED
 
 
-def test_report_login_expired_skips_job(api_env):
+def test_report_login_expired_keeps_job_pending(api_env):
+    """登录态失效 → job 退回 PENDING，重登后自动继续。
+
+    2026-09-28/29 连续两次踩到：旧实现把 job 打成 SKIPPED（终态），
+    整个待发队列被永久烧掉，重登也回不来，只能人工翻库恢复。
+    这条测试曾把该 bug 固化成契约（断言 SKIPPED），已更正。
+    """
     base, s, db, tid = api_env["base"], api_env["s"], api_env["db"], api_env["task_id"]
     httpx.post(f"{base}/api/claim", headers=_h(s),
                json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
@@ -166,8 +172,32 @@ def test_report_login_expired_skips_job(api_env):
                json={"task_id": tid, "platform": "kuaishou", "ok": False,
                      "error": "登录态失效", "login_expired": True}, timeout=5)
     jobs = db.jobs(tid)
-    assert jobs[0]["state"] == JobState.SKIPPED
-    assert db.get(tid)["state"] == State.PUBLISHED  # 全部终态 → 任务也收尾
+    assert jobs[0]["state"] == JobState.PENDING, "登录失效不该丢 job"
+    # 任务仍有待处理 job，不能收尾成 PUBLISHED
+    assert db.get(tid)["state"] != State.PUBLISHED
+
+
+def test_report_login_expired_does_not_consume_retries(api_env):
+    """登录失效不是任务本身的错，不消耗 retries（否则 5 次后同样丢队列）。"""
+    base, s, db, tid = api_env["base"], api_env["s"], api_env["db"], api_env["task_id"]
+    httpx.post(f"{base}/api/claim", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    httpx.post(f"{base}/api/report", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou", "ok": False,
+                     "error": "登录态失效", "login_expired": True}, timeout=5)
+    assert db.jobs(tid)[0]["retries"] == 0
+
+
+def test_report_login_unrecoverable_skips_job(api_env):
+    """账号确实不可恢复（被封等）时才 SKIPPED。"""
+    base, s, db, tid = api_env["base"], api_env["s"], api_env["db"], api_env["task_id"]
+    httpx.post(f"{base}/api/claim", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    httpx.post(f"{base}/api/report", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou", "ok": False,
+                     "error": "账号被封禁", "login_expired": True,
+                     "unrecoverable": True}, timeout=5)
+    assert db.jobs(tid)[0]["state"] == JobState.SKIPPED
 
 
 def test_report_failure_back_to_pending(api_env):

@@ -26,6 +26,7 @@ from .base import (
     fill_editor,
     launch_chromium,
     new_context,
+    persist_state_if_changed,
     rand_sleep,
     settle,
     shot,
@@ -281,6 +282,10 @@ def publish(
             log.info("抖音发布成功：%s", dy_url or "（作品链接获取失败，见创作者中心-内容管理）")
             return dy_url
         finally:
+            # 回写登录态：只在 cookie 真变化时才落盘（见 base.persist_state_if_changed）。
+            # 实测 sessionid 不轮换，这不是续期机制，只是留存最新值。
+            persist_state_if_changed(context, state_path,
+                                     domains=["douyin.com"])
             context.close()
             browser.close()
 

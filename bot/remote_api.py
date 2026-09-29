@@ -223,8 +223,13 @@ class RemoteApi:
         }
 
     def report(self, data: dict) -> dict:
-        """发布结果回报。ok=True → job PUBLISHED + 通知；LoginExpired → SKIPPED；
-        其他失败 → 回 PENDING 等 worker 重试（不消耗 gate，retries+1）。"""
+        """发布结果回报。
+
+        ok=True → job PUBLISHED + 通知。
+        登录态失效（login_expired）→ job 退回 PENDING 等重登，**不消耗 retries**；
+        若同时带 unrecoverable=True（账号被封等）才置 SKIPPED。
+        其他失败 → 回 PENDING 等 worker 重试（retries+1）。
+        """
         task_id = int(data.get("task_id") or 0)
         platform = str(data.get("platform") or "").strip()
         if not task_id or not platform:
@@ -235,14 +240,23 @@ class RemoteApi:
         url = str(data.get("url") or "")[:500]
 
         with self.db._lock:
+            # 登录态失效不能把 job 打成 SKIPPED（终态、永不重试）——
+            # 那会在每次会话过期时**永久烧掉整个待发队列**，重登后也回不来，
+            # 只能人工翻库恢复（2026-09-28/29 连续两次踩到）。
+            # 正确做法：退回 PENDING 等重登，且不消耗 retries（不是任务本身的错）。
+            # 仅当 worker 明确报告「该账号已被封禁/不可恢复」时才 SKIPPED。
+            recoverable = login_expired and not bool(data.get("unrecoverable"))
+            new_state = (JobState.PUBLISHED if ok
+                         else (JobState.PENDING if (recoverable or not login_expired)
+                               else JobState.SKIPPED))
             cur = self.db.conn.execute(
                 "UPDATE publish_jobs SET state=?, url=?, error=?, "
                 "retries=CASE WHEN ? THEN retries ELSE retries+1 END, "
                 "published_at=?, claimed_at=NULL "
                 "WHERE task_id=? AND platform=? AND state=?",
-                (JobState.PUBLISHED if ok else (JobState.SKIPPED if login_expired else JobState.PENDING),
+                (new_state,
                  url if ok else None, err if not ok else None,
-                 1 if ok or login_expired else 0,
+                 1 if (ok or recoverable) else 0,
                  now_iso() if ok else None,
                  task_id, platform, PUBLISHING))
             self.db.conn.commit()
@@ -264,9 +278,21 @@ class RemoteApi:
             telegram.notify_info(self.s, f"✅ [{task['shortcode']}] {display} 发布成功（远程发布端回报）"
                                          + (f"\n链接：{url}" if url else ""))
         elif login_expired:
-            log.warning("[%s] %s 登录态失效，job 已 SKIPPED", task["shortcode"], display)
-            telegram.notify_info(self.s, f"🔑 [{task['shortcode']}] {display} 登录态失效，job 已跳过\n"
-                                         f"请到发布端运行 python -m bot.main --login {platform} 重新扫码")
+            if recoverable:
+                # 队列保留：重登后自动继续，无需人工翻库
+                log.warning("[%s] %s 登录态失效，job 退回 PENDING 等待重登",
+                            task["shortcode"], display)
+                telegram.notify_info(
+                    self.s,
+                    f"🔑 [{task['shortcode']}] {display} 登录态失效\n"
+                    f"job 已保留（未丢弃），重登后自动继续\n"
+                    f"请到发布端运行 python -m bot.main --login-qr {platform} 重新扫码")
+            else:
+                log.warning("[%s] %s 登录态失效且不可恢复，job 已 SKIPPED",
+                            task["shortcode"], display)
+                telegram.notify_info(
+                    self.s, f"🔑 [{task['shortcode']}] {display} 登录态失效（不可恢复），"
+                            f"job 已跳过\n请到发布端运行 python -m bot.main --login {platform} 重新扫码")
         else:
             log.warning("[%s] %s 发布失败：%s", task["shortcode"], display, err[:150])
             telegram.notify_info(self.s, f"⚠️ [{task['shortcode']}] {display} 发布失败，将自动重试\n错误：{err[:200]}")

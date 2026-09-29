@@ -200,6 +200,60 @@ def new_context(browser, state_path: Path):
     return context
 
 
+def persist_state_if_changed(context, state_path: Path, *, domains: list[str]) -> bool:
+    """把 context 的 cookie 回写到 state 文件 —— 仅在**确实变化**时。
+
+    为什么不是无脑回写（2026-09-29 事故复盘）：
+    登录失效时 context 里仍带着从文件加载的旧 cookie，无条件回写会用
+    死状态覆盖好文件，并刷新 mtime，制造「刚刚更新过」的假象——正是
+    这个假象让第一次失效诊断绕了远路。
+
+    因此这里比对 cookie 指纹（name=value 排序后哈希），只有真的变了才落盘。
+    返回是否写入。
+    """
+    import hashlib
+    import json
+
+    try:
+        current = sorted(
+            (c["name"], c.get("value", ""))
+            for c in context.cookies(domains)
+        )
+        fingerprint = hashlib.sha256(
+            json.dumps(current, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+
+        path = Path(state_path)
+        if path.exists() and path.stat().st_size > 2:
+            try:
+                old = json.loads(path.read_text(encoding="utf-8"))
+                old_pairs = sorted(
+                    (c["name"], c.get("value", ""))
+                    for c in old.get("cookies", [])
+                    if any(d in (c.get("domain") or "") for d in domains)
+                )
+                old_fp = hashlib.sha256(
+                    json.dumps(old_pairs, ensure_ascii=False).encode("utf-8")
+                ).hexdigest()
+                if old_fp == fingerprint:
+                    log.debug("登录态无变化，跳过回写")
+                    return False
+            except Exception:
+                pass  # 旧文件损坏/为空 → 直接重写
+
+        if not current:
+            log.debug("登录态为空，跳过回写")
+            return False
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        context.storage_state(path=str(path))
+        log.debug("登录态已回写（%d 个 cookie）", len(current))
+        return True
+    except Exception as e:
+        log.debug("登录态回写跳过：%s", str(e)[:120])
+        return False
+
+
 def settle(page: Page, seconds: float = 3.0) -> None:
     """等页面脚本渲染完。"""
     try:

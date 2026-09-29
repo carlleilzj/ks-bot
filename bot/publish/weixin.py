@@ -25,6 +25,7 @@ from .base import (
     fill_editor,
     launch_chromium,
     new_context,
+    persist_state_if_changed,
     rand_sleep,
     settle,
     shot,
@@ -96,12 +97,33 @@ def _is_logged_in(page: Page) -> bool:
 
 
 def _has_login_cookies(context) -> bool:
-    """视频号创作者中心的会话 cookie。"""
+    """视频号创作者中心是否已下发会话 cookie（用于发布前的可用性判断）。
+
+    实测（2026-09-29）：视频号完整登录态就是 sessionid + wxuin 两个 cookie。
+    登录落盘请用 _login_complete()（额外要求 wxuin 非空，避免存下半个会话）。
+    """
     try:
         cookies = context.cookies(["https://channels.weixin.qq.com"])
         names = {c["name"] for c in cookies}
         return bool({"slave_sid", "slave_user", "video_account_id",
                      "wxid", "sessionid"} & names)
+    except Exception:
+        return False
+
+
+def _login_complete(context) -> bool:
+    """登录态是否可用（可以安全落盘）。
+
+    2026-09-29 实测更正：视频号**只设 2 个 cookie**（sessionid + wxuin），
+    没有 slave_sid/slave_user/video_account_id —— 起初按「≥3 个」判定，
+    是错的，只会让登录流程白等 20 秒。真正的凭据就是 sessionid 本身。
+
+    所以这里只要求 sessionid 非空。wxuin 一并校验，因为它标识账号身份。
+    """
+    try:
+        cookies = context.cookies(["https://channels.weixin.qq.com"])
+        vals = {c["name"]: (c.get("value") or "") for c in cookies}
+        return bool(vals.get("sessionid")) and bool(vals.get("wxuin"))
     except Exception:
         return False
 
@@ -187,11 +209,18 @@ def login_qr_image(out_path: Path | None = None,
             refreshes = 0
             while time.time() < deadline:
                 if _is_logged_in(page) or _has_login_cookies(context):
-                    time.sleep(2)   # 等登录跳转把 cookie 补齐
+                    # 等 cookie 稳定再落盘（sessionid + wxuin 两个即完整，
+                    # 实测视频号就只设这两个；见 _login_complete）
+                    for _ in range(5):
+                        if _login_complete(context):
+                            break
+                        time.sleep(2)
                     state_path.parent.mkdir(parents=True, exist_ok=True)
                     context.storage_state(path=str(state_path))
-                    log.info("视频号登录成功，登录态已保存：%s", state_path)
-                    print(f">>> 登录成功！登录态已保存到 {state_path}"
+                    n = len(context.cookies(["https://channels.weixin.qq.com"]))
+                    log.info("视频号登录成功，登录态已保存：%s（%d 个 cookie）",
+                             state_path, n)
+                    print(f">>> 登录成功！登录态已保存到 {state_path}（{n} 个 cookie）"
                           + (f"（中途自动刷新 {refreshes} 次）" if refreshes else ""))
                     return True
 
@@ -243,10 +272,14 @@ def login_interactive(state_path: Path = STATE_PATH) -> bool:
                 url = page.url
                 logged_in = "login" not in url and "passport" not in url
                 if (logged_in and _has_login_cookies(context)) or _has_login_cookies(context):
-                    time.sleep(2)
+                    for _ in range(10):      # 等完整登录态落地，见 _login_complete
+                        if _login_complete(context):
+                            break
+                        time.sleep(2)
                     state_path.parent.mkdir(parents=True, exist_ok=True)
                     context.storage_state(path=str(state_path))
-                    print(f">>> 登录成功！登录态已保存到 {state_path}")
+                    n = len(context.cookies(["https://channels.weixin.qq.com"]))
+                    print(f">>> 登录成功！登录态已保存到 {state_path}（{n} 个 cookie）")
                     return True
                 time.sleep(2)
             print(">>> 等待登录超时，未保存登录态")
@@ -328,6 +361,14 @@ def publish(
             log.info("视频号发布成功：%s", weixin_url or "（链接获取失败，见创作者中心-内容管理）")
             return weixin_url
         finally:
+            # 回写登录态：捕获交互中服务端可能下发的 cookie 更新。
+            # 实测更正（2026-09-29）：sessionid 在页面访问后**不轮换**，
+            # 所以这不是「续期」——会话过期由服务端 TTL 决定（客户端 expires
+            # 到 2027 也没用）。真正的防线是 remote_api 不再把登录失效的 job
+            # 打成终态，以及这里只在 cookie 真变化时才落盘（避免用死状态
+            # 覆盖好文件、刷新 mtime 造成「刚更新过」的假象）。
+            persist_state_if_changed(context, state_path,
+                                     domains=["channels.weixin.qq.com"])
             context.close()
             browser.close()
 
