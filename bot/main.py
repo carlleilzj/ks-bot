@@ -384,6 +384,11 @@ def step_publish(s: Settings, db: Database, task: dict, headed: bool) -> None:
                 if plat and plat.spark_task:
                     extra["spark_task"] = True
                     extra["spark_task_title"] = plat.spark_task_title
+            elif pub.name == "toutiao":
+                plat = s.platforms.get("toutiao")
+                decl = (plat.anchors.get("声明") if plat and plat.anchors else "") or ""
+                if decl:
+                    extra["declaration"] = decl
             url = pub.publish(
                 video=Path(task["final_path"]),
                 title=copy.get("title", ""),
@@ -727,10 +732,10 @@ def _sigterm_handler(s: Settings):
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="python -m bot.main", description="投链驱动：下载处理并发布到快手/抖音/小红书/视频号")
+        prog="python -m bot.main", description="投链驱动：下载处理并发布到快手/抖音/小红书/视频号/今日头条")
     parser.add_argument("--setup", action="store_true", help="交互式初始化向导（IG token/ID、TG chat_id）")
     parser.add_argument("--login", nargs="?", const="kuaishou", default=None, metavar="PLATFORM",
-                        help="扫码登录发布平台：kuaishou/douyin/xhs，可逗号分隔或 all（默认 kuaishou）")
+                        help="扫码登录发布平台：kuaishou/douyin/xhs/weixin/toutiao，可逗号分隔或 all（默认 kuaishou）")
     parser.add_argument("--login-qr", nargs="?", const="weixin", default=None, metavar="PLATFORM",
                         help="无头环境扫码登录：把二维码导成 PNG 并轮询等待扫码（发布端服务器用）")
     parser.add_argument("--qr-wait", type=int, default=300, metavar="SEC",
@@ -843,8 +848,9 @@ def main() -> None:
         # 各平台的 login_qr_image 都在各自的 publish 模块里，签名一致。
         from .publish.weixin import login_qr_image as weixin_qr
         from .publish.kuaishou import login_qr_image as kuaishou_qr
+        from .publish.toutiao import login_qr_image as toutiao_qr
 
-        _QR_IMPL = {"weixin": weixin_qr, "kuaishou": kuaishou_qr}
+        _QR_IMPL = {"weixin": weixin_qr, "kuaishou": kuaishou_qr, "toutiao": toutiao_qr}
         names = [x.strip() for x in str(args.login_qr).split(",") if x.strip()]
         ok_all = True
         for name in names:

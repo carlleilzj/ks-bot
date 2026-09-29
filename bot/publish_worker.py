@@ -257,6 +257,11 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
                 extra["anchors"] = dict(plat_cfg.anchors)
             if plat_cfg and getattr(plat_cfg, "hot_topic", ""):
                 extra["hot_topic"] = plat_cfg.hot_topic
+        elif platform == "toutiao":
+            # 作品声明。素材是 AI 动画，配置里一般是「AI生成」。勾选失败不挡发布。
+            decl = (plat_cfg.anchors.get("声明") if plat_cfg and plat_cfg.anchors else "") or ""
+            if decl:
+                extra["declaration"] = decl
         log.info("[%s] %s 开始发布：%s", task["shortcode"], pub.display_name, copy["title"][:40])
         url = pub.publish(
             video=video,
@@ -435,8 +440,11 @@ def maybe_audit(base: str, s: Settings) -> None:
 
 def run_once(base: str, s: Settings) -> int:
     """一轮：拉清单 → 逐个可发布平台处理 → 审核巡检。返回处理数。"""
+    from .publish import get_publisher
+
     tasks = fetch_pending(base, s)
     n = 0
+    skipped_login: set[str] = set()
     for task in tasks:
         for plat in task.get("platforms", []):
             if plat.get("gate"):
@@ -445,6 +453,19 @@ def run_once(base: str, s: Settings) -> int:
                 continue
             if plat.get("retries", 0) >= 5:
                 log.warning("[%s] %s 重试已达 5 次，等人工处理", task.get("shortcode"), plat["platform"])
+                continue
+            # 没登录态就别认领。认领后再回报「登录失效」会把 job 打回 PENDING
+            # 并每轮刷一条 TG，新平台还没扫码时会刷屏。
+            try:
+                pub = get_publisher(plat["platform"])
+            except KeyError:
+                log.warning("未知平台 %s，跳过", plat["platform"])
+                continue
+            if not pub.state_path.exists():
+                if plat["platform"] not in skipped_login:
+                    skipped_login.add(plat["platform"])
+                    log.info("%s 未登录，本轮不认领（--login-qr %s）",
+                             pub.display_name, plat["platform"])
                 continue
             process_platform(base, s, task, plat)
             n += 1

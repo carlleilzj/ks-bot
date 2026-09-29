@@ -67,6 +67,11 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
         tone="温和内敛、正向治愈，包含前缀必须严格在6~16字以内，短标题严禁使用【】方括号，可用书名号《》或纯文本",
         desc_hint="简洁有质感，突出真挚情感或静心体验",
     ),
+    "toutiao": PlatformProfile(
+        name="toutiao", display_name="今日头条", max_title_len=30, max_tags=4,
+        tone="口语、有具体看点。标题含前缀硬限 30 字，前缀占 6 字，钩子只剩 24 字，必须更短",
+        desc_hint="1~2 句话点出画面里真正发生的事，不要把标题再抄一遍",
+    ),
 }
 
 

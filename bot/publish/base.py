@@ -40,6 +40,7 @@ PUBLISH_PROXY_BYPASS = [
     "*.douyin.com", "*.bytedance.com", "*.byteimg.com",
     "*.xiaohongshu.com", "*.xhscdn.com",
     "*.weixin.qq.com", "*.qq.com",
+    "*.toutiao.com", "*.toutiaostatic.com", "*.snssdk.com", "*.pstatp.com",
 ]
 
 

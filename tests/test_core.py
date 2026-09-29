@@ -510,3 +510,50 @@ def test_persist_handles_corrupt_old_file(tmp_path):
     sp.write_text("{ this is not json", encoding="utf-8")
     ctx = _StateCtx([("sessionid", "a"), ("wxuin", "1")])
     assert persist_state_if_changed(ctx, sp, domains=["channels.weixin.qq.com"])
+
+
+def test_toutiao_registered_and_title_capped():
+    """头条进默认发布列表，标题硬限 30 字，前缀保留。"""
+    from bot.publish import get_publisher
+    from bot.publish.toutiao import (
+        TITLE_LIMIT,
+        declaration_label,
+        fit_title,
+        is_dashboard_url,
+        is_login_url,
+    )
+
+    pub = get_publisher("toutiao")
+    assert pub.display_name == "今日头条"
+    assert pub.state_path.name == "toutiao_state.json"
+
+    profile = PLATFORM_PROFILES["toutiao"]
+    assert profile.max_title_len == TITLE_LIMIT == 30
+    long_title = "【有点视频】" + "草地里捡到一只摔懵的小胖龙它居然还在装没事啊真的离谱"
+    assert len(long_title) > 30
+    fitted = fit_title(long_title)
+    assert len(fitted) == 30
+    assert fitted.startswith("【有点视频】")
+
+    out = _validate(
+        {"title": long_title, "description": long_title, "tags": [], "category": "忽略"},
+        [],
+        profile,
+    )
+    assert len(out["title"]) <= 30
+    assert out["title"].startswith("【有点视频】")
+    assert out["category"] == ""
+    assert "无声视频" in out["tags"]
+    assert len(out["tags"]) <= 4
+
+    assert declaration_label("AI生成") == "AI生成"
+    assert declaration_label("虚构演绎") == "虚构演绎，故事经历"
+    assert declaration_label("") == ""
+    assert declaration_label("自定义声明") == "自定义声明"
+
+    upload = "https://mp.toutiao.com/profile_v4/xigua/upload-video"
+    assert is_dashboard_url(upload)
+    assert not is_login_url(upload)
+    assert is_login_url("https://mp.toutiao.com/auth/page/login")
+    assert is_login_url("https://sso.toutiao.com/login")
+    assert not is_dashboard_url("https://mp.toutiao.com/auth/page/login?next=/profile_v4")

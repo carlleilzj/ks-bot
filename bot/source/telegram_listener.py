@@ -484,6 +484,8 @@ _PUBLISH_PLATFORM_ALIASES = {
     "抖音": "douyin", "douyin": "douyin", "dy": "douyin",
     "小红书": "xhs", "xhs": "xhs",
     "视频号": "weixin", "weixin": "weixin", "wx": "weixin", "微信视频号": "weixin",
+    "今日头条": "toutiao", "头条": "toutiao", "头条号": "toutiao",
+    "toutiao": "toutiao", "tt": "toutiao",
 }
 
 # canonical key → 中文名（TG 回复用）
@@ -492,6 +494,7 @@ _PUBLISH_PLATFORM_CN = {
     "douyin": "抖音",
     "xhs": "小红书",
     "weixin": "微信视频号",
+    "toutiao": "今日头条",
 }
 
 

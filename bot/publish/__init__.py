@@ -30,7 +30,7 @@ def state_path_for(name: str) -> Path:
 
 
 def _build_specs() -> dict[str, PublisherSpec]:
-    from . import douyin, kuaishou, weixin, xhs
+    from . import douyin, kuaishou, toutiao, weixin, xhs
 
     specs = [
         PublisherSpec(
@@ -52,6 +52,11 @@ def _build_specs() -> dict[str, PublisherSpec]:
             name="weixin", display_name="微信视频号",
             state_path=state_path_for("weixin"), supports_category=False,
             login=weixin.login_interactive, publish=weixin.publish,
+        ),
+        PublisherSpec(
+            name="toutiao", display_name="今日头条",
+            state_path=state_path_for("toutiao"), supports_category=False,
+            login=toutiao.login_interactive, publish=toutiao.publish,
         ),
     ]
     return {sp.name: sp for sp in specs}
