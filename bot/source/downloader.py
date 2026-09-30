@@ -156,6 +156,10 @@ def extract_meta(url: str) -> VideoMeta:
         "no_warnings": True,
         "skip_download": True,
         "extract_flat": False,
+        # 元数据阶段不选下载格式。mweb 在部分 Shorts 上没有可合并流，
+        # 默认 bestvideo+bestaudio 会在拿到标题前就报 Requested format is not available。
+        "format": None,
+        "ignore_no_formats_error": True,
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
