@@ -476,14 +476,31 @@ def _set_declaration(page: Page, declaration: str | None) -> None:
     label = declaration_label(declaration)
     if not label:
         return
+    # 「生成图文」的新手气泡会盖住声明选项，先关掉再点。
+    dismiss_dialogs(page, extra_texts=("我知道了", "知道了"))
     _expand_advanced(page)
+    box = page.get_by_text(label, exact=True).first
     try:
-        box = page.locator(f"text={label}").first
+        box.wait_for(state="visible", timeout=8000)
         box.scroll_into_view_if_needed()
-        box.click(timeout=4000)
-        log.info("已勾选作品声明：%s", label)
+        box.click(timeout=5000)
     except Exception as e:
-        log.warning("作品声明未勾上（不影响发布）：%s", str(e)[:120])
+        shot(page, "toutiao_declaration_fail")
+        raise ToutiaoError(f"作品声明「{label}」未勾上，发布按钮不会亮：{str(e)[:120]}")
+    log.info("已勾选作品声明：%s", label)
+
+
+def _publish_button_enabled(page: Page) -> bool:
+    """头条未勾声明时发布按钮仍可见，但是 disabled。force click 点不出去。"""
+    btn = page.locator('button:has-text("发布")').last
+    try:
+        if btn.get_attribute("disabled") is not None:
+            return False
+        if (btn.get_attribute("aria-disabled") or "").lower() == "true":
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def _raise_if_account_blocked(page: Page) -> None:
@@ -502,6 +519,9 @@ def _raise_if_account_blocked(page: Page) -> None:
 def _click_publish(page: Page) -> None:
     dismiss_dialogs(page, extra_texts=("我知道了", "知道了", "同意"))
     _raise_if_account_blocked(page)
+    if not _publish_button_enabled(page):
+        shot(page, "toutiao_publish_disabled")
+        raise ToutiaoError("发布按钮是灰的（声明或必填项未完成），未提交")
     btn = page.locator('button:has-text("发布")').last
     try:
         btn.wait_for(state="visible", timeout=15000)
