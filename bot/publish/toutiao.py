@@ -486,8 +486,22 @@ def _set_declaration(page: Page, declaration: str | None) -> None:
         log.warning("作品声明未勾上（不影响发布）：%s", str(e)[:120])
 
 
+def _raise_if_account_blocked(page: Page) -> None:
+    """点发布后头条会弹「账号信息未完善，暂时不能进行发布」。这是硬拦截。"""
+    try:
+        body = page.inner_text("body")
+    except Exception:
+        return
+    if "暂时不能进行发布" in body or "账号信息未完善，暂时不能" in body:
+        shot(page, "toutiao_account_blocked")
+        raise ToutiaoError(
+            "头条弹窗：账号信息未完善，暂时不能发布。"
+            "请用今日头条 App：我的 → 设置 → 扫一扫，完成个人账号认证后再发")
+
+
 def _click_publish(page: Page) -> None:
-    dismiss_dialogs(page, extra_texts=("我知道了", "知道了", "同意", "取消"))
+    dismiss_dialogs(page, extra_texts=("我知道了", "知道了", "同意"))
+    _raise_if_account_blocked(page)
     btn = page.locator('button:has-text("发布")').last
     try:
         btn.wait_for(state="visible", timeout=15000)
@@ -506,6 +520,8 @@ _BLOCK_MARKERS = (
     "该账号信息未完善",
     "完善后才能发布视频",
     "请完善账号信息",
+    "暂时不能进行发布",
+    "账号信息未完善",
 )
 
 
@@ -587,11 +603,10 @@ def publish(
                 blocked = account_blocked_reason(page.inner_text("body"))
             except Exception:
                 blocked = None
+            # 2026-09-30：手动发布已经成功，作品列表能看到，但这条黄条还在。
+            # 它不是硬拦截，只记日志，继续走上传。
             if blocked:
-                shot(page, "toutiao_account_blocked")
-                raise ToutiaoError(
-                    f"头条号未完善（页面出现「{blocked}」），发布不会入库。"
-                    "请用今日头条 App 打开：我的 → 设置 → 扫一扫，完成个人账号认证")
+                log.warning("头条页仍有「%s」（手动发布已验证可过，继续）", blocked)
             dismiss_dialogs(page)
 
             file_input = page.locator("input[type='file']").first
