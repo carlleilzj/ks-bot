@@ -499,8 +499,39 @@ def _click_publish(page: Page) -> None:
         raise ToutiaoError("未点到「发布」按钮，截图见 logs/")
 
 
+# 上传页上一直都有这些字（「正常预计审核完成时间」里就含「审核完成」），
+# 不能拿它们当发布成功。2026-09-30 第一条因此被记成 PUBLISHED，作品列表仍是空的。
+_SUCCESS_MARKERS = ("发布成功", "发表成功", "提交成功")
+_BLOCK_MARKERS = (
+    "该账号信息未完善",
+    "完善后才能发布视频",
+    "请完善账号信息",
+)
+
+
+def account_blocked_reason(body: str) -> str | None:
+    """账号未完善时头条允许填表，但发布不会进作品列表。"""
+    text = body or ""
+    for marker in _BLOCK_MARKERS:
+        if marker in text:
+            return marker
+    return None
+
+
+def publish_succeeded(body: str, url: str, start_url: str) -> bool:
+    """必须离开上传页，或成功文案出现时已经不在上传页。停在原页一律不算。"""
+    here = url or ""
+    still_uploading = "upload-video" in here
+    left = bool(here) and here != (start_url or "") and not still_uploading and is_dashboard_url(here)
+    if left:
+        return True
+    if still_uploading:
+        return False
+    return any(marker in (body or "") for marker in _SUCCESS_MARKERS)
+
+
 def _wait_published(page: Page, timeout: int = 25) -> str | None:
-    """点发布后等离开上传页或出现成功文案。还停在上传页就当失败。"""
+    """点发布后必须离开上传页。还停在上传页就当失败，并留下截图。"""
     deadline = time.time() + timeout
     start_url = page.url or ""
     while time.time() < deadline:
@@ -509,21 +540,21 @@ def _wait_published(page: Page, timeout: int = 25) -> str | None:
             body = page.inner_text("body")
         except Exception:
             body = ""
-        if any(t in body for t in ("发布成功", "发表成功", "提交成功")):
-            log.info("头条发布成功文案已出现")
-            return url if "upload-video" not in url else None
-        if url and url != start_url and "upload-video" not in url and is_dashboard_url(url):
-            log.info("头条已离开上传页：%s", url[:120])
+        blocked = account_blocked_reason(body)
+        if blocked:
+            shot(page, "toutiao_account_blocked")
+            raise ToutiaoError(
+                f"头条号未完善（页面出现「{blocked}」），发布不会入库。"
+                "请用今日头条 App 打开：我的 → 设置 → 扫一扫，完成个人账号认证")
+        if publish_succeeded(body, url, start_url):
+            log.info("头条已离开上传页：%s", (url or "")[:120])
             return url
-        # 只认明确的失败文案。「请上传封面」是按钮原文，上传页上一直都在，不能当失败。
         if "发布失败" in body:
             shot(page, "toutiao_publish_rejected")
             raise ToutiaoError("头条拒绝发布（页面出现「发布失败」），截图见 logs/")
         time.sleep(1)
-    if "upload-video" in (page.url or ""):
-        shot(page, "toutiao_publish_still")
-        raise ToutiaoError("点击发布后仍停在上传页，截图见 logs/")
-    return page.url or None
+    shot(page, "toutiao_publish_still")
+    raise ToutiaoError("点击发布后仍停在上传页，不能记为成功，截图见 logs/")
 
 
 def publish(
@@ -552,6 +583,15 @@ def publish(
             if not is_dashboard_url(page.url or ""):
                 shot(page, "toutiao_login_expired")
                 raise LoginExpired("头条号登录态已失效，请重新扫码登录")
+            try:
+                blocked = account_blocked_reason(page.inner_text("body"))
+            except Exception:
+                blocked = None
+            if blocked:
+                shot(page, "toutiao_account_blocked")
+                raise ToutiaoError(
+                    f"头条号未完善（页面出现「{blocked}」），发布不会入库。"
+                    "请用今日头条 App 打开：我的 → 设置 → 扫一扫，完成个人账号认证")
             dismiss_dialogs(page)
 
             file_input = page.locator("input[type='file']").first

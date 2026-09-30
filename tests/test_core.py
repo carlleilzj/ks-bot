@@ -557,3 +557,17 @@ def test_toutiao_registered_and_title_capped():
     assert is_login_url("https://mp.toutiao.com/auth/page/login")
     assert is_login_url("https://sso.toutiao.com/login")
     assert not is_dashboard_url("https://mp.toutiao.com/auth/page/login?next=/profile_v4")
+
+
+def test_toutiao_success_requires_leaving_upload_page():
+    """上传页固定文案里就有「审核完成」，停在原页不能算发出去。"""
+    from bot.publish.toutiao import account_blocked_reason, publish_succeeded
+
+    upload = "https://mp.toutiao.com/profile_v4/xigua/upload-video"
+    body = "正常预计审核完成时间：1 小时内 发布视频"
+    assert not publish_succeeded(body, upload, upload)
+    assert not publish_succeeded("发布成功", upload, upload)
+    manage = "https://mp.toutiao.com/profile_v4/manage/content/all"
+    assert publish_succeeded("", manage, upload)
+    assert account_blocked_reason("该账号信息未完善，完善后才能发布视频") == "该账号信息未完善"
+    assert account_blocked_reason(body) is None
