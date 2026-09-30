@@ -393,6 +393,25 @@ def _upload_local_cover(page: Page, cover: Path) -> None:
     _click_visible_ok(page)
     rand_sleep(0.8, 1.2)
     _click_visible_ok(page)
+    _wait_cover_editor_closed(page)
+
+
+def _wait_cover_editor_closed(page: Page, timeout: int = 40) -> None:
+    """封面弹窗没关时，声明和发布按钮都在它下面。按钮停在「上传中」就不能往下走。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            editor = page.locator("text=封面编辑").first
+            uploading = page.locator('button:has-text("上传中")').first
+            editor_open = editor.count() and editor.is_visible()
+            still_uploading = uploading.count() and uploading.is_visible()
+        except Exception:
+            return
+        if not editor_open and not still_uploading:
+            return
+        time.sleep(1)
+    shot(page, "toutiao_cover_pending")
+    raise ToutiaoError("封面仍在上传或编辑弹窗未关闭，声明无法勾选")
 
 
 def _use_frame_cover(page: Page) -> None:
@@ -405,14 +424,7 @@ def _use_frame_cover(page: Page) -> None:
     _click_visible_ok(page)
     rand_sleep(0.8, 1.2)
     _click_visible_ok(page)
-    deadline = time.time() + 20
-    while time.time() < deadline:
-        try:
-            if not page.locator("text=封面编辑").first.is_visible():
-                break
-        except Exception:
-            break
-        time.sleep(1)
+    _wait_cover_editor_closed(page)
 
 
 def _set_cover(page: Page, cover: Path | None) -> None:
