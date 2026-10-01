@@ -587,3 +587,42 @@ def _fetch_weixin_url(context) -> str | None:
     except Exception as e:
         log.debug("获取视频号链接失败：%s", e)
     return None
+
+
+# ---------- keepalive ----------
+
+def keepalive(state_path: Path = STATE_PATH) -> bool:
+    """用已有 cookie 打开后台首页，触发 session 续期，防止不活动超时。
+
+    2026-10-01 实测规律：session 在不活动 ~12-15h 后过期。
+    发布窗口 10:00–22:00 期间每 2 小时会自然刷新一次，但 22:00 到次日 10:00
+    这 12 小时没有任何请求，session 就会死掉。每 6 小时跑一次足够覆盖。
+
+    成功返回 True；cookie 文件不在或已失效返回 False（不会发 TG 通知）。
+    """
+    if not Path(state_path).exists():
+        log.warning("keepalive 跳过：未找到 %s", state_path)
+        return False
+
+    with sync_playwright() as p:
+        browser = launch_chromium(p, headless=True)
+        context = new_context(browser, state_path)
+        page = context.new_page()
+        try:
+            page.goto("https://channels.weixin.qq.com/platform",
+                       wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(5000)
+            alive = _is_logged_in(page) and _has_login_cookies(context)
+            if alive:
+                persist_state_if_changed(context, state_path,
+                                         domains=["channels.weixin.qq.com"])
+                log.info("keepalive 成功：视频号 session 仍有效")
+            else:
+                log.warning("keepalive 失败：session 已过期")
+        except Exception as e:
+            log.warning("keepalive 异常：%s", str(e)[:200])
+            alive = False
+        finally:
+            context.close()
+            browser.close()
+    return alive
