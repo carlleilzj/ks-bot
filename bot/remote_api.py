@@ -67,6 +67,8 @@ class RemoteApi:
         self.db = db
         self.gate_fn = gate_fn
         self._auth_failures: dict[str, list[datetime]] = {}
+        # TG /login 指令队列：platform -> 入队时间
+        self._login_requests: dict[str, str] = {}
 
     # ---------- 业务逻辑 ----------
 
@@ -131,6 +133,25 @@ class RemoteApi:
             self.db.update(task_id, error=f"[审核违规·删除失败] {note}")
             log.warning("[audit] task %d 审核违规，删除失败：%s", task_id, note[:120])
         return {"ok": True}
+
+    # ---------- 远程登录指令（TG /login → 协调端落标记 → 发布端取走执行） ----------
+
+    def set_login_request(self, platform: str) -> dict:
+        """记录一条登录指令。发布端 worker 轮询 /api/login_request 取走执行。"""
+        platform = (platform or "").strip().lower()
+        if platform not in ("weixin", "toutiao", "kuaishou", "douyin", "xhs"):
+            return {"ok": False, "error": f"unsupported platform: {platform}"}
+        self._login_requests[platform] = now_iso()
+        log.info("[login_request] %s 扫码登录指令已入队", platform)
+        return {"ok": True, "platform": platform}
+
+    def take_login_request(self) -> dict:
+        """发布端取走并清除所有待执行登录指令。"""
+        out = dict(self._login_requests)
+        self._login_requests.clear()
+        if out:
+            log.info("[login_request] 发布端取走登录指令：%s", list(out))
+        return {"ok": True, "requests": out}
 
     def published_payload(self, platform: str = "douyin", days: int = 7) -> dict:
         """近期已发布作品清单（供家庭端审核巡检匹配通知）。"""
@@ -357,6 +378,10 @@ class RemoteApi:
                     days = int((qs.get("days", ["7"])[0]) or 7)
                     self._send_json(200, api.published_payload(plat, days))
                     return
+                if parsed.path == "/api/login_request":
+                    # 发布端轮询取走登录指令（GET = 取走并清除）
+                    self._send_json(200, api.take_login_request())
+                    return
                 if parsed.path == "/api/file":
                     self._serve_file(qs.get("path", [""])[0])
                     return
@@ -411,6 +436,14 @@ class RemoteApi:
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return
+                if parsed.path == "/api/login_request":
+                    # TG /login → 协调端入队（POST = 设置）
+                    try:
+                        self._send_json(200, api.set_login_request(
+                            str(data.get("platform") or "")))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
                 if parsed.path == "/api/report":
                     try:
                         self._send_json(200, api.report(data))
@@ -437,9 +470,28 @@ class RemoteApi:
 
 def start_api_thread(s: Settings, db: Database, gate_fn) -> threading.Thread:
     """起一个 daemon 线程跑 API 服务；bind/port 从 Settings.remote_api_bind/port 读。"""
+    global _shared_api
     api = RemoteApi(s, db, gate_fn=gate_fn)
+    _shared_api = api
     t = threading.Thread(
         target=api.serve_forever, args=(s.remote_api_bind, s.remote_api_port),
         name="remote-api", daemon=True)
     t.start()
     return t
+
+
+def trigger_remote_login(s: Settings, platform: str) -> bool:
+    """协调端 TG 监听调用：把登录指令入队，发布端 worker 轮询取走执行。
+
+    注意这不是 HTTP 转发，而是写本进程 RemoteApi 的内存队列——
+    TG 监听和 remote_api 跑在同一个协调端进程里。
+    """
+    del s  # 同进程，不需要网络调用
+    global _shared_api
+    if _shared_api is None:
+        return False
+    result = _shared_api.set_login_request(platform)
+    return bool(result.get("ok"))
+
+
+_shared_api: "RemoteApi | None" = None

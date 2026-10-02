@@ -438,10 +438,41 @@ def maybe_audit(base: str, s: Settings) -> None:
         log.exception("审核巡检异常（忽略，不影响发布）")
 
 
+def maybe_process_login_requests(base: str, s) -> None:
+    """取走协调端入队的扫码登录指令，起子进程执行 --login-qr。
+
+    TG 发「/login weixin」→ 协调端入队 → 这里取走 → 跑登录脚本。
+    二维码由登录脚本自己推 TG。子进程不阻塞主轮询。
+    """
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.get(f"{base}/api/login_request", headers=_headers(s))
+            data = r.json()
+    except Exception as e:
+        log.debug("取登录指令失败：%s", e)
+        return
+    requests_ = (data or {}).get("requests") or {}
+    for platform, enqueued_at in requests_.items():
+        log.info("收到 %s 扫码登录指令（%s 入队），启动登录子进程",
+                 platform, enqueued_at)
+        try:
+            telegram.notify_info(s, f"🔑 开始执行 {platform} 扫码登录，二维码稍后推送到 TG")
+        except Exception:
+            pass
+        import subprocess
+        subprocess.Popen(
+            [".venv/bin/python", "-m", "bot.main", "--login-qr", platform],
+            cwd="/opt/ks-bot",
+            stdout=open("/tmp/login_qr_out.log", "ab"),
+            stderr=subprocess.STDOUT,
+        )
+
+
 def run_once(base: str, s: Settings) -> int:
     """一轮：拉清单 → 逐个可发布平台处理 → 审核巡检。返回处理数。"""
     from .publish import get_publisher
 
+    maybe_process_login_requests(base, s)
     tasks = fetch_pending(base, s)
     n = 0
     skipped_login: set[str] = set()

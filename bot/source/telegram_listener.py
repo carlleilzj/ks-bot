@@ -205,6 +205,10 @@ class TelegramListener(threading.Thread):
         if t.lower().startswith(_TARGET_PREFIX):
             self._handle_target_text(t)
             return
+        # /login 指令：远程触发平台扫码重登（跑在协调端，二维码由发布端 TG 推送）
+        if t.lower().startswith("/login"):
+            self._handle_login_cmd(t)
+            return
 
         # 提取 URL
         urls = _URL_RE.findall(text)
@@ -216,15 +220,17 @@ class TelegramListener(threading.Thread):
                     self.s,
                     "📬 直接发视频链接给我即可\n"
                     "支持：Instagram / YouTube / Facebook / TikTok 等\n"
-                    "收到后会自动下载 → 转码 → 生成文案 → 加字幕 → 发布到快手/抖音/小红书\n"
+                    "收到后会自动下载 → 转码 → 生成文案 → 加字幕 → 发布到快手/抖音\n"
                     "重复链接会自动判定，不会重复处理\n\n"
                     "💡 指定发布平台：链接后加平台名，如\n"
-                    "  https://... @抖音 小红书\n"
+                    "  https://... @抖音\n"
                     "  https://... @douyin,xhs\n"
                     "不指定则发到所有启用的平台\n\n"
+                    "🔑 /login weixin —— 视频号扫码重登（二维码推送到 TG）\n"
+                    "   /login toutiao —— 头条扫码重登\n\n"
                     "🎬 发现层自动采集后发审核卡片，点按钮即可\n"
                     "  edit:<id> 你的标题    # 改文案\n"
-                    "  target:<id> 抖音,小红书  # 指定发布平台",
+                    "  target:<id> 抖音  # 指定发布平台",
                 )
             return
 
@@ -365,6 +371,36 @@ class TelegramListener(threading.Thread):
         telegram.send_text(self.s, f"🎯 已指定发布到 {pub_names}，通过审核 [{task.get('shortcode','')}]")
         if self._wakeup is not None:
             self._wakeup.set()
+
+    def _handle_login_cmd(self, text: str) -> None:
+        """远程触发平台扫码重登。二维码由发布端脚本推到 TG。
+
+        协调端无法直接跑发布端浏览器（state 文件在阿里云），这里通过
+        remote_api 转发指令，由发布端执行 --login-qr 并推码。
+        目前支持 weixin / toutiao。
+        """
+        parts = text.split()
+        platform = parts[1] if len(parts) > 1 else ""
+        aliases = {
+            "weixin": "weixin", "微信": "weixin", "视频号": "weixin", "wx": "weixin",
+            "toutiao": "toutiao", "头条": "toutiao", "tt": "toutiao",
+        }
+        key = aliases.get(platform.lower())
+        if not key:
+            telegram.send_text(
+                self.s, "🔑 用法：/login weixin（或 toutiao）\n二维码会推到这个对话")
+            return
+        try:
+            from ..remote_api import trigger_remote_login
+            ok = trigger_remote_login(self.s, key)
+            if ok:
+                telegram.send_text(
+                    self.s, f"🔑 {key} 扫码登录已触发，二维码即将推送到 TG")
+            else:
+                telegram.send_text(self.s, f"❌ {key} 登录指令下发失败，请手动登录")
+        except Exception as e:
+            log.exception("远程登录触发失败")
+            telegram.send_text(self.s, f"❌ 远程登录触发异常：{str(e)[:150]}")
 
     def _handle_url(self, raw_url: str,
                     target_platforms: list[str] | None = None,
