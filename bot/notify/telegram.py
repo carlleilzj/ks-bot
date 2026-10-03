@@ -58,6 +58,32 @@ def send_text(s: Settings, text: str, reply_markup: dict | None = None) -> None:
           extra_json={"reply_markup": reply_markup} if reply_markup else None)
 
 
+def set_commands(s: Settings, commands: list[tuple[str, str]]) -> bool:
+    """注册 bot 命令菜单（setMyCommands）：TG 输入 / 直接点选。
+
+    幂等：每次监听器启动都调一次，改菜单只改代码。
+    """
+    if not s.telegram_bot_token:
+        return False
+    url = f"{s.telegram_api_base}/bot{s.telegram_bot_token}/setMyCommands"
+    client_kw: dict = {"timeout": 30}
+    if s.telegram_proxy:
+        client_kw["proxy"] = s.telegram_proxy
+    try:
+        with httpx.Client(**client_kw) as client:
+            resp = client.post(url, json={
+                "commands": [{"command": c, "description": d} for c, d in commands]})
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ok"):
+            log.error("setMyCommands 返回错误：%s", resp.text[:200])
+            return False
+        return True
+    except Exception as e:
+        log.error("setMyCommands 失败：%s", e)
+        return False
+
+
 def send_photo(s: Settings, photo: Path | None, caption: str,
                reply_markup: dict | None = None) -> None:
     if photo and Path(photo).exists():

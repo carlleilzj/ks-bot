@@ -70,6 +70,13 @@ class TelegramListener(threading.Thread):
             log.warning("TG 监听未启动：TELEGRAM_BOT_TOKEN 未配置")
             return
         log.info("TG 消息监听线程已启动，等待接收视频链接…")
+        # 注册命令菜单：TG 客户端输入 / 弹出快捷列表，点选即发
+        if telegram.set_commands(self.s, [
+            ("login", "重新扫码登录（用法：/login weixin）"),
+            ("help", "使用帮助"),
+            ("start", "使用帮助"),
+        ]):
+            log.info("TG 命令菜单已注册：/login /help /start")
         telegram.notify_info(self.s, "🎧 投链监听已启动\n直接发视频链接给我即可（IG/YouTube/Facebook/TikTok 等）")
         while not self._stop.is_set():
             try:
@@ -226,8 +233,9 @@ class TelegramListener(threading.Thread):
                     "  https://... @抖音\n"
                     "  https://... @douyin,xhs\n"
                     "不指定则发到所有启用的平台\n\n"
-                    "🔑 /login weixin —— 视频号扫码重登（二维码推送到 TG）\n"
-                    "   /login toutiao —— 头条扫码重登\n\n"
+                    "🔑 /login —— 平台扫码重登（不带参数弹菜单）\n"
+                    "   /login weixin / kuaishou / douyin / toutiao\n"
+                    "   中文别名也行：/login 快手\n\n"
                     "🎬 发现层自动采集后发审核卡片，点按钮即可\n"
                     "  edit:<id> 你的标题    # 改文案\n"
                     "  target:<id> 抖音  # 指定发布平台",
@@ -251,6 +259,15 @@ class TelegramListener(threading.Thread):
         data = cq.get("data") or ""
         action, _, tid_str = data.partition(":")
         cq_id = cq.get("id", "")
+        # login:<platform> —— 平台菜单按钮，不走任务审核分支
+        if action == "login":
+            key = tid_str.strip().lower()
+            if key not in ("weixin", "toutiao", "kuaishou", "douyin", "xhs"):
+                telegram.answer_callback(self.s, cq_id, "不支持的平台")
+                return
+            telegram.answer_callback(self.s, cq_id, f"已触发 {key} 扫码登录")
+            self._handle_login_cmd(f"/login {key}")
+            return
         try:
             tid = int(tid_str)
         except ValueError:
@@ -384,11 +401,20 @@ class TelegramListener(threading.Thread):
         aliases = {
             "weixin": "weixin", "微信": "weixin", "视频号": "weixin", "wx": "weixin",
             "toutiao": "toutiao", "头条": "toutiao", "tt": "toutiao",
+            "kuaishou": "kuaishou", "快手": "kuaishou", "ks": "kuaishou",
+            "douyin": "douyin", "抖音": "douyin", "dy": "douyin",
         }
         key = aliases.get(platform.lower())
         if not key:
+            # 没带平台名：弹按钮菜单，点选即登录
+            keyboard = {"inline_keyboard": [
+                [{"text": "微信视频号", "callback_data": "login:weixin"},
+                 {"text": "快手", "callback_data": "login:kuaishou"}],
+                [{"text": "抖音", "callback_data": "login:douyin"},
+                 {"text": "今日头条", "callback_data": "login:toutiao"}],
+            ]}
             telegram.send_text(
-                self.s, "🔑 用法：/login weixin（或 toutiao）\n二维码会推到这个对话")
+                self.s, "🔑 点选要重新登录的平台：", reply_markup=keyboard)
             return
         try:
             from ..remote_api import trigger_remote_login
