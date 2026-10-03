@@ -145,12 +145,14 @@ class RemoteApi:
         log.info("[login_request] %s 扫码登录指令已入队", platform)
         return {"ok": True, "platform": platform}
 
-    def take_login_request(self) -> dict:
-        """发布端取走并清除所有待执行登录指令。"""
+    def take_login_request(self, peek: bool = False) -> dict:
+        """发布端取走并清除所有待执行登录指令。peek=True 只看不取。"""
         out = dict(self._login_requests)
-        self._login_requests.clear()
+        if not peek:
+            self._login_requests.clear()
         if out:
-            log.info("[login_request] 发布端取走登录指令：%s", list(out))
+            log.info("[login_request] 发布端%s登录指令：%s",
+                     "预览" if peek else "取走", list(out))
         return {"ok": True, "requests": out}
 
     def published_payload(self, platform: str = "douyin", days: int = 7) -> dict:
@@ -379,8 +381,9 @@ class RemoteApi:
                     self._send_json(200, api.published_payload(plat, days))
                     return
                 if parsed.path == "/api/login_request":
-                    # 发布端轮询取走登录指令（GET = 取走并清除）
-                    self._send_json(200, api.take_login_request())
+                    # 发布端轮询取走登录指令（GET = 取走并清除；?peek=1 只看不取）
+                    self._send_json(200, api.take_login_request(
+                        peek=bool(int(qs.get("peek", ["0"])[0] or 0))))
                     return
                 if parsed.path == "/api/file":
                     self._serve_file(qs.get("path", [""])[0])

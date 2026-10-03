@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -438,15 +439,17 @@ def maybe_audit(base: str, s: Settings) -> None:
         log.exception("审核巡检异常（忽略，不影响发布）")
 
 
-def maybe_process_login_requests(base: str, s) -> None:
+def maybe_process_login_requests(base: str, s, peek: bool = False) -> None:
     """取走协调端入队的扫码登录指令，起子进程执行 --login-qr。
 
     TG 发「/login weixin」→ 协调端入队 → 这里取走 → 跑登录脚本。
     二维码由登录脚本自己推 TG。子进程不阻塞主轮询。
+    peek=True 只看不取（诊断用），避免误吃指令。
     """
     try:
         with httpx.Client(timeout=30) as c:
-            r = c.get(f"{base}/api/login_request", headers=_headers(s))
+            r = c.get(f"{base}/api/login_request", headers=_headers(s),
+                      params={"peek": 1} if peek else None)
             data = r.json()
     except Exception as e:
         log.debug("取登录指令失败：%s", e)
@@ -455,6 +458,8 @@ def maybe_process_login_requests(base: str, s) -> None:
     for platform, enqueued_at in requests_.items():
         log.info("收到 %s 扫码登录指令（%s 入队），启动登录子进程",
                  platform, enqueued_at)
+        if peek:
+            continue
         try:
             telegram.notify_info(s, f"🔑 开始执行 {platform} 扫码登录，二维码稍后推送到 TG")
         except Exception:
@@ -572,6 +577,21 @@ def main() -> None:
         log.debug("启动时恢复近期发布追踪失败：%s", e)
 
     consecutive_failures = 0
+
+    # 独立线程盯登录指令：60s 一次，不等发布轮次（发布中一轮可占 10+ 分钟，
+    # 期间 TG 指令会延迟推码）。run_once 里保留的检查作为兜底。
+    def _login_watcher() -> None:
+        while True:
+            try:
+                maybe_process_login_requests(base, s)
+            except Exception:
+                log.exception("登录指令监视线程异常（继续）")
+            time.sleep(60)
+
+    if not args.once:
+        threading.Thread(target=_login_watcher, name="login-watcher",
+                         daemon=True).start()
+
     while True:
         try:
             n = run_once(base, s)
