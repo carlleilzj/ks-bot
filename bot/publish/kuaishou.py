@@ -247,6 +247,9 @@ def _is_logged_in(page: Page) -> bool:
     2026-09-19 修正：作品管理页（/article/manage/*）没有文件上传入口，
     旧逻辑在那里恒判 False（cookie 实际有效）。补两条管理页判据：
     URL 前缀 + 页面出现「作品管理」字样。
+    2026-10-03 修正：session 过期时发布页 URL 不变、内容变成营销落地页
+    （只有「立即登录」按钮），旧 URL 前缀判据会误判已登录 →
+    登录脚本秒退、发布流程等 file_input 超时。加落地页排除判据。
     """
     try:
         if "passport.kuaishou.com" in page.url:
@@ -254,7 +257,20 @@ def _is_logged_in(page: Page) -> bool:
         url = page.url
         if url.startswith(("https://cp.kuaishou.com/article/manage",
                            "https://cp.kuaishou.com/article/publish")):
-            return True
+            # 营销落地页排除：session 失效时该 URL 渲染的是平台介绍页，
+            # 正文带「立即登录」且无 file_input。二者必须同时排除。
+            if page.locator(SELECTORS["file_input"]).count() > 0:
+                return True
+            try:
+                body = page.locator("body").inner_text(timeout=5_000)
+            except Exception:
+                body = ""
+            if "立即登录" in body[:600]:
+                return False
+            # 管理页正文里有「作品管理」导航
+            if "作品管理" in body:
+                return True
+            return False
         if page.locator(SELECTORS["file_input"]).count() > 0:
             return True
         # 兜底：管理页正文里有「作品管理」导航
