@@ -76,7 +76,7 @@ platforms:
       地点: "郴州"
       声明: "内容由AI生成"        # 作者声明；下拉若为「内容为AI生成」亦匹配
   douyin:
-    enabled: true
+    enabled: false
     # 发布时自动挂载「添加标签」（留空则跳过）。
     # 2026-09-22 改版：添加标签是搜索框，直接搜全国可挂的商品（不绑门店）。
     # 类型「商品/团购/标记万物」走搜索框；「位置」仍走旧下拉（门店，不全国）。
@@ -88,7 +88,7 @@ platforms:
   xhs:
     enabled: false   # 账号风控被限制发布，暂停；解封后改回 true
   weixin:
-    enabled: true    # 默认发布平台之一（2026-09-27 起）
+    enabled: false    # 默认发布平台之一（2026-09-27 起）
   toutiao:
     enabled: true    # 2026-09-30 实名后自动发布已进作品列表（审核中）
     anchors:
