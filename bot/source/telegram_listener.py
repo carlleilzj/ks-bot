@@ -16,6 +16,7 @@ import httpx
 from ..config import Settings
 from ..db import Database, State
 from ..notify import telegram
+from ..publish import enabled_publishers
 from .downloader import extract_meta, parse_url
 
 log = logging.getLogger(__name__)
@@ -98,6 +99,12 @@ class TelegramListener(threading.Thread):
         for row in rows:
             clean_url = row["clean_url"]
             tp = [x for x in (row.get("target_platforms") or "").split(",") if x] or None
+            tp, tp_disabled = _split_disabled_targets(self.s, tp)
+            if tp_disabled and not tp:
+                log.warning("重试 #%d 指定平台 %s 已停用，放弃入库",
+                            row["id"], tp_disabled)
+                self.db.resolve_done(row["id"])
+                continue
             log.info("\U0001f504 重试解析 #%d（第 %d 次）：%s",
                      row["id"], row["attempts"] + 1, clean_url)
 
@@ -244,6 +251,20 @@ class TelegramListener(threading.Thread):
 
         # 解析发布平台指令（链接之外的文本）
         target_platforms, unknown = _parse_target_platforms(text)
+        # 停用平台是硬性的：显式指定不能绕过 config 开关（2026-10-10，
+        # 视频号 IP 风控期间被 @视频号 指定绕过，每条失败刷屏）
+        target_platforms, disabled = _split_disabled_targets(self.s, target_platforms)
+        if disabled and not target_platforms:
+            names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in disabled)
+            telegram.send_text(
+                self.s,
+                f"⛔ {names} 已停用，本条未入库\n"
+                f"如需发到其他平台，请重发链接并指定（如：链接 @快手）",
+            )
+            return
+        if disabled:
+            names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in disabled)
+            telegram.send_text(self.s, f"⚠️ {names} 已停用，本条将跳过它继续")
 
         for raw_url in urls:
             try:
@@ -381,8 +402,18 @@ class TelegramListener(threading.Thread):
         # 解析平台名
         targets, unknown = _parse_target_platforms(rest)
         if not targets:
-            telegram.send_text(self.s, "未识别平台名。可用：快手/抖音/小红书/视频号")
+            avail = "、".join(_PUBLISH_PLATFORM_CN.get(p.name, p.name)
+                              for p in enabled_publishers(self.s))
+            telegram.send_text(self.s, f"未识别平台名。可用：{avail}")
             return
+        targets, disabled = _split_disabled_targets(self.s, targets)
+        if not targets:
+            names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in disabled)
+            telegram.send_text(self.s, f"⛔ {names} 已停用，无法指定")
+            return
+        if disabled:
+            names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in disabled)
+            telegram.send_text(self.s, f"⚠️ {names} 已停用，已从指定中剔除")
         self.db.approve(tid, target_platforms=targets)
         pub_names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in targets)
         telegram.send_text(self.s, f"🎯 已指定发布到 {pub_names}，通过审核 [{task.get('shortcode','')}]")
@@ -558,6 +589,26 @@ _PUBLISH_PLATFORM_CN = {
     "weixin": "微信视频号",
     "toutiao": "今日头条",
 }
+
+
+def _split_disabled_targets(s: Settings,
+                            targets: list[str] | None) -> tuple[list[str] | None, list[str]]:
+    """把指定平台拆成 (可用, 已停用)。
+
+    停用 = config.yaml platforms.<name>.enabled 为 false。停用是硬性的：
+    显式指定不能绕过（2026-10-10 起，视频号 IP 风控期间 @视频号 指定仍建
+    job 发布，每条 15 分钟超时刷屏）。
+    """
+    if not targets:
+        return None, []
+    try:
+        enabled = {sp.name for sp in enabled_publishers(s)}
+    except Exception as e:
+        log.warning("读取启用平台列表失败，按全部可用处理：%s", e)
+        return targets, []
+    kept = [t for t in targets if t in enabled]
+    dropped = [t for t in targets if t not in enabled]
+    return (kept or None), dropped
 
 
 def _parse_target_platforms(text: str) -> tuple[list[str] | None, list[str]]:

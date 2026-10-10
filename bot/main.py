@@ -437,21 +437,29 @@ def _task_platforms(s: Settings, task: dict) -> list:
     """返回该任务要发布的平台列表（PublisherSpec）。
 
     task.target_platforms 为 None/空 → 所有启用平台（默认行为）。
-    有值 → 只发指定的平台，不受 config enabled 限制（如 @视频号 即使 enabled=false 也发）。
-    指定的平台不存在则跳过并记日志；全部无效则回退为全部启用平台。
+    有值 → 只发指定的平台，但**停用平台硬性跳过**：显式指定不能绕过
+    config 开关（2026-10-10 起，视频号 IP 风控期间被 @视频号 指定绕过，
+    每条 15 分钟超时刷屏）。指定平台全部停用 → 返回空（不发任何平台）；
+    仅当指定名全部无法识别时才回退默认。
     """
     raw = task.get("target_platforms")
+    enabled_names = {p.name for p in enabled_publishers(s)}
     if not raw:
         return enabled_publishers(s)
     wanted = {p.strip() for p in raw.split(",") if p.strip()}
     all_pubs = all_publishers()
-    pubs = [all_pubs[name] for name in wanted if name in all_pubs]
-    missing = wanted - set(pubs) if pubs else wanted
-    if missing:
-        unknown = wanted - set(all_pubs)
-        if unknown:
-            log.warning("[%s] 未识别的平台名 %s，已跳过", task.get("shortcode", "?"), unknown)
+    pubs = [all_pubs[name] for name in wanted
+            if name in all_pubs and name in enabled_names]
+    disabled = sorted(n for n in wanted if n in all_pubs and n not in enabled_names)
+    unknown = wanted - set(all_pubs)
+    if disabled:
+        log.warning("[%s] 指定平台 %s 已停用，跳过", task.get("shortcode", "?"), disabled)
+    if unknown:
+        log.warning("[%s] 未识别的平台名 %s，已跳过", task.get("shortcode", "?"), unknown)
     if not pubs:
+        if disabled:
+            log.warning("[%s] 指定平台均已停用，不发任何平台", task.get("shortcode", "?"))
+            return []
         log.warning("[%s] 指定的平台全部不可用，回退为全部启用平台", task.get("shortcode", "?"))
         return enabled_publishers(s)
     return pubs
