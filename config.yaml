@@ -88,7 +88,7 @@ platforms:
   xhs:
     enabled: false   # 账号风控被限制发布，暂停；解封后改回 true
   weixin:
-    enabled: false    # 默认发布平台之一（2026-09-27 起）
+    enabled: true     # 2026-10-10 恢复：上传 300001 风控已解除，凌晨 7 条积压任务补发
   toutiao:
     enabled: true    # 2026-09-30 实名后自动发布已进作品列表（审核中）
     anchors:
