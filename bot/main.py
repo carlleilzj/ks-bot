@@ -474,7 +474,14 @@ def publish_gate(s: Settings, db: Database, platform: str | None = None) -> str 
     """返回 None 表示放行；否则返回需要等待的原因。
 
     platform 不为空时，每日上限和最小间隔按该平台独立计算（各平台互不影响）。
+    停用平台（platforms.<name>.enabled=false）一律拦截：停用期间已存在的
+    PENDING job 不再被发布端领取（2026-10-12，此前停用只挡新建 job，
+    存量 job 仍会被派发并每条烧 15 分钟超时）。恢复 enabled 后自动继续。
     """
+    if platform:
+        plat = s.platforms.get(platform)
+        if plat is None or not plat.enabled:
+            return f"{platform} 已停用（platforms.{platform}.enabled=false）"
     pub = s.publish
     now = datetime.now()
     if pub.window:

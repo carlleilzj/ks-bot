@@ -66,3 +66,21 @@ def test_split_disabled_targets(monkeypatch):
     assert tl._split_disabled_targets(s, ["kuaishou", "weixin"]) == (["kuaishou"], ["weixin"])
     assert tl._split_disabled_targets(s, ["kuaishou"]) == (["kuaishou"], [])
     assert tl._split_disabled_targets(s, None) == (None, [])
+
+
+def test_publish_gate_blocks_disabled_platform():
+    """停用平台被发布闸门拦截：存量 PENDING job 不再被派发（2026-10-12）。
+
+    此前停用只挡新建 job，已在队列里的 job 仍会被发布端领取并每条烧
+    15 分钟上传超时。enabled 检查在窗口/限额之前短路，不需要 db。
+    """
+    from bot.config import PlatformConfig
+    from bot.main import publish_gate
+
+    s = Settings()
+    s.platforms = {"weixin": PlatformConfig(enabled=False)}
+    s.publish.window = []
+    s.publish.min_gap_hours = 0
+    s.publish.daily_limit = 999
+    reason = publish_gate(s, None, "weixin")
+    assert reason is not None and "已停用" in reason

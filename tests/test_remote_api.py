@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from bot.config import Settings
+from bot.config import PlatformConfig, Settings
 from bot.db import Database, JobState, State
 
 # ---------- fixtures ----------
@@ -21,6 +21,10 @@ def _settings(tmp_path: Path) -> Settings:
     s.remote_api_bind = "127.0.0.1"
     s.remote_api_port = 0  # OS 分配临时端口，避免并行冲突
     s.ai_api_key = ""
+    # 平台必须启用：publish_gate 会拦截停用平台（2026-10-12 起），
+    # 不启用的话间隔/限额相关断言会先被"已停用"短路
+    s.platforms = {n: PlatformConfig(enabled=True)
+                   for n in ("kuaishou", "douyin", "weixin", "toutiao")}
     # 清空发布窗口/间隔，让 gate 相关测试不依赖墙上时钟
     # （HK B 凌晨跑测试时 10:00~22:00 窗口会让 window 检查先短路）
     s.publish.window = []

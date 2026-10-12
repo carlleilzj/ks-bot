@@ -6,7 +6,7 @@ from datetime import datetime
 
 from bot.ai.copywriter import PLATFORM_PROFILES, _check_cliche, _validate
 from bot.publish.douyin import _strip_leading_title
-from bot.config import Settings
+from bot.config import PlatformConfig, Settings
 from bot.db import Database, JobState
 from bot.main import publish_gate
 from bot.publish.base import PROXY_ENV_KEYS, chromium_launch_env, chromium_launch_kwargs
@@ -100,6 +100,9 @@ def test_weixin_agreement_url_rejected():
 def test_publish_gate_window_and_limit(tmp_path):
     db = Database(tmp_path / "t.db")
     s = Settings()
+    # 平台需启用：publish_gate 会先拦截停用平台（2026-10-12 起）
+    s.platforms = {"kuaishou": PlatformConfig(enabled=True),
+                   "douyin": PlatformConfig(enabled=True)}
     s.publish.window = ("10:00", "22:00")
     s.publish.daily_limit = 1
     s.publish.min_gap_hours = 2.0
