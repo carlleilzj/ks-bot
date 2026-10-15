@@ -78,12 +78,27 @@ def test_chromium_kwargs_optional_proxy(monkeypatch):
 
 
 def test_pick_spark_title_rotate_and_prefer():
+    """轮换按收益加权（2026-10-15 起），不再是 1:1 均匀。
+
+    狐缘山间权重最高（0.285）→ 曝光占比最大；未知任务拿保守权重，
+    仍能拿到曝光但占比小。黑名单任务单独由 test_spark_pick 覆盖。
+    """
     titles = ["狐缘山间", "扫墓丫头，替祖宗横扫天下", "新赛季你的本命英雄是？"]
-    a, c1 = pick_spark_title(titles, cursor=0)
-    b, c2 = pick_spark_title(titles, cursor=c1)
-    c, c3 = pick_spark_title(titles, cursor=c2)
-    d, _ = pick_spark_title(titles, cursor=c3)
-    assert [a, b, c, d] == titles + titles[:1]
+    counts = {"狐缘": 0, "扫墓": 0, "本命": 0}
+    cur = 0
+    for _ in range(90):
+        name, cur = pick_spark_title(titles, cursor=cur)
+        if "狐缘" in name:
+            counts["狐缘"] += 1
+        elif "扫墓" in name:
+            counts["扫墓"] += 1
+        elif "本命" in name:
+            counts["本命"] += 1
+    # 高权重任务曝光最多，且所有候选都能拿到曝光（无饥饿）
+    assert counts["狐缘"] > counts["扫墓"] > 0
+    assert counts["本命"] > 0
+    assert sum(counts.values()) == 90
+
     preferred, same = pick_spark_title(titles, prefer="本命英雄", cursor=9)
     assert preferred == "新赛季你的本命英雄是？"
     assert same == 9

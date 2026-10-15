@@ -70,7 +70,9 @@ platforms:
   kuaishou:
     enabled: true
     spark_task: true            # 发布时挂星火「关联变现任务」（需先在 App 收藏任务）
-    # spark_task_title 留空 = 任务间轮换（round-robin）；填子串 = 固定优先
+    # spark_task_title 留空 = 按收益加权轮换（权重见 bot/publish/kuaishou.py
+    # 的 SPARK_TASK_WEIGHTS）；填子串 = 固定只挂该任务
+    # 收益归因报告：python -m bot.monitor.spark_income --report
     anchors:
       热点: "治愈"
       地点: "郴州"

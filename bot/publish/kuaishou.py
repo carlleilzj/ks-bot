@@ -696,17 +696,78 @@ def _select_category(page: Page, category: str) -> None:
             pass
 
 
+# 星火任务的单条收益权重（元/条），由 monitor.spark_income 归因得出。
+# 实测数据（2026-10-15，用账单真实结算金额 ÷ 发布量）：
+#   狐缘山间 0.285 元/条（厂商已下架，不可挂）
+#   扫墓丫头，替祖宗横扫天下 0.078 元/条
+#   山猎诡事：1977 0.003 元/条（已停）
+#   千万际遇辨亲情 0.002 元/条（已停）
+# 权重表用于把「均匀轮换」改成「按收益加权」——同样的播放量，
+# 把曝光集中到高产出任务上。任务下架后会自动跳过（候选列表里没有）。
+SPARK_TASK_WEIGHTS = {
+    "狐缘山间": 0.285,
+    "扫墓丫头，替祖宗横扫天下": 0.078,
+    "我花五万买破船，里面藏着万吨黄金": 0.05,   # 样本少，暂给中位估值
+}
+
+# 明确停掉/无产出的任务（不挂）：挂着它们只是浪费曝光位。
+SPARK_TASK_BLOCKLIST = (
+    "山猎诡事",      # 已停
+    "千万际遇辨亲情",  # 已停
+)
+
+
+def _spark_weight(title: str) -> float:
+    """任务标题 → 收益权重（元/条）。未知任务给保守默认值。
+
+    标题里带「任务时间：...」后缀，用子串匹配。
+    """
+    for key, w in SPARK_TASK_WEIGHTS.items():
+        if key in title:
+            return w
+    return 0.02  # 未知任务：保守估值，低于已知最优但不为 0
+
+
 def pick_spark_title(titles: list[str], prefer: str = "", cursor: int = 0) -> tuple[str, int]:
-    """从收藏任务标题里选一个：prefer 子串优先，否则按 cursor 轮询。返回 (标题, 下一个 cursor)。"""
+    """从收藏任务里选一个。
+
+    优先级：
+      1. prefer 子串命中 → 直接选（人工指定）
+      2. 按收益权重加权轮询（不是均匀轮询）——高产出任务拿更多曝光
+    黑名单任务（已停/无产出）直接剔除，不参与轮换。
+    返回 (标题, 下一个 cursor)。
+    """
     clean = [t.strip() for t in titles if t and t.strip()]
+    # 剔除黑名单
+    clean = [t for t in clean
+             if not any(b in t for b in SPARK_TASK_BLOCKLIST)]
     if not clean:
         return "", cursor
     if prefer:
         for t in clean:
             if prefer in t:
                 return t, cursor
-    i = cursor % len(clean)
-    return clean[i], cursor + 1
+    if len(clean) == 1:
+        # cursor 仍要推进：调用方靠它判断"是否换过任务"
+        return clean[0], cursor + 1
+
+    # 加权轮询：权重按「最大权重 : 其余」压缩成有上限的整数票数，
+    # 保证低权重任务也有固定曝光（不出现被高权重完全挤掉的情况）。
+    # 曾用 w/total*1000 直接换算，0.078 vs 0.05 → 609 vs 390 看似合理，
+    # 但权重差距大时（0.285 vs 0.002）低权重会缩到 0 票而永不曝光。
+    weights = [_spark_weight(t) for t in clean]
+    top = max(weights)
+    if top <= 0:
+        i = cursor % len(clean)
+        return clean[i], cursor + 1
+
+    # 每档最多 10 票，最少 1 票 → 高权重拿 10 票、最低也有 1 票
+    slots: list[str] = []
+    for t, w in zip(clean, weights):
+        n = max(1, min(10, round(w / top * 10)))
+        slots.extend([t] * n)
+    chosen = slots[cursor % len(slots)]
+    return chosen, cursor + 1
 
 
 def _spark_rr_load() -> int:
