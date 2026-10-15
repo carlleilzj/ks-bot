@@ -92,7 +92,8 @@ platforms:
   weixin:
     enabled: false    # 2026-10-12 再次暂停：上传 300001 风控复发（10-10 恢复后发了 6 条），待解除后改回 true
   toutiao:
-    enabled: true    # 2026-09-30 实名后自动发布已进作品列表（审核中）
+    enabled: true      # 可用，但**不默认发布**：链接里写 @头条/@toutiao 才发
+    default: false     # 2026-10-15 起：按需投，不占默认队列
     anchors:
       声明: "AI生成"  # 素材是 AI 动画；页面文案就是「AI生成」
 

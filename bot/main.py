@@ -40,7 +40,7 @@ from .maintenance.cleanup import purge_orphans, purge_task_media, run_cleanup
 from .media import ffmpeg
 from .media.subtitles import write_ass, write_srt
 from .notify import telegram
-from .publish import all_publishers, enabled_publishers, get_publisher
+from .publish import all_publishers, default_publishers, enabled_publishers, get_publisher
 from .publish.base import LoginExpired
 from .source import downloader
 from .source.scheduler import DiscoveryScheduler
@@ -436,16 +436,21 @@ def step_notify(s: Settings, db: Database, task: dict) -> None:
 def _task_platforms(s: Settings, task: dict) -> list:
     """返回该任务要发布的平台列表（PublisherSpec）。
 
-    task.target_platforms 为 None/空 → 所有启用平台（默认行为）。
-    有值 → 只发指定的平台，但**停用平台硬性跳过**：显式指定不能绕过
-    config 开关（2026-10-10 起，视频号 IP 风控期间被 @视频号 指定绕过，
-    每条 15 分钟超时刷屏）。指定平台全部停用 → 返回空（不发任何平台）；
-    仅当指定名全部无法识别时才回退默认。
+    task.target_platforms 为 None/空 → **默认发布平台**（enabled 且 default）。
+    有值 → 只发指定的平台（enabled 即可，无需 default），但**停用平台硬性
+    跳过**：显式指定不能绕过 config 开关（2026-10-10 起，视频号 IP 风控
+    期间被 @视频号 指定绕过，每条 15 分钟超时刷屏）。指定平台全部停用 →
+    返回空（不发任何平台）；仅当指定名全部无法识别时才回退默认。
+
+    三层语义（2026-10-15 起，今日头条用 default=false）：
+      enabled=false            → 完全停用，指定也不发
+      enabled=true, default=false → 只在被显式指定时发
+      enabled=true, default=true  → 默认就发
     """
     raw = task.get("target_platforms")
     enabled_names = {p.name for p in enabled_publishers(s)}
     if not raw:
-        return enabled_publishers(s)
+        return default_publishers(s)
     wanted = {p.strip() for p in raw.split(",") if p.strip()}
     all_pubs = all_publishers()
     pubs = [all_pubs[name] for name in wanted
@@ -460,8 +465,8 @@ def _task_platforms(s: Settings, task: dict) -> list:
         if disabled:
             log.warning("[%s] 指定平台均已停用，不发任何平台", task.get("shortcode", "?"))
             return []
-        log.warning("[%s] 指定的平台全部不可用，回退为全部启用平台", task.get("shortcode", "?"))
-        return enabled_publishers(s)
+        log.warning("[%s] 指定的平台全部不可用，回退为默认发布平台", task.get("shortcode", "?"))
+        return default_publishers(s)
     return pubs
 
 

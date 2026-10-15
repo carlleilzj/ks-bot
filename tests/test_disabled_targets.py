@@ -18,12 +18,16 @@ class _Spec:
 
 _ALL = ("kuaishou", "douyin", "xhs", "weixin", "toutiao")
 _ENABLED = ("kuaishou", "toutiao")
+# 可用但不默认发（如今日头条：@头条 才发）
+_DEFAULT = ("kuaishou",)
 
 
 def _patch(monkeypatch):
-    """注入固定的启用/全量平台表，避免依赖真实 config 与 publisher 模块。"""
+    """注入固定的启用/默认/全量平台表，避免依赖真实 config 与 publisher 模块。"""
     monkeypatch.setattr(main_mod, "enabled_publishers",
                         lambda s: [_Spec(n) for n in _ENABLED])
+    monkeypatch.setattr(main_mod, "default_publishers",
+                        lambda s: [_Spec(n) for n in _DEFAULT])
     monkeypatch.setattr(main_mod, "all_publishers",
                         lambda: {n: _Spec(n) for n in _ALL})
     monkeypatch.setattr(tl, "enabled_publishers",
@@ -44,18 +48,28 @@ def test_mixed_target_keeps_only_enabled(monkeypatch):
     assert [p.name for p in main_mod._task_platforms(Settings(), task)] == ["kuaishou"]
 
 
-def test_no_target_uses_all_enabled(monkeypatch):
-    """未指定 → 全部启用平台（默认行为不变）。"""
+def test_no_target_uses_default_publishers(monkeypatch):
+    """未指定 → 默认发布平台（default=true），不含「按需投」平台。
+
+    今日头条 enabled=true 但 default=false：不指定时不该发。
+    """
     _patch(monkeypatch)
     task = {"shortcode": "x", "target_platforms": None}
-    assert [p.name for p in main_mod._task_platforms(Settings(), task)] == list(_ENABLED)
+    assert [p.name for p in main_mod._task_platforms(Settings(), task)] == list(_DEFAULT)
+
+
+def test_explicit_target_can_use_non_default(monkeypatch):
+    """显式指定「按需投」平台 → 可以发（enabled 即可，无需 default）。"""
+    _patch(monkeypatch)
+    task = {"shortcode": "x", "target_platforms": "toutiao"}
+    assert [p.name for p in main_mod._task_platforms(Settings(), task)] == ["toutiao"]
 
 
 def test_unknown_name_still_falls_back(monkeypatch):
-    """全未识别（拼错）→ 仍回退全部启用平台（原有行为不变）。"""
+    """全未识别（拼错）→ 回退默认发布平台（原有行为语义不变）。"""
     _patch(monkeypatch)
     task = {"shortcode": "x", "target_platforms": "foobar"}
-    assert [p.name for p in main_mod._task_platforms(Settings(), task)] == list(_ENABLED)
+    assert [p.name for p in main_mod._task_platforms(Settings(), task)] == list(_DEFAULT)
 
 
 def test_split_disabled_targets(monkeypatch):

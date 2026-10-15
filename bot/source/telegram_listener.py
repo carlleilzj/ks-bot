@@ -543,10 +543,14 @@ class TelegramListener(threading.Thread):
             pub_names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in target_platforms)
             pub_line = f"发布到：{pub_names}"
         else:
-            pub_line = "发布到：所有启用平台"
+            # 默认发布平台（enabled 且 default）；头条等「按需投」平台不在其中
+            from ..publish import default_publishers
+            def_names = "、".join(_PUBLISH_PLATFORM_CN.get(p.name, p.name)
+                                  for p in default_publishers(self.s))
+            pub_line = f"发布到：{def_names or '（无默认平台）'}"
         warn_line = ""
         if unknown_tokens:
-            warn_line = f"\n⚠️ 未识别的平台名：{', '.join(unknown_tokens)}（可用：快手/抖音/小红书）"
+            warn_line = f"\n⚠️ 未识别的平台名：{', '.join(unknown_tokens)}"
         telegram.send_text(
             self.s,
             f"📥 已收到 [{platform_cn}] 视频，开始处理\n"

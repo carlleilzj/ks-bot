@@ -80,6 +80,22 @@ def get_publisher(name: str) -> PublisherSpec:
 
 
 def enabled_publishers(s: Settings) -> list[PublisherSpec]:
-    """按 config.yaml platforms.<name>.enabled 返回启用的平台（有序：快手/抖音/小红书）。"""
+    """所有可用平台（platforms.<name>.enabled=true）。
+
+    注意：这是「能被指定发布」的集合，不等于「默认就发」。
+    默认发布集合见 default_publishers。
+    """
     return [sp for name, sp in all_publishers().items()
             if s.platforms.get(name) is not None and s.platforms[name].enabled]
+
+
+def default_publishers(s: Settings) -> list[PublisherSpec]:
+    """默认发布平台（enabled 且 default）。
+
+    不指定平台时发到这里。用于「可用但不默认发」的平台——
+    如今日头条：链接里显式写 @头条 才发，不占用默认队列。
+    """
+    return [sp for name, sp in all_publishers().items()
+            if s.platforms.get(name) is not None
+            and s.platforms[name].enabled
+            and s.platforms[name].default]

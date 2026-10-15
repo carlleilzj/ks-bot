@@ -104,6 +104,13 @@ class PublishConfig:
 @dataclass
 class PlatformConfig:
     enabled: bool = False
+    # 是否加入「默认发布平台」（不指定平台时发到哪些）。
+    # 与 enabled 的区别（2026-10-15 引入）：
+    #   enabled=true, default=true  → 默认就发，也能被指定
+    #   enabled=true, default=false → 不默认发，只有链接里显式指定才发
+    #                                 （今日头条用这个：按需投，不占默认队列）
+    #   enabled=false               → 完全停用，指定也不发（硬性，见 publish_gate）
+    default: bool = True
     categories: list[str] = field(default_factory=list)  # 该平台的分区列表（无分区概念的平台留空）
     spark_task: bool = False          # 快手：发布时挂星火「关联变现任务」
     spark_task_title: str = ""        # 可选，收藏任务标题包含该字符串则优先；空则轮询
@@ -360,6 +367,8 @@ def load_settings() -> Settings:
                 _anchors = {}
             pc = PlatformConfig(
                 enabled=bool(conf.get("enabled", False)),
+                # default 缺省 = true，保证旧配置行为不变（启用即默认发）
+                default=bool(conf.get("default", True)),
                 spark_task=bool(conf.get("spark_task", False)),
                 spark_task_title=str(conf.get("spark_task_title") or "").strip(),
                 anchors={str(k): str(v) for k, v in _anchors.items() if v},
