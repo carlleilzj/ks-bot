@@ -708,6 +708,7 @@ SPARK_TASK_WEIGHTS = {
     "狐缘山间": 0.285,
     "扫墓丫头，替祖宗横扫天下": 0.078,
     "我花五万买破船，里面藏着万吨黄金": 0.05,   # 样本少，暂给中位估值
+    "榆树沟出了个辣媳妇1": 0.06,               # 2026-09-10 新上架，同题材估值
 }
 
 # 明确停掉/无产出的任务（不挂）：挂着它们只是浪费曝光位。
@@ -1053,6 +1054,20 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
             return None
         log.info("星火任务下拉已展开（占位符「%s」）：%d 个候选 %s",
                  matched_ph, len(titles), titles[:5])
+
+        # 任务池变化跟踪：新任务上架/老任务消失时推 TG（收藏只能在 App 做，
+        # 人工盯不过来，见 monitor/spark_pool）。失败不影响发布。
+        try:
+            from ..monitor.spark_pool import note_candidates
+            from ..notify import telegram as _tg
+
+            def _notify(text: str) -> None:
+                from ..config import load_settings
+                _tg.send_text(load_settings(), text)
+
+            note_candidates(titles, notify=_notify)
+        except Exception as e:
+            log.debug("任务池变化检测失败（不影响发布）：%s", e)
 
         chosen, nxt = pick_spark_title(titles, prefer=prefer, cursor=_spark_rr_load())
         if not chosen:
