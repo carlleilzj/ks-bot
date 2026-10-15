@@ -134,6 +134,28 @@ class RemoteApi:
             log.warning("[audit] task %d 审核违规，删除失败：%s", task_id, note[:120])
         return {"ok": True}
 
+    # ---------- 星火收益归因 ----------
+
+    def spark_task_report(self, data: dict) -> dict:
+        """发布端回报：本条作品实际挂上的星火变现任务名。
+
+        落库到 publish_jobs.spark_task，用于按任务统计产出
+        （星火收益按任务维度结算，见 db.spark_task_stats）。
+        """
+        task_id = int(data.get("task_id") or 0)
+        platform = str(data.get("platform") or "")
+        spark_task = str(data.get("spark_task") or "").strip()[:200]
+        if not (task_id and platform and spark_task):
+            return {"ok": False, "error": "task_id/platform/spark_task required"}
+        with self.db._lock:
+            self.db.conn.execute(
+                "UPDATE publish_jobs SET spark_task=?, updated_at=? "
+                "WHERE task_id=? AND platform=?",
+                (spark_task, now_iso(), task_id, platform))
+            self.db.conn.commit()
+        log.info("[spark] task %d 挂载任务已记录：%s", task_id, spark_task)
+        return {"ok": True}
+
     # ---------- 远程登录指令（TG /login → 协调端落标记 → 发布端取走执行） ----------
 
     def set_login_request(self, platform: str) -> dict:
@@ -436,6 +458,13 @@ class RemoteApi:
                 if parsed.path == "/api/audit":
                     try:
                         self._send_json(200, api.audit_report(data))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
+                if parsed.path == "/api/spark_task":
+                    # 发布端回报本条挂载的星火任务名（收益归因）
+                    try:
+                        self._send_json(200, api.spark_task_report(data))
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return

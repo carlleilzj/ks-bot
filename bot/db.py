@@ -133,6 +133,13 @@ class Database:
         job_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(publish_jobs)")}
         if job_cols and "claimed_at" not in job_cols:
             self.conn.execute("ALTER TABLE publish_jobs ADD COLUMN claimed_at TEXT")
+        # publish_jobs 补列：spark_task（快手发布时实际挂上的星火变现任务名）。
+        # 归因背景：星火收益按任务维度结算（快手账单里显示为
+        # 「星火计划达人结算-XX」），而发布端此前只写日志、不落库，
+        # 无法回答「哪个任务更赚钱」。有这一列才能把收益按任务分组，
+        # 把现在的均匀轮换改成按收益加权。
+        if job_cols and "spark_task" not in job_cols:
+            self.conn.execute("ALTER TABLE publish_jobs ADD COLUMN spark_task TEXT")
         # 解析重试队列：IG 风控/网络抖动导致 extract_meta 失败时入队，
         # 按指数退避择时重试，成功后再进正常流水线。
         self.conn.execute(
@@ -246,7 +253,8 @@ class Database:
 
     def update_job(self, job_id: int, **fields) -> None:
         assert fields, "no fields"
-        allowed = {"state", "url", "error", "retries", "published_at", "claimed_at"}
+        allowed = {"state", "url", "error", "retries", "published_at", "claimed_at",
+                   "spark_task"}
         bad = set(fields) - allowed
         assert not bad, f"unknown job columns: {bad}"
         fields["updated_at"] = now_iso()
@@ -661,6 +669,45 @@ class Database:
             "SELECT COUNT(*) n FROM resolve_queue WHERE state='PENDING'"
         ).fetchone()
         return r["n"] if r else 0
+
+    # ---------- 星火收益归因 ----------
+
+    def spark_task_stats(self, days: int = 30) -> list[dict]:
+        """按星火任务统计发布量与收益（用于轮换加权决策）。
+
+        收益归因方式：快手账单里星火收益按任务维度结算
+        （「星火计划达人结算-任务名」），但接口不返回逐条视频明细，
+        所以按「任务 → 期间发布条数 → 期间收益」做均摊估算，
+        得出每个任务的单条产出。样本足够后用于调整轮换权重。
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT spark_task,
+                          COUNT(*) AS published,
+                          MIN(published_at) AS first_at,
+                          MAX(published_at) AS last_at
+                   FROM publish_jobs
+                   WHERE platform='kuaishou' AND state='PUBLISHED'
+                     AND spark_task IS NOT NULL AND spark_task != ''
+                     AND published_at >= datetime('now', ?)
+                   GROUP BY spark_task
+                   ORDER BY published DESC""",
+                (f"-{int(days)} days",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def recent_kuaishou_spark(self, limit: int = 20) -> list[dict]:
+        """最近挂过星火任务的快手 job（含任务名与发布时间）。"""
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT j.task_id, j.published_at, j.spark_task, t.shortcode, t.title
+                   FROM publish_jobs j JOIN tasks t ON t.id = j.task_id
+                   WHERE j.platform='kuaishou' AND j.spark_task IS NOT NULL
+                     AND j.spark_task != ''
+                   ORDER BY j.published_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         with self._lock:

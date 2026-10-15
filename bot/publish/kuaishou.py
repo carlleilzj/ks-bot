@@ -584,8 +584,13 @@ def publish(
     state_path: Path = KS_STATE_PATH,
     spark_task: bool = False,
     spark_task_title: str = "",
+    spark_sink: list | None = None,
 ) -> str | None:
-    """上传并发布一条视频，成功返回快手作品链接（获取不到时 None）。"""
+    """上传并发布一条视频，成功返回快手作品链接（获取不到时 None）。
+
+    spark_sink：传入空 list 时，会把本条实际挂上的星火任务名 append 进去，
+    供调用方落库做收益归因（星火收益按任务维度结算，见 db.spark_task_stats）。
+    """
     if not Path(state_path).exists():
         raise LoginExpired("未找到快手登录态，请先运行: python -m bot.main --login kuaishou")
 
@@ -640,6 +645,10 @@ def publish(
                         "星火变现任务挂载未生效，已阻断发布（避免无收益白发）。"
                         "请检查：快手 App 星火计划里任务是否仍可挂、额度是否已满、"
                         "或把 config.yaml 的 spark_task 设为 false 以跳过")
+                # 传出任务名供调用方落库：星火收益按任务维度结算，
+                # 记下每条挂了哪个任务才能统计各任务产出（收益归因）。
+                if spark_sink is not None:
+                    spark_sink.append(attached)
 
             # 6. 点击发布
             _click_publish(page, title=title)

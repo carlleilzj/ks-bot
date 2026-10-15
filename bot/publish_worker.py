@@ -91,6 +91,19 @@ def fetch_published(base: str, s: Settings, platform: str = "douyin",
         return _check(r, "拉取已发布清单").get("items", [])
 
 
+def report_spark_task(base: str, s: Settings, task_id: int, platform: str,
+                      spark_task: str) -> None:
+    """回报本条实际挂上的星火任务名，供协调端落库做收益归因（失败静默）。"""
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.post(f"{base}/api/spark_task", headers=_headers(s),
+                       json={"task_id": task_id, "platform": platform,
+                             "spark_task": spark_task})
+            _check(r, f"回报星火任务 {task_id}")
+    except Exception as e:
+        log.debug("星火任务名回报失败（不影响发布）：%s", e)
+
+
 def report_audit(base: str, s: Settings, task_id: int, note: str, deleted: bool) -> None:
     with httpx.Client(timeout=30) as c:
         r = c.post(f"{base}/api/audit", headers=_headers(s),
@@ -247,11 +260,13 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
 
         copy = _platform_copy(payload, platform)
         extra = {}
+        spark_sink: list = []          # 快手：接收本条实际挂上的星火任务名
         plat_cfg = s.platforms.get(platform)
         if platform == "kuaishou":
             if plat_cfg and plat_cfg.spark_task:
                 extra["spark_task"] = True
                 extra["spark_task_title"] = plat_cfg.spark_task_title
+                extra["spark_sink"] = spark_sink
         elif platform == "douyin":
             # 挂载标签（商品/位置/小程序/团购/热点），配置驱动，失败不阻塞发布
             if plat_cfg and getattr(plat_cfg, "anchors", None):
@@ -277,6 +292,9 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         )
         report(base, s, task_id, platform, ok=True, url=url or "")
         log.info("[%s] %s 发布成功：%s", task["shortcode"], pub.display_name, url or "-")
+        # 星火任务名回报给协调端落库（收益归因：收益按任务维度结算）
+        if spark_sink:
+            report_spark_task(base, s, task_id, platform, spark_sink[0])
         if platform == "douyin":
             schedule_douyin_audit(5 * 60, reason=f"发布后 5 分钟初审复检 [{task['shortcode']}]")
             schedule_douyin_audit(15 * 60, reason=f"发布后 15 分钟二审复检 [{task['shortcode']}]")
@@ -324,6 +342,8 @@ _last_audit_at: float = 0.0
 AUDIT_INTERVAL = 30 * 60  # 30 分钟兜底巡检
 STATS_INTERVAL = 6 * 3600  # 播放量回流：6 小时一次足够（播放数据变化慢）
 _last_stats_at: float = 0.0
+INCOME_INTERVAL = 6 * 3600  # 星火收益快照：6 小时一次（收益结算慢，无需频繁）
+_last_income_at: float = 0.0
 _scheduled_audits: list[float] = []
 
 
@@ -508,7 +528,29 @@ def run_once(base: str, s: Settings) -> int:
             time.sleep(5)  # 平台间小间隔
     maybe_audit(base, s)
     maybe_refresh_stats(s)
+    maybe_refresh_spark_income(s)
     return n
+
+
+def maybe_refresh_spark_income(s: Settings) -> None:
+    """周期性抓快手星火收益快照（每 6 小时一次，失败静默）。
+
+    只抓「累计收益/可提现余额」两个数，用于算增量。
+    逐条精确归因需要逐条账单明细，PC 端接口不提供，因此按
+    「任务发布量 + 期间收益增量」做均摊估算（见 monitor.spark_income）。
+    """
+    global _last_income_at
+    now = time.time()
+    if now - _last_income_at < INCOME_INTERVAL:
+        return
+    _last_income_at = now
+    try:
+        from .monitor.spark_income import record
+        snap = record(headless=True)
+        if snap:
+            log.info("星火收益快照：累计 %.2f 元", snap["income"])
+    except Exception as e:
+        log.debug("星火收益抓取失败（忽略）：%s", str(e)[:120])
 
 
 def main() -> None:
