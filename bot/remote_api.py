@@ -198,7 +198,7 @@ class RemoteApi:
     def set_login_request(self, platform: str) -> dict:
         """记录一条登录指令。发布端 worker 轮询 /api/login_request 取走执行。"""
         platform = (platform or "").strip().lower()
-        if platform not in ("weixin", "toutiao", "kuaishou", "douyin", "xhs"):
+        if platform not in ("weixin", "toutiao", "kuaishou", "kuaishou2", "douyin", "xhs"):
             return {"ok": False, "error": f"unsupported platform: {platform}"}
         self._login_requests[platform] = now_iso()
         log.info("[login_request] %s 扫码登录指令已入队", platform)

@@ -876,7 +876,8 @@ def main() -> None:
         from .publish.kuaishou import login_qr_image as kuaishou_qr
         from .publish.toutiao import login_qr_image as toutiao_qr
 
-        _QR_IMPL = {"weixin": weixin_qr, "kuaishou": kuaishou_qr, "toutiao": toutiao_qr}
+        _QR_IMPL = {"weixin": weixin_qr, "kuaishou": kuaishou_qr,
+                    "kuaishou2": kuaishou_qr, "toutiao": toutiao_qr}
         names = [x.strip() for x in str(args.login_qr).split(",") if x.strip()]
         ok_all = True
         for name in names:

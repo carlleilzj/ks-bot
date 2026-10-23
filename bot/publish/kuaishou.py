@@ -308,8 +308,13 @@ def _cookie_file_has_login(state_path: Path) -> bool:
         return False
 
 
-def _has_login_cookies(context) -> bool:
-    """按 cookie 判定登录态（不依赖页面结构，扫码成功即生效）。"""
+def _has_login_cookies(context, state_path: Path | str | None = None) -> bool:
+    """按 cookie 判定登录态（不依赖页面结构，扫码成功即生效）。
+
+    state_path：域匹配查不到时兜底读的登录态文件（多号必须传对，
+    否则会拿 A 号的文件误判 B 号「已登录」——2026-10-24 实测踩过：
+    全新 context 被判已登录，二维码根本不出，还把游客态写进了 ks2_state）。
+    """
     try:
         cookies = context.cookies(["https://cp.kuaishou.com", "https://www.kuaishou.com",
                                     "https://id.kuaishou.com", "https://passport.kuaishou.com"])
@@ -318,8 +323,8 @@ def _has_login_cookies(context) -> bool:
             return True
     except Exception:
         pass
-    # 域匹配查不到时兜底：直接读 storage_state 文件
-    return _cookie_file_has_login(KS_STATE_PATH)
+    # 域匹配查不到时兜底：直接读该号的 storage_state 文件
+    return _cookie_file_has_login(Path(state_path) if state_path else KS_STATE_PATH)
 
 
 # ---------- 登录 ----------
@@ -335,7 +340,7 @@ def login_interactive(state_path: Path = KS_STATE_PATH) -> bool:
         print(">>> 登录成功后会自动保存登录态，之后日常运行无需再次扫码\n")
         deadline = time.time() + 300
         while time.time() < deadline:
-            if _has_login_cookies(context):
+            if _has_login_cookies(context, state_path):
                 time.sleep(2)  # 等登录跳转把 cookie 补齐
                 state_path.parent.mkdir(parents=True, exist_ok=True)
                 context.storage_state(path=str(state_path))
@@ -356,10 +361,13 @@ def login_qr_image(out_path: Path | None = None, state_path: Path = KS_STATE_PAT
     在服务器（无桌面）上跑不起来。快手登录态过期后只能人工上机，
     实测 HK B 上的快手登录态已失效（2026-09-19），作品管理页跳回登录页。
 
-    产物：logs/kuaishou_qr.png（可直接发到手机扫）
+    产物：logs/kuaishou_qr.png（可直接发到手机扫）。
+    矩阵号按登录态文件名派生（ks2_state → kuaishou2_qr.png），互不覆盖。
     """
     if out_path is None:
-        out_path = LOGS_DIR / "kuaishou_qr.png"
+        stem = Path(state_path).stem
+        name = "kuaishou" if stem == "ks_state" else stem
+        out_path = LOGS_DIR / f"{name}_qr.png"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
@@ -372,7 +380,7 @@ def login_qr_image(out_path: Path | None = None, state_path: Path = KS_STATE_PAT
             page.wait_for_timeout(8000)
 
             # 若已登录，直接保存并返回
-            if _has_login_cookies(context) or _is_logged_in(page):
+            if _has_login_cookies(context, state_path) or _is_logged_in(page):
                 context.storage_state(path=str(state_path))
                 print(f">>> 检测到已登录，登录态已刷新：{state_path}")
                 browser.close()
@@ -446,7 +454,7 @@ def login_qr_image(out_path: Path | None = None, state_path: Path = KS_STATE_PAT
                 telegram.send_photo(
                     tg, out_path,
                     "🟠 快手登录二维码（几分钟内有效，过期会自动刷新重发）\n"
-                    "用快手 App 扫码登录创作者中心")
+                    f"用快手 App 扫码登录创作者中心（登录态 → {Path(state_path).name}）")
                 log.info("二维码已推送到 Telegram")
             except Exception as e:
                 log.debug("Telegram 推送失败（不影响登录）：%s", str(e)[:100])
@@ -461,7 +469,7 @@ def login_qr_image(out_path: Path | None = None, state_path: Path = KS_STATE_PAT
             deadline = time.time() + wait_sec
             next_check = 0.0
             while time.time() < deadline:
-                if _has_login_cookies(context):
+                if _has_login_cookies(context, state_path):
                     time.sleep(2)   # 等登录跳转把 cookie 补齐
                     context.storage_state(path=str(state_path))
                     print(f"\n>>> 登录成功！登录态已保存到 {state_path}"
@@ -604,7 +612,7 @@ def publish(
         try:
             goto_with_retry(page, PUBLISH_URL)
             settle(page)
-            if not (_is_logged_in(page) or _has_login_cookies(context)):
+            if not (_is_logged_in(page) or _has_login_cookies(context, state_path)):
                 shot(page, "ks_login_expired")
                 raise LoginExpired("快手登录态已失效，请运行 python -m bot.main --login kuaishou 重新扫码")
 
