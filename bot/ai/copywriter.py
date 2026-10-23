@@ -48,7 +48,8 @@ class PlatformProfile:
     desc_hint: str = ""
     # 标题风格段（空 = 默认搞笑钩子规范）。快手2号用自适应三口吻。
     title_style: str = ""
-    # 话题组合：AI 内容话题最多占几席、固定池兜底词
+    # 话题组合：锚话题（空 = 不锚）、AI 内容话题最多占几席、固定池兜底词
+    tag_base: str = "无声视频"
     tag_content_slots: int = 2
     tag_fixed_pool: tuple[str, ...] = ()
 
@@ -60,22 +61,27 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
         tone="风趣、诙谐、像朋友憋着笑转述，短、有钩子，不解释画面",
         desc_hint="1~2 句话点出画面里真正发生的事，不要把标题再抄一遍",
     ),
-    # 快手2号：不预设内容定位，标题口吻和话题都按画面自适应——
-    # 投链时由人来选素材，AI 负责判断这条内容适合哪种表达。
+    # 快手2号：女性生活内容（四件套/睡衣展示、化妆/盘发教程）。
+    # 标题口吻按内容类型自适应；话题不用「无声视频」锚——教程类有人声，
+    # 挂无声标签会伤账号垂直度，锚位让给 AI 按内容选。
     "kuaishou2": PlatformProfile(
         name="kuaishou2", display_name="快手2号", max_title_len=40, max_tags=4,
         supports_category=True,
-        tone="根据画面内容自适应：萌宠温情→治愈口吻，沙雕桥段→幽默口吻，剧情反转→悬念口吻",
-        desc_hint="1~2 句话点出画面里真正发生的事，不要把标题再抄一遍",
+        tone="面向女性的种草/教程口吻：好物展示重质感场景，教程重简单易学",
+        desc_hint="1~2 句话点出卖点或教程要点（面料/版型/步骤/适合场景），不要抄标题",
         title_style=(
-            "2. 先判断这条画面属于哪类，就用哪类口吻写标题（自适应）：\n"
-            "   - 萌宠卖萌 / 温情互动 → 治愈暖系，一句让人心头一软；\n"
-            "   - 沙雕桥段 / 离谱行为 → 幽默吐槽，像朋友憋着笑转述；\n"
-            "   - 剧情向 / 有反转 → 悬念，把结局咽住半句勾人。\n"
-            "   只学口气，禁止照抄，必须换成这条画面里真实发生的事。"
+            "2. 先判断这条内容属于哪类，就用哪类口吻写标题（自适应）：\n"
+            "   - 家纺四件套 / 睡衣展示 → 质感种草：面料手感、配色、卧室焕新的\n"
+            "     场景代入，让人想象自己用上的样子；\n"
+            "   - 化妆技巧 → 干货教程：点出最关键的一步或前后对比，\n"
+            "     「手残党也能学会」式低门槛钩子；\n"
+            "   - 盘发/穿搭技巧 → 场景速成：通勤/约会/日常几步搞定，\n"
+            "     强调省时省手、学会就赚到。\n"
+            "   只学口气，禁止照抄；卖点必须来自画面和转录里的真实信息。"
         ),
+        tag_base="",
         tag_content_slots=3,
-        tag_fixed_pool=("动物日常", "治愈瞬间", "搞笑日常"),
+        tag_fixed_pool=("好物分享", "变美日常", "穿搭分享", "美妆教程", "生活好物"),
     ),
     "douyin": PlatformProfile(
         name="douyin", display_name="抖音", max_title_len=55, max_tags=5,
@@ -126,13 +132,17 @@ def _system_prompt(profile: PlatformProfile) -> str:
         "   - 奶奶才带两天，孩子已经被喂成球了"
     )
 
-    role = (f"你是{profile.display_name}的标题写手。素材多为 AI 3D 动画、萌宠小动物剧情、"
-            "无对白的幽默短片。"
-            if profile.name != "kuaishou" else
-            "你是快手搞笑动画账号的标题写手。素材多为 AI 3D 动画、萌宠小动物剧情、无对白的幽默短片。")
+    if profile.name == "kuaishou2":
+        role = ("你是快手女性生活类账号的标题写手。素材是面向女性的好物展示与教程："
+                "家纺四件套、睡衣展示、化妆技巧、盘发/穿搭技巧等。")
+        style_lead = "标题要像刷到就想点开的那种种草句/干货句，短、有钩子，不是广告喊话。"
+    else:
+        role = ("你是快手搞笑动画账号的标题写手。素材多为 AI 3D 动画、"
+                "萌宠小动物剧情、无对白的幽默短片。")
+        style_lead = "标题要像 2026 年 9 月打出过百万播放的那种短句，而不是专栏海报。"
 
     return f"""{role}
-标题要像 2026 年 9 月打出过百万播放的那种短句，而不是专栏海报。
+{style_lead}
 
 【输入信息】
 你会拿到三份材料，**可信度从高到低**：
@@ -167,15 +177,16 @@ def _system_prompt(profile: PlatformProfile) -> str:
 严禁出现这些已被用烂的套话：{banned_str}，禁止以「姐妹们你们呢」等俗套口吻结尾。
 
 【话题（tags）—— 按内容给，不照抄固定组合】
-给 2~3 个**贴合这条画面内容**的话题词，每个不超过 8 个字，
-主角是什么就写什么（如「萌宠日常」「动物搞笑」「沙雕瞬间」）。
-每条不一样；发布端会自动带上账号基础话题「无声视频」并按平台补齐数量，
+给 2~3 个**贴合这条内容**的话题词，每个不超过 8 个字，
+内容属于什么领域就写什么（动画萌宠如「萌宠日常」；
+女性生活如「好物分享」「美妆教程」「居家好物」）。
+每条不一样；发布端会自动带上账号基础话题并按平台补齐数量，
 你只负责内容相关的那几个。
 
 【输出格式】
 只输出一个合法的 JSON 对象，不要输出任何代码块标记、思考过程或多余说明：
 {{
-  "title": "一句诙谐短钩子，不带【】、不带「没声音/太绝了」垫句（不超过 {profile.max_title_len} 字）",
+  "title": "一句贴合账号口吻的短钩子，不带【】、不带「没声音/太绝了」垫句（不超过 {profile.max_title_len} 字）",
   "description": "{profile.desc_hint}（1~2句话，真实呼应视频内容）",
   "tags": ["贴合画面内容的话题词1", "话题词2"],
   {category_rule}
@@ -230,17 +241,19 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
         tags_raw = []
     tags = [str(t).lstrip("#").strip()[:10] for t in tags_raw if str(t).strip()]
 
-    # 基础 IP 标签保障
-    if "无声视频" not in tags:
-        tags.insert(0, "无声视频")
+    # 基础 IP 标签保障（tag_base 为空 = 该平台不锚基础话题，
+    # 如 kuaishou2 女性生活号：教程类有人声，不挂「无声视频」）
+    if profile.tag_base and profile.tag_base not in tags:
+        tags.insert(0, profile.tag_base)
     tags = [t for t in tags if t]
 
-    # 话题策略（2026-10-23 改）：锚 1 个 + AI 内容话题 ≤2 + 固定池补齐。
+    # 话题策略（2026-10-23 改）：锚 1 个 + AI 内容话题 + 固定池补齐。
     # 此前固定组合（无声视频+搞笑日常+沙雕视频+搞笑动画）每条完全一样：
     # 话题没有方差 → 回流的播放数据永远无法归因到话题上。
     # 现在让 AI 按画面选内容话题（家族去重防近义词堆叠），
     # 固定池只在数量不足时兜底，账号基础曝光池保持稳定。
     tags = merge_tags(tags, profile.max_tags, title=title,
+                      base_tag=profile.tag_base,
                       content_slots=profile.tag_content_slots,
                       fixed_pool=profile.tag_fixed_pool or None)
 
@@ -256,26 +269,28 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
 
 
 def merge_tags(model_tags: list[str], max_tags: int, title: str = "",
+               base_tag: str = "无声视频",
                content_slots: int = 2,
                fixed_pool: tuple[str, ...] | list[str] | None = None) -> list[str]:
     """话题组合：锚 1 个 + AI 内容话题 + 固定池补齐。
 
-    「无声视频」始终在第 1 位（账号辨识度）。AI 给的内容话题按家族去重
-    后最多占 content_slots 席——既保留验证过的基础池，又让每条视频有
-    内容相关的话题方差，播放回流后才能比较出哪个话题真的带流量。
-    快手2号 content_slots=3 + 中性池：定位不预设，更多信 AI 按画面选。
+    base_tag 非空时始终在第 1 位（账号辨识度）；为空则不锚，
+    全部位置给 AI 内容话题 + 池（kuaishou2 女性生活号用）。
+    AI 给的内容话题按家族去重后最多占 content_slots 席——既保留
+    验证过的基础池，又让每条视频有内容相关的话题方差，
+    播放回流后才能比较出哪个话题真的带流量。
     """
     from .tag_quality import tag_family
-    BASE = "无声视频"
     pool = list(fixed_pool) if fixed_pool else [
         "搞笑日常", "沙雕视频", "搞笑动画", "笑到肚子疼",
     ]
+    base = (base_tag or "").strip()
 
     picked: list[str] = []
     seen_families: set[str] = set()
     for t in model_tags or []:
         n = re.sub(r"\s+", "", (t or "").lstrip("#").strip())
-        if not n or n == BASE or n in picked:
+        if not n or n == base or n in picked:
             continue
         fam = tag_family(n)
         if fam:
@@ -286,7 +301,7 @@ def merge_tags(model_tags: list[str], max_tags: int, title: str = "",
         if len(picked) >= max(1, content_slots):
             break
 
-    out = [BASE] + picked
+    out = ([base] if base else []) + picked
     for f in pool:
         if len(out) >= max_tags:
             break

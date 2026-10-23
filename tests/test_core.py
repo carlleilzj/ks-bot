@@ -80,16 +80,28 @@ def test_merge_tags_falls_back_to_fixed_pool():
 
 
 def test_merge_tags_custom_slots_and_pool():
-    """kuaishou2：3 个内容位 + 中性池。"""
+    """kuaishou2：3 个内容位 + 指定池。"""
     from bot.ai.copywriter import merge_tags
-    out = merge_tags(["萌宠日常", "动物搞笑", "治愈瞬间", "多余"], 4,
+    out = merge_tags(["居家好物", "四件套", "卧室改造", "多余"], 4,
                      content_slots=3,
-                     fixed_pool=("动物日常", "治愈瞬间", "搞笑日常"))
+                     fixed_pool=("好物分享", "变美日常", "穿搭分享"))
     assert out[0] == "无声视频"
     assert len(out) == 4
     # 3 个内容位都进来，池子不占位
-    assert "萌宠日常" in out and "动物搞笑" in out and "治愈瞬间" in out
+    assert "居家好物" in out and "四件套" in out and "卧室改造" in out
     assert "多余" not in out
+
+
+def test_merge_tags_no_base_for_kuaishou2():
+    """B 号不锚「无声视频」（教程有人声），AI 话题 + 女性向池补齐。"""
+    from bot.ai.copywriter import merge_tags
+    out = merge_tags(["美妆教程", "新手化妆"], 4, base_tag="",
+                     content_slots=3,
+                     fixed_pool=("好物分享", "变美日常", "穿搭分享"))
+    assert "无声视频" not in out
+    assert out[:2] == ["美妆教程", "新手化妆"]
+    assert out[2] == "好物分享"      # 池子补到满 4
+    assert len(out) == 4
 
 
 # ---------------------------------------------------------------------------
