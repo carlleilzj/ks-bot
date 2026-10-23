@@ -29,18 +29,19 @@ log = logging.getLogger(__name__)
 POOL_PATH = DATA_DIR / "ks_spark_pool.json"
 
 
-def _load() -> dict:
+def _load(path: Path | None = None) -> dict:
     try:
-        return json.loads(POOL_PATH.read_text(encoding="utf-8"))
+        return json.loads((path or POOL_PATH).read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
-def _save(data: dict) -> None:
+def _save(data: dict, path: Path | None = None) -> None:
+    p = path or POOL_PATH
     try:
-        POOL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        POOL_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=1),
-                             encoding="utf-8")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                     encoding="utf-8")
     except Exception as e:
         log.debug("任务池状态落盘失败：%s", e)
 
@@ -50,11 +51,13 @@ def _short(title: str) -> str:
     return title.split("任务时间")[0].strip() or title.strip()
 
 
-def note_candidates(titles: list[str], notify=None) -> dict:
+def note_candidates(titles: list[str], notify=None,
+                    pool_path: Path | None = None) -> dict:
     """记录本次候选任务快照，返回变化信息。
 
     titles: 发布页下拉里的候选（含「任务时间」后缀）
     notify: 可选的回调 notify(text)，用于推 TG（不传则只记日志）
+    pool_path: 任务池缓存文件（多号各自一份，默认 A 号）
 
     返回 {"added": [...], "removed": [...], "first_run": bool}
     """
@@ -63,7 +66,7 @@ def note_candidates(titles: list[str], notify=None) -> dict:
         return {"added": [], "removed": [], "first_run": False}
 
     cur = {_short(t): t for t in now}
-    data = _load()
+    data = _load(pool_path)
     prev = data.get("tasks") or {}
     first_run = not prev
 
@@ -72,7 +75,7 @@ def note_candidates(titles: list[str], notify=None) -> dict:
 
     data["tasks"] = cur
     data["updated_at"] = datetime.now().isoformat(timespec="seconds")
-    _save(data)
+    _save(data, pool_path)
 
     if first_run:
         log.info("星火任务池首次记录：%d 个任务", len(cur))

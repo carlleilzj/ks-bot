@@ -25,8 +25,13 @@ class PublisherSpec:
 
 
 def state_path_for(name: str) -> Path:
-    """各平台登录态文件路径；kuaishou 沿用历史文件名 ks_state.json。"""
-    return DATA_DIR / ("ks_state.json" if name == "kuaishou" else f"{name}_state.json")
+    """各平台登录态文件路径；kuaishou 沿用历史文件名 ks_state.json。
+
+    kuaishou2 是第二个快手号（矩阵号）：登录态独立成 ks2_state.json，
+    日限/文案/星火池按平台维度天然隔离，互不影响 A 号。
+    """
+    special = {"kuaishou": "ks_state.json", "kuaishou2": "ks2_state.json"}
+    return DATA_DIR / special.get(name, f"{name}_state.json")
 
 
 def _build_specs() -> dict[str, PublisherSpec]:
@@ -36,6 +41,12 @@ def _build_specs() -> dict[str, PublisherSpec]:
         PublisherSpec(
             name="kuaishou", display_name="快手",
             state_path=state_path_for("kuaishou"), supports_category=True,
+            login=kuaishou.login_interactive, publish=kuaishou.publish,
+        ),
+        # 第二个快手号：同一套发布实现，独立登录态/日限/文案/星火。
+        PublisherSpec(
+            name="kuaishou2", display_name="快手2号",
+            state_path=state_path_for("kuaishou2"), supports_category=True,
             login=kuaishou.login_interactive, publish=kuaishou.publish,
         ),
         PublisherSpec(

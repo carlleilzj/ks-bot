@@ -242,7 +242,7 @@ class TelegramListener(threading.Thread):
                     "不指定则发到所有启用的平台\n\n"
                     "🔑 /login —— 平台扫码重登（不带参数弹菜单）\n"
                     "   /login weixin / kuaishou / douyin / toutiao\n"
-                    "   中文别名也行：/login 快手\n\n"
+                    "   中文别名也行：/login 快手、/login 快手2\n\n"
                     "🎬 发现层自动采集后发审核卡片，点按钮即可\n"
                     "  edit:<id> 你的标题    # 改文案\n"
                     "  target:<id> 抖音  # 指定发布平台",
@@ -283,7 +283,7 @@ class TelegramListener(threading.Thread):
         # login:<platform> —— 平台菜单按钮，不走任务审核分支
         if action == "login":
             key = tid_str.strip().lower()
-            if key not in ("weixin", "toutiao", "kuaishou", "douyin", "xhs"):
+            if key not in ("weixin", "toutiao", "kuaishou", "kuaishou2", "douyin", "xhs"):
                 telegram.answer_callback(self.s, cq_id, "不支持的平台")
                 return
             telegram.answer_callback(self.s, cq_id, f"已触发 {key} 扫码登录")
@@ -441,8 +441,9 @@ class TelegramListener(threading.Thread):
             keyboard = {"inline_keyboard": [
                 [{"text": "微信视频号", "callback_data": "login:weixin"},
                  {"text": "快手", "callback_data": "login:kuaishou"}],
-                [{"text": "抖音", "callback_data": "login:douyin"},
-                 {"text": "今日头条", "callback_data": "login:toutiao"}],
+                [{"text": "快手2号", "callback_data": "login:kuaishou2"},
+                 {"text": "抖音", "callback_data": "login:douyin"}],
+                [{"text": "今日头条", "callback_data": "login:toutiao"}],
             ]}
             telegram.send_text(
                 self.s, "🔑 点选要重新登录的平台：", reply_markup=keyboard)
@@ -578,6 +579,7 @@ _PLATFORM_CN = {
 # 发布平台别名 → canonical key（用户在消息里指定发布平台时用）
 _PUBLISH_PLATFORM_ALIASES = {
     "快手": "kuaishou", "kuaishou": "kuaishou", "ks": "kuaishou",
+    "快手2": "kuaishou2", "kuaishou2": "kuaishou2", "ks2": "kuaishou2",
     "抖音": "douyin", "douyin": "douyin", "dy": "douyin",
     "小红书": "xhs", "xhs": "xhs",
     "视频号": "weixin", "weixin": "weixin", "wx": "weixin", "微信视频号": "weixin",
@@ -588,6 +590,7 @@ _PUBLISH_PLATFORM_ALIASES = {
 # canonical key → 中文名（TG 回复用）
 _PUBLISH_PLATFORM_CN = {
     "kuaishou": "快手",
+    "kuaishou2": "快手2号",
     "douyin": "抖音",
     "xhs": "小红书",
     "weixin": "微信视频号",

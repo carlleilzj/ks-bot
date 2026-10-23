@@ -274,7 +274,7 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         extra = {}
         spark_sink: list = []          # 快手：接收本条实际挂上的星火任务名
         plat_cfg = s.platforms.get(platform)
-        if platform == "kuaishou":
+        if platform.startswith("kuaishou"):
             if plat_cfg and plat_cfg.spark_task:
                 extra["spark_task"] = True
                 extra["spark_task_title"] = plat_cfg.spark_task_title
@@ -379,11 +379,15 @@ def maybe_refresh_stats(s: Settings, base: str = "") -> None:
 
     from dataclasses import asdict
     from .monitor import stats as stats_mod
+    from .publish import all_publishers, get_publisher
     from .publish.base import launch_chromium, new_context, goto_with_retry
     from playwright.sync_api import sync_playwright
 
     targets = []
-    for name in ("douyin", "kuaishou"):
+    # 快手矩阵号（kuaishou / kuaishou2 / …）各有登录态，逐号抓
+    ks_names = [n for n in ("kuaishou", "kuaishou2")
+                if n in all_publishers()]
+    for name in ("douyin", *ks_names):
         try:
             pub = get_publisher(name)
         except KeyError:
@@ -550,9 +554,22 @@ def maybe_refresh_spark_income(s: Settings) -> None:
     _last_income_at = now
     try:
         from .monitor.spark_income import record
-        snap = record(headless=True)
-        if snap:
-            log.info("星火收益快照：累计 %.2f 元", snap["income"])
+        from .publish import all_publishers, get_publisher
+        # 快手矩阵号各自抓收益快照（登录态/结算独立，文件也分开）
+        for name in [n for n in ("kuaishou", "kuaishou2")
+                     if n in all_publishers()]:
+            try:
+                pub = get_publisher(name)
+            except KeyError:
+                continue
+            if not pub.state_path.exists():
+                continue
+            snap_path = (None if name == "kuaishou" else
+                         pub.state_path.parent / f"{pub.state_path.stem}_income_snapshots.json")
+            snap = record(headless=True, state_path=pub.state_path,
+                          snapshot_path=snap_path)
+            if snap:
+                log.info("[%s] 星火收益快照：累计 %.2f 元", name, snap["income"])
     except Exception as e:
         log.debug("星火收益抓取失败（忽略）：%s", str(e)[:120])
 

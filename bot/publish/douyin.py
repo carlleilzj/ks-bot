@@ -77,11 +77,8 @@ def _strip_leading_title(title: str, description: str) -> str:
     if t and desc.startswith(t):
         desc = desc[len(t):].lstrip(" \n，。；;:：")
     # 标题去掉前缀后的钩子再出现在简介开头
-    hook = t
-    for p in ("【有点视频】", "【无声治愈】", "【无声小剧场】", "【纯享放松】"):
-        if hook.startswith(p):
-            hook = hook[len(p):].strip()
-            break
+    from ..ai.copywriter import _strip_legacy_prefix
+    hook = _strip_legacy_prefix(t)
     if hook and len(hook) >= 6 and desc.startswith(hook):
         desc = desc[len(hook):].lstrip(" \n，。；;:：")
     return desc.strip()

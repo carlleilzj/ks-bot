@@ -51,7 +51,7 @@ PUBLISH_URL = "https://mp.toutiao.com/profile_v4/xigua/upload-video"
 LOGIN_PATH = "/auth/page/login"
 DASHBOARD_PATH = "/profile_v4"
 
-# 标题硬限。前缀【有点视频】占 6 字，钩子只剩 24 字，发布前再切一刀。
+# 标题硬限 30 字。2026-10 起不再保留【有点视频】前缀，整句都给钩子。
 TITLE_LIMIT = 30
 
 # 字节 SSO 常见登录 cookie。URL 才是权威判据（toutiao-ops 也只看 URL），

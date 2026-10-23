@@ -496,14 +496,20 @@ def publish_gate(s: Settings, db: Database, platform: str | None = None) -> str 
         if not in_window:
             return f"不在发布窗口 {pub.window[0]}~{pub.window[1]}"
     today0 = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
-    if db.count_published_since(today0, platform) >= pub.daily_limit:
-        return f"{platform} 已达每日发布上限 {pub.daily_limit} 条"
+    # 每平台可覆盖全局节奏（矩阵号冷启动常配不同日限/间隔）
+    plat = s.platforms.get(platform) if platform else None
+    daily_limit = (plat.daily_limit if plat and plat.daily_limit is not None
+                   else pub.daily_limit)
+    gap_hours = (plat.min_gap_hours if plat and plat.min_gap_hours is not None
+                 else pub.min_gap_hours)
+    if db.count_published_since(today0, platform) >= daily_limit:
+        return f"{platform} 已达每日发布上限 {daily_limit} 条"
     # 间隔锚点 = max(最近发布时间, 最早发布中 job 的认领时间)。
     # 只看 published_at 有竞态：上一条还在浏览器里发布（1~3 分钟未落库）时，
     # 下一条 claim 会误判"间隔已过"，导致同平台连发（曾实测 16 秒连发）。
     last = db.last_publish_anchor_at(platform)
     if last:
-        next_ok = datetime.fromisoformat(last) + timedelta(hours=pub.min_gap_hours)
+        next_ok = datetime.fromisoformat(last) + timedelta(hours=gap_hours)
         if now < next_ok:
             return f"{platform} 距上次发布间隔不足（{next_ok.strftime('%H:%M')} 后放行）"
     return None

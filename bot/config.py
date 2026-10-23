@@ -116,6 +116,10 @@ class PlatformConfig:
     spark_task_title: str = ""        # 可选，收藏任务标题包含该字符串则优先；空则轮询
     anchors: dict = field(default_factory=dict)  # 抖音：挂载标签 {类型: 搜索词}
     hot_topic: str = ""               # 抖音：关联热点词
+    # 每平台覆盖 publish 段的全局节奏（None = 用全局值）。
+    # 矩阵号冷启动期常用：kuaishou2 日限 3、间隔放宽。
+    daily_limit: int | None = None
+    min_gap_hours: float | None = None
 
 
 @dataclass
@@ -188,6 +192,25 @@ class Settings:
 def ensure_dirs() -> None:
     for d in (DATA_DIR, LOGS_DIR, RAW_DIR, WORK_DIR, FINAL_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def _opt_int(v) -> int | None:
+    """可选 int：None/空串 → None，非法值 → None（不抛）。"""
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_float(v) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _load_yaml() -> dict:
@@ -373,11 +396,13 @@ def load_settings() -> Settings:
                 spark_task_title=str(conf.get("spark_task_title") or "").strip(),
                 anchors={str(k): str(v) for k, v in _anchors.items() if v},
                 hot_topic=str(conf.get("hot_topic") or "").strip(),
+                daily_limit=_opt_int(conf.get("daily_limit")),
+                min_gap_hours=_opt_float(conf.get("min_gap_hours")),
             )
             pcats = plat_cats_raw.get(name)
             if isinstance(pcats, list) and pcats:
                 pc.categories = [str(c).strip() for c in pcats if str(c).strip()]
-            elif name == "kuaishou":
+            elif name.startswith("kuaishou"):
                 pc.categories = list(s.categories)
             s.platforms[str(name)] = pc
     else:

@@ -77,6 +77,18 @@ platforms:
       热点: "治愈"
       地点: "郴州"
       声明: "内容由AI生成"        # 作者声明；下拉若为「内容为AI生成」亦匹配
+
+  # 第二个快手号（矩阵号）：链接里写 @快手2 才发（不进默认队列）。
+  # 登录：/login 快手2（或 /login kuaishou2）→ TG 推扫码，登录态 ks2_state.json。
+  # 星火池/收益快照按号独立文件，与上面 A 号互不影响。
+  # 标题/话题按画面自适应（bot/ai/copywriter.py 的 kuaishou2 profile）。
+  kuaishou2:
+    enabled: true
+    default: false              # 只有显式 @快手2 才发，绝不占默认队列
+    daily_limit: 3              # 冷启动期日限 3（A 号全局 5 不受影响）
+    spark_task: false           # B 号 App 里收藏星火任务后再改 true
+    anchors:
+      声明: "内容由AI生成"
   douyin:
     enabled: false
     # 发布时自动挂载「添加标签」（留空则跳过）。

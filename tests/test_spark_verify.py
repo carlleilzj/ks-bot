@@ -192,9 +192,9 @@ def test_attach_returns_none_when_verify_fails(monkeypatch):
     monkeypatch.setattr(ks, "_click_visible_option", lambda p, t: True)
     monkeypatch.setattr(ks, "_select_spark_option", lambda p, t: True)
     monkeypatch.setattr(ks, "shot", lambda *a, **k: None)
-    monkeypatch.setattr(ks, "_spark_rr_load", lambda: 0)
+    monkeypatch.setattr(ks, "_spark_rr_load", lambda p=None: 0)
     saved = []
-    monkeypatch.setattr(ks, "_spark_rr_save", lambda c: saved.append(c))
+    monkeypatch.setattr(ks, "_spark_rr_save", lambda c, p=None: saved.append(c))
 
     assert ks._attach_spark_task(page, prefer="狐缘山间") is None
     assert saved == [], "回读失败时不应推进轮转游标"
@@ -214,9 +214,9 @@ def test_attach_returns_title_when_verify_passes(monkeypatch):
     monkeypatch.setattr(ks, "_click_visible_option", lambda p, t: True)
     monkeypatch.setattr(ks, "_select_spark_option", lambda p, t: True)
     monkeypatch.setattr(ks, "shot", lambda *a, **k: None)
-    monkeypatch.setattr(ks, "_spark_rr_load", lambda: 0)
+    monkeypatch.setattr(ks, "_spark_rr_load", lambda p=None: 0)
     saved = []
-    monkeypatch.setattr(ks, "_spark_rr_save", lambda c: saved.append(c))
+    monkeypatch.setattr(ks, "_spark_rr_save", lambda c, p=None: saved.append(c))
 
     assert ks._attach_spark_task(page, prefer="狐缘山间") == "狐缘山间"
     assert len(saved) == 1, "回读成功才推进游标"

@@ -79,6 +79,56 @@ def test_merge_tags_falls_back_to_fixed_pool():
     assert out == ["无声视频", "搞笑日常", "沙雕视频", "搞笑动画"]
 
 
+def test_merge_tags_custom_slots_and_pool():
+    """kuaishou2：3 个内容位 + 中性池。"""
+    from bot.ai.copywriter import merge_tags
+    out = merge_tags(["萌宠日常", "动物搞笑", "治愈瞬间", "多余"], 4,
+                     content_slots=3,
+                     fixed_pool=("动物日常", "治愈瞬间", "搞笑日常"))
+    assert out[0] == "无声视频"
+    assert len(out) == 4
+    # 3 个内容位都进来，池子不占位
+    assert "萌宠日常" in out and "动物搞笑" in out and "治愈瞬间" in out
+    assert "多余" not in out
+
+
+# ---------------------------------------------------------------------------
+# 快手2号（矩阵号）：注册 / 登录态路径 / @别名
+# ---------------------------------------------------------------------------
+
+def test_kuaishou2_registered_with_own_state():
+    from bot.publish import get_publisher, state_path_for
+    pub = get_publisher("kuaishou2")
+    assert pub.display_name == "快手2号"
+    assert pub.state_path.name == "ks2_state.json"
+    # A 号路径不受影响
+    assert state_path_for("kuaishou").name == "ks_state.json"
+    assert get_publisher("kuaishou").state_path.name == "ks_state.json"
+
+
+def test_kuaishou2_spark_sidecars_isolated():
+    """星火轮换/任务池文件按登录态派生，A 号沿用历史文件名。"""
+    from bot.publish.kuaishou import _spark_sidecars
+    rr_a, pool_a = _spark_sidecars("ks_state.json")
+    assert rr_a.name == "ks_spark_rr.json"
+    assert pool_a.name == "ks_spark_pool.json"
+    rr_b, pool_b = _spark_sidecars("ks2_state.json")
+    assert rr_b.name == "ks2_state_rr.json"
+    assert pool_b.name == "ks2_state_pool.json"
+    assert rr_a != rr_b and pool_a != pool_b
+
+
+def test_parse_target_platforms_kuaishou2():
+    """@快手2 别名解析，且与 @快手 不混淆。"""
+    from bot.source.telegram_listener import _parse_target_platforms
+    t, unknown = _parse_target_platforms("https://www.instagram.com/p/xx/ @快手2")
+    assert t == ["kuaishou2"]
+    t2, _ = _parse_target_platforms("https://www.instagram.com/p/xx/ @快手")
+    assert t2 == ["kuaishou"]
+    t3, _ = _parse_target_platforms("https://youtu.be/x @快手2 @快手")
+    assert t3 == ["kuaishou2", "kuaishou"]
+
+
 def test_chromium_launch_env_strips_proxy(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
     monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")

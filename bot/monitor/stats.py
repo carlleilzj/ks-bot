@@ -401,12 +401,17 @@ def persist(db, stats: list[WorkStat], platform: str = "douyin") -> dict:
     """
     from datetime import datetime
 
-    # 取该平台已发布的作品
+    # 取该平台已发布的作品。必须按 platform 过滤（join publish_jobs）：
+    # 多号矩阵下两号发布时间接近，不过滤会把 A 号页面数据写到 B 号任务上。
     with db._lock:
         rows = db.conn.execute(
-            """SELECT * FROM tasks
-               WHERE published_at IS NOT NULL AND state IN ('NOTIFIED','READY')
-               ORDER BY published_at DESC LIMIT 300"""
+            """SELECT t.* FROM tasks t
+               WHERE t.published_at IS NOT NULL AND t.state IN ('NOTIFIED','READY')
+                 AND EXISTS (SELECT 1 FROM publish_jobs j
+                             WHERE j.task_id = t.id AND j.platform = ?
+                               AND j.state = 'PUBLISHED')
+               ORDER BY t.published_at DESC LIMIT 300""",
+            (platform,),
         ).fetchall()
     tasks = [dict(r) for r in rows]
 

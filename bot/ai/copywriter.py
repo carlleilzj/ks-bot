@@ -46,6 +46,11 @@ class PlatformProfile:
     supports_category: bool = False
     tone: str = ""
     desc_hint: str = ""
+    # 标题风格段（空 = 默认搞笑钩子规范）。快手2号用自适应三口吻。
+    title_style: str = ""
+    # 话题组合：AI 内容话题最多占几席、固定池兜底词
+    tag_content_slots: int = 2
+    tag_fixed_pool: tuple[str, ...] = ()
 
 
 PLATFORM_PROFILES: dict[str, PlatformProfile] = {
@@ -54,6 +59,23 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
         supports_category=True,
         tone="风趣、诙谐、像朋友憋着笑转述，短、有钩子，不解释画面",
         desc_hint="1~2 句话点出画面里真正发生的事，不要把标题再抄一遍",
+    ),
+    # 快手2号：不预设内容定位，标题口吻和话题都按画面自适应——
+    # 投链时由人来选素材，AI 负责判断这条内容适合哪种表达。
+    "kuaishou2": PlatformProfile(
+        name="kuaishou2", display_name="快手2号", max_title_len=40, max_tags=4,
+        supports_category=True,
+        tone="根据画面内容自适应：萌宠温情→治愈口吻，沙雕桥段→幽默口吻，剧情反转→悬念口吻",
+        desc_hint="1~2 句话点出画面里真正发生的事，不要把标题再抄一遍",
+        title_style=(
+            "2. 先判断这条画面属于哪类，就用哪类口吻写标题（自适应）：\n"
+            "   - 萌宠卖萌 / 温情互动 → 治愈暖系，一句让人心头一软；\n"
+            "   - 沙雕桥段 / 离谱行为 → 幽默吐槽，像朋友憋着笑转述；\n"
+            "   - 剧情向 / 有反转 → 悬念，把结局咽住半句勾人。\n"
+            "   只学口气，禁止照抄，必须换成这条画面里真实发生的事。"
+        ),
+        tag_content_slots=3,
+        tag_fixed_pool=("动物日常", "治愈瞬间", "搞笑日常"),
     ),
     "douyin": PlatformProfile(
         name="douyin", display_name="抖音", max_title_len=55, max_tags=5,
@@ -95,8 +117,21 @@ def _system_prompt(profile: PlatformProfile) -> str:
     )
 
     banned_str = "、".join(f"「{p}」" for p in BANNED_PATTERNS[:10])
+    style_block = profile.title_style or (
+        "2. 先写笑点，不写旁白。一句里要有「谁 + 反差/误会/吃瘪」，把最炸的结果咽住半句当钩子。\n"
+        "   只学口气，禁止照抄，必须换成这条画面里真实发生的事：\n"
+        "   - 难怪充电这么慢，墙里那只仓鼠刚被踹醒\n"
+        "   - 猎豹啃了半天，对方缩成球让它干生气\n"
+        "   - 吉娃娃把肇事狗直接拎到家长面前\n"
+        "   - 奶奶才带两天，孩子已经被喂成球了"
+    )
 
-    return f"""你是快手搞笑动画账号的标题写手。素材多为 AI 3D 动画、萌宠小动物剧情、无对白的幽默短片。
+    role = (f"你是{profile.display_name}的标题写手。素材多为 AI 3D 动画、萌宠小动物剧情、"
+            "无对白的幽默短片。"
+            if profile.name != "kuaishou" else
+            "你是快手搞笑动画账号的标题写手。素材多为 AI 3D 动画、萌宠小动物剧情、无对白的幽默短片。")
+
+    return f"""{role}
 标题要像 2026 年 9 月打出过百万播放的那种短句，而不是专栏海报。
 
 【输入信息】
@@ -112,13 +147,8 @@ def _system_prompt(profile: PlatformProfile) -> str:
 3. 严禁无中生有！严禁捏造与画面无关的人类琐事（绝对禁止编造：做饭、带娃、写作业、婆媳、家庭主妇等无关剧情）。
 
 【标题规范（极其重要）】
-1. **不要专栏前缀**，也不要【】。标题就是一句能让人想点开的笑话。
-2. 先写笑点，不写旁白。一句里要有「谁 + 反差/误会/吃瘪」，把最炸的结果咽住半句当钩子。
-   只学口气，禁止照抄，必须换成这条画面里真实发生的事：
-   - 难怪充电这么慢，墙里那只仓鼠刚被踹醒
-   - 猎豹啃了半天，对方缩成球让它干生气
-   - 吉娃娃把肇事狗直接拎到家长面前
-   - 奶奶才带两天，孩子已经被喂成球了
+1. **不要专栏前缀**，也不要【】。标题就是一句能让人想点开的话。
+{style_block}
 3. 要求：
    - **短**：12~24 个字，最多两小句。像一句吐槽，不是剧情简介；
    - **诙谐**：用拟人、反差、误会制造笑点，不要平铺「谁做了什么然后怎样」；
@@ -210,7 +240,9 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     # 话题没有方差 → 回流的播放数据永远无法归因到话题上。
     # 现在让 AI 按画面选内容话题（家族去重防近义词堆叠），
     # 固定池只在数量不足时兜底，账号基础曝光池保持稳定。
-    tags = merge_tags(tags, profile.max_tags, title=title)
+    tags = merge_tags(tags, profile.max_tags, title=title,
+                      content_slots=profile.tag_content_slots,
+                      fixed_pool=profile.tag_fixed_pool or None)
 
     category = str(obj.get("category", "")).strip()
     if profile.supports_category and categories:
@@ -223,17 +255,21 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     return {"title": title, "description": description, "tags": tags, "category": category}
 
 
-def merge_tags(model_tags: list[str], max_tags: int, title: str = "") -> list[str]:
-    """话题组合：锚 1 个 + AI 内容话题 ≤2 + 固定池补齐。
+def merge_tags(model_tags: list[str], max_tags: int, title: str = "",
+               content_slots: int = 2,
+               fixed_pool: tuple[str, ...] | list[str] | None = None) -> list[str]:
+    """话题组合：锚 1 个 + AI 内容话题 + 固定池补齐。
 
     「无声视频」始终在第 1 位（账号辨识度）。AI 给的内容话题按家族去重
-    后最多占 2 席——既保留固定组合验证过的基础池，又让每条视频有
+    后最多占 content_slots 席——既保留验证过的基础池，又让每条视频有
     内容相关的话题方差，播放回流后才能比较出哪个话题真的带流量。
-    固定池顺序即优先级，沿用 2026-09 实测的搞笑系组合。
+    快手2号 content_slots=3 + 中性池：定位不预设，更多信 AI 按画面选。
     """
     from .tag_quality import tag_family
     BASE = "无声视频"
-    FIXED_POOL = ["搞笑日常", "沙雕视频", "搞笑动画", "笑到肚子疼"]
+    pool = list(fixed_pool) if fixed_pool else [
+        "搞笑日常", "沙雕视频", "搞笑动画", "笑到肚子疼",
+    ]
 
     picked: list[str] = []
     seen_families: set[str] = set()
@@ -247,11 +283,11 @@ def merge_tags(model_tags: list[str], max_tags: int, title: str = "") -> list[st
                 continue
             seen_families.add(fam)
         picked.append(n)
-        if len(picked) >= 2:
+        if len(picked) >= max(1, content_slots):
             break
 
     out = [BASE] + picked
-    for f in FIXED_POOL:
+    for f in pool:
         if len(out) >= max_tags:
             break
         if f not in out:

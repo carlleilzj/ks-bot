@@ -35,40 +35,44 @@ HOME_URL = "https://cp.kuaishou.com/profile"
 SNAPSHOT_PATH = DATA_DIR / "ks_income_snapshots.json"
 
 
-def _load_snapshots() -> list[dict]:
+def _load_snapshots(path: Path | None = None) -> list[dict]:
     try:
-        return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        return json.loads((path or SNAPSHOT_PATH).read_text(encoding="utf-8"))
     except Exception:
         return []
 
 
-def _save_snapshots(rows: list[dict]) -> None:
+def _save_snapshots(rows: list[dict], path: Path | None = None) -> None:
+    p = path or SNAPSHOT_PATH
     try:
-        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        p.parent.mkdir(parents=True, exist_ok=True)
         # 只保留最近 400 条，避免无限增长
-        SNAPSHOT_PATH.write_text(
+        p.write_text(
             json.dumps(rows[-400:], ensure_ascii=False, indent=1), encoding="utf-8")
     except Exception as e:
         log.warning("收益快照落盘失败：%s", e)
 
 
-def fetch_income(headless: bool = True) -> dict | None:
+def fetch_income(headless: bool = True,
+                 state_path: Path | str | None = None) -> dict | None:
     """打开发布页拿收益汇总。返回 {"income":float,"balance":float} 或 None。
 
+    state_path：多号时传对应登录态（默认 A 号 KS_STATE_PATH）。
     收益接口在创作者中心首页触发，因此先开首页再等待 XHR。
     """
     from playwright.sync_api import sync_playwright
     from ..publish.base import launch_chromium, new_context
 
-    if not Path(KS_STATE_PATH).exists():
-        log.warning("快手登录态不存在，跳过收益抓取")
+    sp = Path(state_path or KS_STATE_PATH)
+    if not sp.exists():
+        log.warning("快手登录态不存在（%s），跳过收益抓取", sp.name)
         return None
 
     result: dict = {}
 
     with sync_playwright() as pw:
         browser = launch_chromium(pw, headless=headless)
-        context = new_context(browser, KS_STATE_PATH)
+        context = new_context(browser, sp)
         page = context.new_page()
 
         def on_resp(r):
@@ -107,9 +111,13 @@ def fetch_income(headless: bool = True) -> dict | None:
     return result
 
 
-def record(headless: bool = True) -> dict | None:
-    """抓一次收益并追加快照。返回本次快照或 None。"""
-    got = fetch_income(headless=headless)
+def record(headless: bool = True, state_path: Path | str | None = None,
+           snapshot_path: Path | str | None = None) -> dict | None:
+    """抓一次收益并追加快照。返回本次快照或 None。
+
+    state_path / snapshot_path：多号各自一份（默认 A 号路径不变）。
+    """
+    got = fetch_income(headless=headless, state_path=state_path)
     if not got:
         return None
     snap = {
@@ -117,11 +125,12 @@ def record(headless: bool = True) -> dict | None:
         "income": got["income"],
         "balance": got["balance"],
     }
-    rows = _load_snapshots()
+    sp = Path(snapshot_path) if snapshot_path else SNAPSHOT_PATH
+    rows = _load_snapshots(sp)
     rows.append(snap)
-    _save_snapshots(rows)
-    log.info("收益快照已记录：累计 %.2f 元，可提现 %.2f 元",
-             snap["income"], snap["balance"])
+    _save_snapshots(rows, sp)
+    log.info("收益快照已记录（%s）：累计 %.2f 元，可提现 %.2f 元",
+             sp.name, snap["income"], snap["balance"])
     return snap
 
 

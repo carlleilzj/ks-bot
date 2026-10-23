@@ -638,7 +638,8 @@ def publish(
             #     重试无解时（平台侧任务下架/额度满）人工介入：
             #     去 App 重新收藏任务，或把 config.yaml 的 spark_task 设为 false。
             if spark_task:
-                attached = _attach_spark_task(page, prefer=spark_task_title)
+                attached = _attach_spark_task(page, prefer=spark_task_title,
+                                              state_path=state_path)
                 if not attached:
                     shot(page, "ks_spark_blocked")
                     raise SparkAttachError(
@@ -771,17 +772,32 @@ def pick_spark_title(titles: list[str], prefer: str = "", cursor: int = 0) -> tu
     return chosen, cursor + 1
 
 
-def _spark_rr_load() -> int:
+def _spark_sidecars(state_path: Path | str | None) -> tuple[Path, Path]:
+    """按登录态文件派生（星火轮换 cursor, 任务池缓存）两个伴生文件。
+
+    A 号（ks_state.json）沿用历史文件名 ks_spark_rr.json / ks_spark_pool.json，
+    双号改造不迁移不重置；其他号（如 ks2_state.json）按 stem 推导。
+    """
+    name = Path(state_path or KS_STATE_PATH).name
+    if name == "ks_state.json":
+        return DATA_DIR / "ks_spark_rr.json", DATA_DIR / "ks_spark_pool.json"
+    stem = Path(name).stem
+    return DATA_DIR / f"{stem}_rr.json", DATA_DIR / f"{stem}_pool.json"
+
+
+def _spark_rr_load(rr_path: Path | None = None) -> int:
+    p = rr_path or _spark_sidecars(None)[0]
     try:
-        return int(json.loads(SPARK_RR_PATH.read_text(encoding="utf-8")).get("i", 0) or 0)
+        return int(json.loads(p.read_text(encoding="utf-8")).get("i", 0) or 0)
     except Exception:
         return 0
 
 
-def _spark_rr_save(cursor: int) -> None:
+def _spark_rr_save(cursor: int, rr_path: Path | None = None) -> None:
+    p = rr_path or _spark_sidecars(None)[0]
     try:
-        SPARK_RR_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SPARK_RR_PATH.write_text(json.dumps({"i": cursor}), encoding="utf-8")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"i": cursor}), encoding="utf-8")
     except Exception:
         pass
 
@@ -991,9 +1007,12 @@ def _select_spark_option(page: Page, chosen: str) -> bool:
         return False
 
 
-def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
+def _attach_spark_task(page: Page, prefer: str = "",
+                       state_path: Path | str | None = None) -> str | None:
     """发布表单挂星火「关联变现任务」。
 
+    state_path 决定轮换 cursor / 任务池缓存写到哪个文件（多号隔离，
+    见 _spark_sidecars）；不传 = A 号默认路径。
     返回挂载成功的任务标题；返回 None 表示**未生效**（调用方必须阻断发布）。
     注意：本函数不再"失败不阻断"——星火挂载失败 = 白丢收益，必须停下。
     """
@@ -1065,11 +1084,13 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
                 from ..config import load_settings
                 _tg.send_text(load_settings(), text)
 
-            note_candidates(titles, notify=_notify)
+            note_candidates(titles, notify=_notify,
+                            pool_path=_spark_sidecars(state_path)[1])
         except Exception as e:
             log.debug("任务池变化检测失败（不影响发布）：%s", e)
 
-        chosen, nxt = pick_spark_title(titles, prefer=prefer, cursor=_spark_rr_load())
+        rr_path = _spark_sidecars(state_path)[0]
+        chosen, nxt = pick_spark_title(titles, prefer=prefer, cursor=_spark_rr_load(rr_path))
         if not chosen:
             log.warning("星火挂载失败：未能从 %d 个收藏任务中选出标题", len(titles))
             shot(page, "ks_spark_pick_fail")
@@ -1092,7 +1113,7 @@ def _attach_spark_task(page: Page, prefer: str = "") -> str | None:
             shot(page, "ks_spark_verify_fail")
             return None
 
-        _spark_rr_save(nxt)
+        _spark_rr_save(nxt, rr_path)
         page.wait_for_timeout(600)
         log.info("已挂星火变现任务（已回读校验）：%s", chosen)
         return chosen
