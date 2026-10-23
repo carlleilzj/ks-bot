@@ -104,6 +104,18 @@ def report_spark_task(base: str, s: Settings, task_id: int, platform: str,
         log.debug("星火任务名回报失败（不影响发布）：%s", e)
 
 
+def push_stats(base: str, s: Settings, platform: str, rows: list[dict]) -> dict | None:
+    """把抓到的播放量回传协调端落库（失败静默，返回 None）。"""
+    try:
+        with httpx.Client(timeout=60) as c:
+            r = c.post(f"{base}/api/stats", headers=_headers(s),
+                       json={"platform": platform, "stats": rows})
+            return _check(r, f"回传播放量 {platform}")
+    except Exception as e:
+        log.debug("播放量回传失败（不影响发布）：%s", e)
+        return None
+
+
 def report_audit(base: str, s: Settings, task_id: int, note: str, deleted: bool) -> None:
     with httpx.Client(timeout=30) as c:
         r = c.post(f"{base}/api/audit", headers=_headers(s),
@@ -347,14 +359,12 @@ _last_income_at: float = 0.0
 _scheduled_audits: list[float] = []
 
 
-def maybe_refresh_stats(s: Settings) -> None:
-    """周期性抓播放量回写库（供话题榜使用，失败静默）。
+def maybe_refresh_stats(s: Settings, base: str = "") -> None:
+    """周期性抓播放量，回传协调端落库（供话题榜使用，失败静默）。
 
-    架构约束（实测踩过）：抖音登录态在阿里云、published_at 记录在 HK B，
-    两库不互通。本函数跑在**有登录态的机器**上（阿里云 publish worker），
-    只抓数据；而 persist 匹配需要 published_at —— 登录态与库不在同一台时
-    匹配不上。所以策略是：本机库里有已发布记录才跑，否则跳过。
-    阿里云侧的回流由手动两段式（dump → HK B apply）补足。
+    架构约束（实测踩过）：抖音/快手登录态只在发布端（阿里云）新鲜，
+    published_at 只在协调端（德国）库里，两台各持一半。所以抓取在
+    本机、匹配落库在协调端，经 POST /api/stats 桥接。
     """
     global _last_stats_at
     now = time.time()
@@ -362,19 +372,12 @@ def maybe_refresh_stats(s: Settings) -> None:
         return
     _last_stats_at = now
 
-    from .db import Database
-    db = Database()
-    try:
-        n = db.conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE published_at IS NOT NULL"
-        ).fetchone()[0]
-    except Exception:
-        return
-    if not n:
-        log.debug("本机库无已发布记录（记录在 HK B），跳过播放量抓取")
+    if not base:
+        base = s.remote_api_url
+    if not base:
         return
 
-    from pathlib import Path
+    from dataclasses import asdict
     from .monitor import stats as stats_mod
     from .publish.base import launch_chromium, new_context, goto_with_retry
     from playwright.sync_api import sync_playwright
@@ -387,8 +390,6 @@ def maybe_refresh_stats(s: Settings) -> None:
             continue
         if pub.state_path.exists():
             targets.append((name, pub))
-    if not targets:
-        return
 
     refreshed = 0
     with sync_playwright() as p:
@@ -403,11 +404,14 @@ def maybe_refresh_stats(s: Settings) -> None:
                     goto_with_retry(page, url, timeout=60000)
                     got = (stats_mod.fetch_douyin_stats(page) if name == "douyin"
                            else stats_mod.fetch_kuaishou_stats(page))
-                    if got:
-                        res = stats_mod.persist(db, got, platform=name)
-                        refreshed += res["updated"]
                 finally:
                     browser.close()
+                if not got:
+                    continue
+                rows = [{k: v for k, v in asdict(st).items() if v is not None}
+                        for st in got]
+                r = push_stats(base, s, name, rows)
+                refreshed += int((r or {}).get("updated") or 0)
             except Exception as e:
                 log.debug("播放量抓取失败（%s，忽略）：%s", name, str(e)[:100])
     if refreshed:
@@ -527,7 +531,7 @@ def run_once(base: str, s: Settings) -> int:
             n += 1
             time.sleep(5)  # 平台间小间隔
     maybe_audit(base, s)
-    maybe_refresh_stats(s)
+    maybe_refresh_stats(s, base)
     maybe_refresh_spark_income(s)
     return n
 

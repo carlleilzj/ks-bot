@@ -1,9 +1,9 @@
 """LLM 文案生成：按平台 profile 生成各平台专属的标题/简介/标签（JSON）。
 
-IP 定位（2026-09 升级）：【无声治愈 / 纯享放松 / 默片搞笑】短视频专栏。
-核心要求：
-1. 标题固定以 IP 专栏标签开头（【无声治愈】/【无声小剧场】/【纯享放松】），打造极高粉丝辨识度。
-2. 严禁凭空编造无中生有的剧情（如做饭带娃写作业）；必须基于原英文/外文 Caption 与画面实际内容拟写。
+标题风格（2026-10-18 起）：9 月快手爆款那种短句笑点，不挂专栏前缀。
+实测【有点视频】上线后单条播放从百万掉到几百，而 372 万那条是
+「没声音却笑到停不下来 这画面太绝了」。
+严禁凭空编造无中生有的剧情（如做饭带娃写作业）；必须基于画面实际内容拟写。
 """
 
 from __future__ import annotations
@@ -19,9 +19,12 @@ from . import tag_quality
 
 log = logging.getLogger(__name__)
 
-# IP 专栏前缀定义（2026-09-19 起统一为固定前缀【有点视频】，He 指定）
-IP_PREFIX = "【有点视频】"
-IP_PREFIXES = [IP_PREFIX]
+# 2026-09-19 曾强制【有点视频】前缀。2026-10 播放从百万掉到几百后弃用：
+# 9 月爆款是裸短句（「没声音却笑到停不下来」），不是专栏标签。
+# 模型若仍写出这些前缀，校验层剥掉，不再补回去。
+LEGACY_PREFIXES = (
+    "【有点视频】", "【无声治愈】", "【无声小剧场】", "【纯享放松】",
+)
 
 # 口吻套话：这些是**说话方式**上的烂梗，继续封。
 # 注意：情绪化标签（#笑到肚子疼 / #无声也精彩 类）已按实测数据放开
@@ -49,8 +52,8 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
     "kuaishou": PlatformProfile(
         name="kuaishou", display_name="快手", max_title_len=40, max_tags=4,
         supports_category=True,
-        tone="亲切自然、治愈解压、幽默有趣，不用花哨网络黑话",
-        desc_hint="1~2 句话点出视频看点或温暖感悟，适合静音观看",
+        tone="风趣、诙谐、像朋友憋着笑转述，短、有钩子，不解释画面",
+        desc_hint="1~2 句话点出画面里真正发生的事，不要把标题再抄一遍",
     ),
     "douyin": PlatformProfile(
         name="douyin", display_name="抖音", max_title_len=55, max_tags=5,
@@ -69,7 +72,7 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
     ),
     "toutiao": PlatformProfile(
         name="toutiao", display_name="今日头条", max_title_len=30, max_tags=4,
-        tone="口语、有具体看点。标题含前缀硬限 30 字，前缀占 6 字，钩子只剩 24 字，必须更短",
+        tone="口语短句、有具体看点。标题硬限 30 字，不带专栏前缀",
         desc_hint="1~2 句话点出画面里真正发生的事，不要把标题再抄一遍",
     ),
 }
@@ -93,8 +96,8 @@ def _system_prompt(profile: PlatformProfile) -> str:
 
     banned_str = "、".join(f"「{p}」" for p in BANNED_PATTERNS[:10])
 
-    return f"""你是资深短视频专栏主理人，你的账号定位是【无声治愈 / 纯享放松 / 默片搞笑】精品视频专栏。
-特点：视频多为 AI 3D 动画、萌宠小动物剧情、静音幽默小短片，专为想要安静解压、放松心情的读者提供优质视觉内容。
+    return f"""你是快手搞笑动画账号的标题写手。素材多为 AI 3D 动画、萌宠小动物剧情、无对白的幽默短片。
+标题要像 2026 年 9 月打出过百万播放的那种短句，而不是专栏海报。
 
 【输入信息】
 你会拿到三份材料，**可信度从高到低**：
@@ -109,37 +112,42 @@ def _system_prompt(profile: PlatformProfile) -> str:
 3. 严禁无中生有！严禁捏造与画面无关的人类琐事（绝对禁止编造：做饭、带娃、写作业、婆媳、家庭主妇等无关剧情）。
 
 【标题规范（极其重要）】
-1. **固定前缀**：所有标题一律以「【有点视频】」开头，无例外。
-2. 前缀之后是一句**夸张、幽默风趣的钩子**，人设是「正在看视频憋笑/震惊，
-   恨不得抓着朋友衣袖让他赶紧看」的旁观众。要求：
-   - **夸而不假**：可以夸张，但夸张必须建立在**画面真实内容**上，不是空喊；
-   - **有具体看点**：钩子里必须能看出「谁 + 干了什么离谱/可爱/过分的事」，
-     纯情绪词（「太绝了」「好可爱」单独出现）等于没说；
-   - **留悬念**：把最炸的一幕咽住不说，用断点勾人；
-   - **口语化**：像弹幕/朋友转述，不像新闻标题；给小动物写拟人内心戏是好招。
-   - **每条必须不一样**：主角物种、动作、场景都要照实写。下面这些词因为
-     被用烂了，一律禁止出现在标题里：
+1. **不要专栏前缀**，也不要【】。标题就是一句能让人想点开的笑话。
+2. 先写笑点，不写旁白。一句里要有「谁 + 反差/误会/吃瘪」，把最炸的结果咽住半句当钩子。
+   只学口气，禁止照抄，必须换成这条画面里真实发生的事：
+   - 难怪充电这么慢，墙里那只仓鼠刚被踹醒
+   - 猎豹啃了半天，对方缩成球让它干生气
+   - 吉娃娃把肇事狗直接拎到家长面前
+   - 奶奶才带两天，孩子已经被喂成球了
+3. 要求：
+   - **短**：12~24 个字，最多两小句。像一句吐槽，不是剧情简介；
+   - **诙谐**：用拟人、反差、误会制造笑点，不要平铺「谁做了什么然后怎样」；
+   - **有钩子**：看完还想知道后面，不要把结局和评价都写完；
+   - **别用情绪垫句**。下面这些已经每条都在用，出现即失败：
+       没声音、笑到停不下来、太绝了、更上头、笑出腹肌、这画面、看得停不下来、
+       笑出声、停不下来
+     另外这些词也被用烂了，禁止：
        走位、翻车、滑跪、脸刹、天衣无缝、王者、帅不过、下一秒、自以为、
-       原地、打滑、起飞、六亲不认、残影
-     也不要用「它觉得/它以为/本以为」开头的句式（已占 22%）。
-     换个说法表达同样的意思，比如不说「翻车」说具体发生了什么。
+       原地、打滑、起飞、六亲不认、残影、有点视频
+     不要用「它觉得/它以为/本以为」开头。
 
-标题总字数严格不得超过 {profile.max_title_len} 字（含前缀）！
+标题总字数严格不得超过 {profile.max_title_len} 字！
 
 【严禁句式】
 严禁出现这些已被用烂的套话：{banned_str}，禁止以「姐妹们你们呢」等俗套口吻结尾。
 
-【话题（tags）—— 固定组合，无需发挥】
-话题已按账号数据表现固定（12.5 万爆款同款结构），你只需要原样输出：
-  tags 里固定填这 4 个：无声视频、搞笑日常、沙雕视频、搞笑动画
-（发布时会自动按平台上限截断/补齐，你照抄即可，不必自己设计话题。）
+【话题（tags）—— 按内容给，不照抄固定组合】
+给 2~3 个**贴合这条画面内容**的话题词，每个不超过 8 个字，
+主角是什么就写什么（如「萌宠日常」「动物搞笑」「沙雕瞬间」）。
+每条不一样；发布端会自动带上账号基础话题「无声视频」并按平台补齐数量，
+你只负责内容相关的那几个。
 
 【输出格式】
 只输出一个合法的 JSON 对象，不要输出任何代码块标记、思考过程或多余说明：
 {{
-  "title": "【有点视频】+ 夸张幽默的钩子（不超过 {profile.max_title_len} 字）",
+  "title": "一句诙谐短钩子，不带【】、不带「没声音/太绝了」垫句（不超过 {profile.max_title_len} 字）",
   "description": "{profile.desc_hint}（1~2句话，真实呼应视频内容）",
-  "tags": ["无声视频", "搞笑日常", "沙雕视频", "搞笑动画"],
+  "tags": ["贴合画面内容的话题词1", "话题词2"],
   {category_rule}
 }}
 
@@ -175,32 +183,16 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     if not title:
         raise ValueError("title 为空")
 
-    # 规范化：确保前缀规范
-    matched_prefix = None
-    for p in IP_PREFIXES:
-        if title.startswith(p):
-            matched_prefix = p
-            break
-    if not matched_prefix:
-        # 模型漏写括号或用了旧前缀 → 统一归一到【有点视频】
-        for clean_p in ("有点视频", "无声治愈", "无声小剧场", "纯享放松"):
-            if title.startswith(clean_p) or title.startswith(f"【{clean_p}】"):
-                body = title.split("】", 1)[-1] if "】" in title[:12] else title[len(clean_p):]
-                title = IP_PREFIX + body
-                matched_prefix = IP_PREFIX
-                break
-        if not matched_prefix:
-            title = IP_PREFIX + title
-    if not title.startswith(IP_PREFIX):
-        title = IP_PREFIX + title.lstrip("【】")
-
+    title = _strip_legacy_prefix(title)
+    if not title:
+        raise ValueError("title 为空")
     title = title[:profile.max_title_len]
 
     description = str(obj.get("description", "")).strip()[:400]
     # 简介不要再抄一遍标题（抖音标题框 + 简介框会叠成重复句子）
     if description.startswith(title):
         description = description[len(title):].lstrip(" \n，。；;:：")
-    hook = title[len(IP_PREFIX):].strip() if title.startswith(IP_PREFIX) else ""
+    hook = title.strip()
     if hook and len(hook) >= 6 and description.startswith(hook):
         description = description[len(hook):].lstrip(" \n，。；;:：")
     tags_raw = obj.get("tags") or []
@@ -213,18 +205,12 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
         tags.insert(0, "无声视频")
     tags = [t for t in tags if t]
 
-    # 话题策略（2026-09-19 He 指定）：固定组合
-    # 【无声视频 + 搞笑日常 + 沙雕视频 + 搞笑动画/笑到肚子疼】。
-    # 依据：12.5 万爆款用的就是 搞笑日常+沙雕视频+无声高能 组合，
-    # 搞笑系平均播放碾压纯享系（20,833 vs 2,463）。AI 生成的 tags
-    # 不再参与最终输出 —— 固定组合由 enforce_diversity(fixed_tags) 直接返回。
-    # 快手 max_tags=4：无声视频+搞笑日常+沙雕视频+搞笑动画
-    # 恰好放下；笑到肚子疼 在抖音档（max_tags=5）作为第 5 个加入。
-    FIXED_TAGS = ["搞笑日常", "沙雕视频", "搞笑动画", "笑到肚子疼"]
-    tags = tag_quality.enforce_diversity(
-        tags, profile.max_tags, title=title, base_tag="无声视频",
-        fixed_tags=FIXED_TAGS,
-    )
+    # 话题策略（2026-10-23 改）：锚 1 个 + AI 内容话题 ≤2 + 固定池补齐。
+    # 此前固定组合（无声视频+搞笑日常+沙雕视频+搞笑动画）每条完全一样：
+    # 话题没有方差 → 回流的播放数据永远无法归因到话题上。
+    # 现在让 AI 按画面选内容话题（家族去重防近义词堆叠），
+    # 固定池只在数量不足时兜底，账号基础曝光池保持稳定。
+    tags = merge_tags(tags, profile.max_tags, title=title)
 
     category = str(obj.get("category", "")).strip()
     if profile.supports_category and categories:
@@ -235,6 +221,42 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
         category = ""
 
     return {"title": title, "description": description, "tags": tags, "category": category}
+
+
+def merge_tags(model_tags: list[str], max_tags: int, title: str = "") -> list[str]:
+    """话题组合：锚 1 个 + AI 内容话题 ≤2 + 固定池补齐。
+
+    「无声视频」始终在第 1 位（账号辨识度）。AI 给的内容话题按家族去重
+    后最多占 2 席——既保留固定组合验证过的基础池，又让每条视频有
+    内容相关的话题方差，播放回流后才能比较出哪个话题真的带流量。
+    固定池顺序即优先级，沿用 2026-09 实测的搞笑系组合。
+    """
+    from .tag_quality import tag_family
+    BASE = "无声视频"
+    FIXED_POOL = ["搞笑日常", "沙雕视频", "搞笑动画", "笑到肚子疼"]
+
+    picked: list[str] = []
+    seen_families: set[str] = set()
+    for t in model_tags or []:
+        n = re.sub(r"\s+", "", (t or "").lstrip("#").strip())
+        if not n or n == BASE or n in picked:
+            continue
+        fam = tag_family(n)
+        if fam:
+            if fam in seen_families:
+                continue
+            seen_families.add(fam)
+        picked.append(n)
+        if len(picked) >= 2:
+            break
+
+    out = [BASE] + picked
+    for f in FIXED_POOL:
+        if len(out) >= max_tags:
+            break
+        if f not in out:
+            out.append(f)
+    return out[:max_tags]
 
 
 def _check_hallucination(title: str, desc: str) -> list[str]:
@@ -255,15 +277,35 @@ def _check_hallucination(title: str, desc: str) -> list[str]:
 CLICHE_WORDS = [
     "走位", "翻车", "滑跪", "脸刹", "天衣无缝", "王者",
     "帅不过", "下一秒", "自以为", "原地", "打滑", "起飞",
-    "六亲不认", "残影",
+    "六亲不认", "残影", "有点视频",
+    # 2026-10-20：提示词里的例句被模型当成每条都要接的尾巴
+    "没声音", "笑到停不下来", "太绝了", "更上头", "笑出腹肌",
+    "这画面", "看得停不下来", "停不下来",
 ]
 CLICHE_PREFIXES = ["它觉得", "它以为", "本以为"]
+
+
+def _strip_legacy_prefix(title: str) -> str:
+    """去掉已停用的专栏前缀，标题保持 9 月那种裸短句。"""
+    t = (title or "").strip()
+    for p in LEGACY_PREFIXES:
+        if t.startswith(p):
+            t = t[len(p):].strip()
+            break
+    else:
+        for bare in ("有点视频", "无声治愈", "无声小剧场", "纯享放松"):
+            if t.startswith(bare):
+                t = t[len(bare):].lstrip("】 ：:，,")
+                break
+    return t.strip()
 
 
 def _check_cliche(title: str) -> list[str]:
     """拦截被用烂的标题套话，返回命中的词表（空表=通过）。"""
     hits = [w for w in CLICHE_WORDS if w in title]
-    hook = title[len(IP_PREFIX):].strip() if title.startswith(IP_PREFIX) else title
+    if "【" in title[:8]:
+        hits.append("专栏前缀")
+    hook = _strip_legacy_prefix(title)
     for p in CLICHE_PREFIXES:
         if hook.startswith(p):
             hits.append(f"开头「{p}」")
@@ -367,9 +409,9 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
                             profile.name, attempt, last_err, result["title"])
                 messages.append({"role": "user", "content": (
                     f"上次标题用了这些被用烂的词：{last_err}。"
-                    f"请重新写：直接说**这个画面里具体发生了什么**"
-                    f"（主角是什么动物、在做什么动作、结果怎样），"
-                    f"不要用那些套话词。标题：{result['title']}"
+                    f"重写一句：诙谐、好懂、12 到 24 字，用反差或误会当钩子，"
+                    f"不要平铺剧情，也不要加「没声音 / 太绝了 / 笑到停不下来」这种垫句。"
+                    f"上次标题：{result['title']}"
                 )})
                 continue
 

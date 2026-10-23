@@ -50,6 +50,35 @@ def test_copy_validate_category_fuzzy():
     assert out["category"] == "美食"
 
 
+# ---------------------------------------------------------------------------
+# 话题组合：锚 + AI 内容话题 + 固定池补齐（2026-10-23）
+# ---------------------------------------------------------------------------
+
+def test_merge_tags_keeps_anchor_and_content_slots():
+    from bot.ai.copywriter import merge_tags
+    out = merge_tags(["萌宠日常", "动物搞笑", "沙雕瞬间"], 4)
+    assert out[0] == "无声视频"
+    assert "萌宠日常" in out and "动物搞笑" in out
+    assert len(out) == 4
+    # 固定池补齐：内容位占 2 个后还剩 1 个位给池子
+    assert "搞笑日常" in out
+
+
+def test_merge_tags_dedupes_same_family():
+    """同家族近义词只留第一个，不堆叠。"""
+    from bot.ai.copywriter import merge_tags
+    out = merge_tags(["纯享放松", "视觉纯享", "治愈瞬间"], 4)
+    assert "纯享放松" in out
+    assert "视觉纯享" not in out
+
+
+def test_merge_tags_falls_back_to_fixed_pool():
+    """AI 没给内容话题时，回固定组合，条数补满。"""
+    from bot.ai.copywriter import merge_tags
+    out = merge_tags([], 4)
+    assert out == ["无声视频", "搞笑日常", "沙雕视频", "搞笑动画"]
+
+
 def test_chromium_launch_env_strips_proxy(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
     monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
@@ -150,59 +179,38 @@ def test_publish_gate_window_and_limit(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 标题固定前缀【有点视频】（2026-09-19 He 指定，替代旧三前缀体系）
+# 标题不再挂专栏前缀（2026-10-18：回到 9 月短句笑点）
 # ---------------------------------------------------------------------------
 
-def test_title_prefix_fixed_when_correct():
+def test_title_keeps_bare_punchline():
     profile = PLATFORM_PROFILES["kuaishou"]
-    out = _validate({"title": "【有点视频】小家伙憋了半天气，下一秒全场最佳",
+    out = _validate({"title": "没声音却笑到停不下来 这画面太绝了",
                      "description": "d", "tags": ["无声视频", "神反转"],
                      "category": ""}, [], profile)
-    assert out["title"].startswith("【有点视频】")
+    assert out["title"] == "没声音却笑到停不下来 这画面太绝了"
+    assert "【" not in out["title"]
 
 
-def test_title_prefix_migrates_legacy_prefixes():
-    """旧三前缀（无声治愈/无声小剧场/纯享放松）一律迁移到【有点视频】。"""
+def test_title_strips_legacy_prefixes():
+    """旧专栏前缀一律剥掉，不再改写成另一个前缀。"""
     profile = PLATFORM_PROFILES["kuaishou"]
-    for legacy in ("【无声治愈】暴风雨里互相依偎的小家伙",
-                   "【无声小剧场】两只小家伙抢玉米",
-                   "【纯享放松】安静看完太解压"):
-        out = _validate({"title": legacy, "description": "d",
+    cases = {
+        "【有点视频】没声音却笑到停不下来": "没声音却笑到停不下来",
+        "【无声治愈】暴风雨里互相依偎的小家伙": "暴风雨里互相依偎的小家伙",
+        "【无声小剧场】两只小家伙抢玉米": "两只小家伙抢玉米",
+        "【纯享放松】安静看完太解压": "安静看完太解压",
+        "有点视频没声音也能笑出腹肌": "没声音也能笑出腹肌",
+    }
+    for raw, expect in cases.items():
+        out = _validate({"title": raw, "description": "d",
                          "tags": ["无声视频"], "category": ""}, [], profile)
-        assert out["title"].startswith("【有点视频】"), legacy
-
-
-def test_title_prefix_migrates_bare_prefix():
-    """模型漏写【】也要能迁移。"""
-    profile = PLATFORM_PROFILES["kuaishou"]
-    out = _validate({"title": "无声小剧场两只小家伙抢玉米，下一秒翻车",
-                     "description": "d", "tags": ["无声视频"], "category": ""},
-                    [], profile)
-    assert out["title"].startswith("【有点视频】")
-
-
-def test_title_prefix_added_when_missing():
-    """完全没有前缀时自动补【有点视频】。"""
-    profile = PLATFORM_PROFILES["kuaishou"]
-    out = _validate({"title": "它守了这颗蛋整整一夜",
-                     "description": "d", "tags": ["无声视频"], "category": ""},
-                    [], profile)
-    assert out["title"].startswith("【有点视频】")
-
-
-def test_title_prefix_no_double_prefix():
-    """已经是【有点视频】时绝不出现双重前缀。"""
-    profile = PLATFORM_PROFILES["kuaishou"]
-    out = _validate({"title": "【有点视频】正常标题",
-                     "description": "d", "tags": ["无声视频"], "category": ""},
-                    [], profile)
-    assert out["title"].count("【有点视频】") == 1
+        assert out["title"] == expect, raw
 
 
 def test_validate_strips_title_from_description():
     """简介抄标题时校验层先砍掉，避免抖音双框叠句。"""
     profile = PLATFORM_PROFILES["douyin"]
-    title = "【有点视频】它自以为走位天衣无缝，直到下一秒啪唧摔出原形"
+    title = "它自以为走位天衣无缝，直到下一秒啪唧摔出原形"
     out = _validate({"title": title, "description": title + "全程偷感拉满。",
                      "tags": ["无声视频"], "category": ""}, [], profile)
     assert not out["description"].startswith(title)
@@ -210,19 +218,19 @@ def test_validate_strips_title_from_description():
 
 
 def test_strip_leading_title_exact():
-    title = "【有点视频】它迈着六亲不认的步伐，结果下一秒帅不过三秒"
+    title = "它迈着六亲不认的步伐，结果下一秒帅不过三秒"
     desc = title + " 走出了最神气的姿势。"
     assert _strip_leading_title(title, desc) == "走出了最神气的姿势。"
 
 
 def test_strip_leading_title_hook_only():
-    title = "【有点视频】它迈着六亲不认的步伐"
+    title = "它迈着六亲不认的步伐"
     desc = "它迈着六亲不认的步伐，下一刻却当场破功。"
     assert _strip_leading_title(title, desc) == "下一刻却当场破功。"
 
 
 def test_strip_leading_title_keeps_unique_desc():
-    title = "【有点视频】走位翻车"
+    title = "走位翻车"
     desc = "全程无声却浑身是戏。"
     assert _strip_leading_title(title, desc) == desc
 
@@ -272,30 +280,35 @@ def test_build_transform_bad_range_falls_back():
 # ---------------------------------------------------------------------------
 
 def test_cliche_catches_next_second():
-    assert _check_cliche("【有点视频】本以为是个王者，下一秒直接翻车")
+    assert _check_cliche("本以为是个王者，下一秒直接翻车")
+
+
+def test_cliche_catches_column_prefix():
+    assert "专栏前缀" in _check_cliche("【有点视频】没声音却笑到停不下来")
 
 
 def test_cliche_catches_all_banned_words():
     for w in ("走位", "翻车", "滑跪", "脸刹", "天衣无缝", "王者",
               "帅不过", "下一秒", "自以为", "原地", "打滑", "起飞"):
-        assert _check_cliche(f"【有点视频】它{w}了"), w
+        assert _check_cliche(f"它{w}了"), w
 
 
 def test_cliche_catches_bad_opening():
-    assert any("开头" in h for h in _check_cliche("【有点视频】它觉得自己藏得很好"))
-    assert any("开头" in h for h in _check_cliche("【有点视频】它以为没人看见"))
-    assert any("开头" in h for h in _check_cliche("【有点视频】本以为稳了"))
+    assert any("开头" in h for h in _check_cliche("它觉得自己藏得很好"))
+    assert any("开头" in h for h in _check_cliche("它以为没人看见"))
+    assert any("开头" in h for h in _check_cliche("本以为稳了"))
 
 
 def test_cliche_passes_clean_title():
-    """照实描述画面的标题必须放行。"""
-    assert _check_cliche("【有点视频】蜥蜴和小蛇在丛林里赛跑，半路杀出个河马") == []
-    assert _check_cliche("【有点视频】鬣狗滚成球冲下悬崖，青蛙看傻了") == []
+    """带钩子的短句必须放行，情绪垫句不行。"""
+    assert _check_cliche("难怪充电这么慢，墙里那只仓鼠刚被踹醒") == []
+    assert _check_cliche("猎豹啃了半天，对方缩成球让它干生气") == []
+    assert _check_cliche("没声音却笑到停不下来 这画面太绝了")
 
 
 def test_cliche_allows_bad_word_mid_sentence():
     """套话词在句中一样拦——它们是词，不是句式。"""
-    hits = _check_cliche("【有点视频】这波走位我给满分")
+    hits = _check_cliche("这波走位我给满分")
     assert "走位" in hits
 
 
@@ -531,7 +544,7 @@ def test_persist_handles_corrupt_old_file(tmp_path):
 
 
 def test_toutiao_registered_and_title_capped():
-    """头条进默认发布列表，标题硬限 30 字，前缀保留。"""
+    """头条标题硬限 30 字，不再保留专栏前缀。"""
     from bot.publish import get_publisher
     from bot.publish.toutiao import (
         TITLE_LIMIT,
@@ -547,11 +560,11 @@ def test_toutiao_registered_and_title_capped():
 
     profile = PLATFORM_PROFILES["toutiao"]
     assert profile.max_title_len == TITLE_LIMIT == 30
-    long_title = "【有点视频】" + "草地里捡到一只摔懵的小胖龙它居然还在装没事啊真的离谱"
+    long_title = "草地里捡到一只摔懵的小胖龙它居然还在装没事啊真的离谱没声音也笑出腹肌"
     assert len(long_title) > 30
     fitted = fit_title(long_title)
     assert len(fitted) == 30
-    assert fitted.startswith("【有点视频】")
+    assert "【" not in fitted
 
     out = _validate(
         {"title": long_title, "description": long_title, "tags": [], "category": "忽略"},
@@ -559,7 +572,7 @@ def test_toutiao_registered_and_title_capped():
         profile,
     )
     assert len(out["title"]) <= 30
-    assert out["title"].startswith("【有点视频】")
+    assert not out["title"].startswith("【")
     assert out["category"] == ""
     assert "无声视频" in out["tags"]
     assert len(out["tags"]) <= 4

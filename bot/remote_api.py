@@ -156,6 +156,43 @@ class RemoteApi:
         log.info("[spark] task %d 挂载任务已记录：%s", task_id, spark_task)
         return {"ok": True}
 
+    # ---------- 播放量回流（发布端抓 → 协调端落库） ----------
+
+    def stats_ingest(self, data: dict) -> dict:
+        """发布端回传作品播放数据，persist 进 tasks 供话题榜/归因使用。
+
+        登录态只在发布端新鲜，published_at 只在协调端库里——两台机器
+        各持一半，抓取在发布端、匹配在本端，靠这个端点桥起来。
+        """
+        from .monitor.stats import WorkStat, persist as persist_stats
+        platform = str(data.get("platform") or "").strip()
+        rows = data.get("stats") or []
+        if not (platform and isinstance(rows, list)):
+            return {"ok": False, "error": "platform/stats required"}
+        stats = []
+        for r in rows[:200]:
+            if not isinstance(r, dict):
+                continue
+            pc = r.get("play_count")
+            if not isinstance(pc, int) or pc <= 0:
+                continue
+            tags = r.get("tags") or []
+            if not isinstance(tags, list):
+                tags = []
+            stats.append(WorkStat(
+                published_at=str(r.get("published_at") or ""),
+                play_count=pc,
+                like_count=r.get("like_count") if isinstance(r.get("like_count"), int) else None,
+                tags=[str(t)[:12] for t in tags[:10]],
+                title_hint=str(r.get("title_hint") or "")[:80],
+            ))
+        if not stats:
+            return {"ok": False, "error": "no valid rows"}
+        res = persist_stats(self.db, stats, platform=platform)
+        if res.get("updated"):
+            log.info("[stats] %s 播放回流：%d 条落库", platform, res["updated"])
+        return {"ok": True, **res}
+
     # ---------- 远程登录指令（TG /login → 协调端落标记 → 发布端取走执行） ----------
 
     def set_login_request(self, platform: str) -> dict:
@@ -473,6 +510,14 @@ class RemoteApi:
                     try:
                         self._send_json(200, api.set_login_request(
                             str(data.get("platform") or "")))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
+                if parsed.path == "/api/stats":
+                    # 发布端回传平台侧播放量（登录态在发布端，库在协调端，
+                    # 中间靠这个端点桥接）→ persist 进本库供话题榜归因
+                    try:
+                        self._send_json(200, api.stats_ingest(data))
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return
