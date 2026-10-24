@@ -79,16 +79,27 @@ class TelegramListener(threading.Thread):
         ]):
             log.info("TG 命令菜单已注册：/login /help /start")
         telegram.notify_info(self.s, "🎧 投链监听已启动\n直接发视频链接给我即可（IG/YouTube/Facebook/TikTok 等）")
+        # 解析重试放独立线程：extract_meta 是同步网络请求（单条可达几十秒），
+        # 若在 poll 循环里跑，期间按钮回调全部排队，等处理时 answerCallbackQuery
+        # 已过期（TG 约 15s 上限）→ 按钮转圈半天、toast 丢失（2026-10-25 实测）。
+        retry_t = threading.Thread(target=self._retry_loop, name="tg-resolve-retry",
+                                   daemon=True)
+        retry_t.start()
         while not self._stop.is_set():
             try:
                 self._poll_once()
             except Exception as e:
                 log.exception("TG 监听异常，30s 后重试：%s", e)
                 time.sleep(30)
+
+    def _retry_loop(self) -> None:
+        """后台排空到期的解析重试项（慢网络操作，不阻塞按钮回调）。"""
+        while not self._stop.is_set():
             try:
                 self._retry_due_resolves()
             except Exception as e:
-                log.debug("\u89e3\u6790\u91cd\u8bd5\u5904\u7406\u5f02\u5e38\uff1a%s", e)
+                log.debug("解析重试处理异常：%s", e)
+            self._stop.wait(20)
 
     def _retry_due_resolves(self, limit: int = 5) -> int:
         """排空到期的解析重试项。成功入流水线，失败按指数退避再排。"""
@@ -185,7 +196,10 @@ class TelegramListener(threading.Thread):
             time.sleep(5)
             return
 
-        for upd in data.get("result", []):
+        # 同批更新里按钮回调优先：投链消息的处理含 extract_meta（秒级网络
+        # 请求），排前面会把同批的回调拖过 answerCallbackQuery 的 ~15s 上限
+        for upd in sorted(data.get("result", []),
+                          key=lambda u: 0 if u.get("callback_query") else 1):
             self._offset = upd["update_id"] + 1
             self._handle_update(upd)
 
