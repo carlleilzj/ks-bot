@@ -379,9 +379,10 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     # 画面描述放在最前：它是唯一能反映视频真实内容的输入。
     # 实测（2026-09-27）：caption 常是引流话术、transcript 92% 为空，
     # 只靠这两样时模型会照抄 system prompt 里的示例词。
-    content_block = ""
-    if content and content.get("summary"):
-        content_block = (
+    def _content_block() -> str:
+        if not (content and content.get("summary")):
+            return ""
+        return (
             f"【画面实际内容（视觉模型逐帧看片所得，以此为准）】\n"
             f"主角：{content.get('subject') or '未知'}\n"
             f"动作：{content.get('action') or '未知'}\n"
@@ -390,42 +391,52 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
             f"看点：{content.get('summary')}\n\n"
         )
 
-    user_content = (
-        content_block
-        + f"【视频来源文案（仅取剧情线索，忽略引流话术与话题标签）】\n"
-        f"{caption.strip() or '（无外文简介）'}\n\n"
-        f"【语音转录文本】\n{raw or '（视频无对白/无人声，纯画面叙事）'}\n\n"
-    )
     # 动态话题榜：把回流播放量算出的 Top-N 注入 prompt（每次生成现查现注入）。
     # 榜单为空（新库/没抓过数据）时返回空串，自然跳过 —— 数据回流是增强不是依赖。
+    hot_block = ""
     try:
         from ..db import Database
         from .hot_tags import top_tags, format_for_prompt
         ranked = top_tags(Database(), min_play=500, limit=10,
                           exclude={"无声视频"})
         hot_block = format_for_prompt(ranked)
+    except Exception as e:
+        # 榜单失败绝不阻塞生成 —— 打日志后按无榜单处理
+        log.debug("话题榜注入跳过：%s", str(e)[:100])
+
+    cap_full = caption.strip() or "（无外文简介）"
+
+    def _build_user(with_content: bool, cap: str) -> str:
+        uc = (
+            (_content_block() if with_content else "")
+            + f"【视频来源文案（仅取剧情线索，忽略引流话术与话题标签）】\n"
+            f"{cap}\n\n"
+            f"【语音转录文本】\n{raw or '（视频无对白/无人声，纯画面叙事）'}\n\n"
+        )
         if hot_block:
-            user_content += (
+            uc += (
                 f"\n\n【近期实测高播放话题榜（来自本账号真实数据，动态更新）】\n"
                 f"{hot_block}\n"
                 f"以上话题已被验证能进对应流量池。你可以直接选用其中与视频内容"
                 f"相符的（相符才用，硬凑会伤账号），也可以用新的长尾词，"
                 f"但必须遵守上面的多样性硬要求。\n"
             )
-    except Exception as e:
-        # 榜单失败绝不阻塞生成 —— 打日志后按无榜单处理
-        log.debug("话题榜注入跳过：%s", str(e)[:100])
-
-    if profile.supports_category and categories:
-        user_content += f"【{profile.display_name}可选分区列表】\n{'、'.join(categories)}"
-    else:
-        user_content += f"【发布平台】\n{profile.display_name}（无分区，category 输出空字符串）"
+        if profile.supports_category and categories:
+            uc += f"【{profile.display_name}可选分区列表】\n{'、'.join(categories)}"
+        else:
+            uc += f"【发布平台】\n{profile.display_name}（无分区，category 输出空字符串）"
+        return uc
 
     client = _client(s)
     sys_prompt = _system_prompt(profile)
+    # 降级阶梯（应对上游安全过滤返回空 choices，2026-10-24 实测：
+    # 女性生活号素材的画面描述如「女子躺在床上」会被 Gemini 拦，
+    # HTTP 200 秒回零内容；探针结果有缓存，重试发同一段文本必然再挂）：
+    #   第 1 次完整输入 → 第 2 次去掉画面描述 → 第 3 次连外文简介也略掉
+    degrade = 0
     messages = [
         {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": user_content},
+        {"role": "user", "content": _build_user(True, cap_full)},
     ]
 
     last_err = ""
@@ -438,8 +449,16 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
             # 上游（中转/内容审核）可能返回空 choices，直接取 [0] 会抛
             # "list index out of range" —— 完全看不出是内容被拦还是接口抽风。
             if not getattr(resp, "choices", None):
-                last_err = "接口返回空 choices（多为内容审核拦截或上游限流）"
+                last_err = "接口返回空 choices（上游安全过滤或限流）"
                 log.warning("[%s] 第 %d 次：%s", profile.name, attempt, last_err)
+                degrade += 1
+                cap = cap_full if degrade < 2 else "（外文简介已略）"
+                messages = [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": _build_user(False, cap)},
+                ]
+                if degrade >= 2:
+                    log.warning("[%s] 已降级：去画面描述+略外文简介重试", profile.name)
                 time.sleep(2)
                 continue
             content = resp.choices[0].message.content or ""
