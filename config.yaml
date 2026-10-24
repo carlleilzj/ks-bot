@@ -85,7 +85,7 @@ platforms:
   kuaishou2:
     enabled: true
     default: false              # 只有显式 @快手2 才发，绝不占默认队列
-    daily_limit: 3              # 冷启动期日限 3（A 号全局 5 不受影响）
+    daily_limit: 5              # 与 A 号相同（A 号走全局 publish.daily_limit=5）
     spark_task: false           # B 号 App 里收藏星火任务后再改 true
     anchors:
       声明: "内容由AI生成"
