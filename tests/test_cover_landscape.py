@@ -110,3 +110,46 @@ def test_transform_defaults_has_all_keys():
     for k in ("crop_pct", "zoom_pct", "hflip_prob", "hue_deg", "sat",
               "bright", "contrast", "fps", "tempo", "crf"):
         assert k in TRANSFORM_DEFAULTS
+
+
+# ---------------------------------------------------------------------------
+# 暗封面防线（2026-10-25：一条黑屏封面上线）
+# ---------------------------------------------------------------------------
+
+def test_rescue_dark_cover_replaces_when_dark(tmp_path, monkeypatch):
+    """封面 luma 低于阈值 → 现场抽帧替换。"""
+    from bot.publish import kuaishou as ks
+    from bot.media import ffmpeg as ff
+
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x" * 10)
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"c" * 10)
+    rescued = tmp_path / "cover.rescue.jpg"
+
+    lumas = {str(cover): 12.0, str(rescued): 80.0}
+    monkeypatch.setattr(ff, "mean_luma", lambda p: lumas.get(str(p)))
+
+    def fake_run(cmd, timeout=0):
+        rescued.write_bytes(b"r" * 9999)   # 模拟 ffmpeg 抽帧成功
+
+    monkeypatch.setattr(ff, "_run", fake_run)
+    monkeypatch.setattr(ff, "_ffmpeg", lambda: "ffmpeg")
+
+    out = ks.rescue_dark_cover(cover, video)
+    assert out == rescued
+
+
+def test_rescue_dark_cover_keeps_bright_cover(tmp_path, monkeypatch):
+    """亮封面不动，不触发抽帧。"""
+    from bot.publish import kuaishou as ks
+    from bot.media import ffmpeg as ff
+
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"c" * 10)
+    called = []
+    monkeypatch.setattr(ff, "mean_luma", lambda p: 90.0)
+    monkeypatch.setattr(ff, "_run", lambda *a, **k: called.append(1))
+    out = ks.rescue_dark_cover(cover, tmp_path / "v.mp4")
+    assert out == cover
+    assert not called

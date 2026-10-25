@@ -635,9 +635,9 @@ def publish(
             if category:
                 _select_category(page, category)
 
-            # 5. 上传自定义封面（可选，失败不阻断）
+            # 5. 上传自定义封面（可选，失败不阻断；过暗封面先现场换帧）
             if cover and Path(cover).exists():
-                _upload_cover(page, Path(cover))
+                _upload_cover(page, rescue_dark_cover(Path(cover), Path(video)))
 
             # 5.5 挂星火「关联变现任务」（需 App 先收藏；失败**阻断发布**）
             #     与分区/封面不同，星火挂载失败 = 作品拿不到奖金池收益，
@@ -1133,6 +1133,48 @@ def _attach_spark_task(page: Page, prefer: str = "",
         except Exception:
             pass
         return None
+
+
+# 封面过暗阈值：低于此值发布前现场换帧（与 cover_pick.DARK_COVER_LUMA 一致）
+DARK_COVER_LUMA = 26.0
+
+
+def rescue_dark_cover(cover: Path | None, video: Path) -> Path | None:
+    """发布端兜底：封面过暗 → 从视频现抽代表帧替换。
+
+    协调端选优已过滤暗帧，这里是第二道防线（覆盖：旧任务缓存封面、
+    选优降级、上传文件损坏等漏网情形）。任何失败都返回原封面，不阻断发布。
+    依赖 ffmpeg 二进制（发布端本就装有 /usr/bin/ffmpeg）。
+    """
+    try:
+        from ..media.ffmpeg import mean_luma, _ffmpeg, _run  # noqa: SLF001
+    except Exception:
+        return cover
+    try:
+        if cover is None:
+            return None
+        cover = Path(cover)
+        y = None
+        if cover.exists():
+            y = mean_luma(cover)
+            if y is None or y >= DARK_COVER_LUMA:
+                return cover
+            log.warning("封面过暗（luma=%.1f），发布前从视频重抽代表帧", y)
+        out = cover.with_suffix(".rescue.jpg")
+        # thumbnail 滤镜：每 200 帧里选信息量最大的一帧（比中段盲截好）
+        _run([_ffmpeg(), "-y", "-i", str(video),
+              "-vf", "thumbnail=200", "-frames:v", "1", "-q:v", "2", str(out)],
+             timeout=120)
+        if out.exists() and out.stat().st_size > 2500:
+            y2 = mean_luma(out)
+            if y2 is None or y2 >= DARK_COVER_LUMA or (y is not None and y2 > y):
+                log.info("暗封面已替换：luma %s → %s", y, y2)
+                return out
+            log.warning("代表帧仍暗（luma=%s），按原封面发布", y2)
+        return cover
+    except Exception as e:
+        log.debug("暗封面替换失败（按原封面发布）：%s", str(e)[:100])
+        return cover
 
 
 def _upload_cover(page: Page, cover: Path) -> None:

@@ -28,6 +28,11 @@ log = logging.getLogger(__name__)
 # 候选帧数量：6 帧覆盖 10%~90% 时间轴，兼顾信息与调用成本
 N_CANDIDATES = 6
 
+# 封面「过暗」阈值：比 ffmpeg.is_black_frame 的 18 宽——夜晚/森林素材常有
+# luma 20~26 的近黑帧，过黑帧检测但发出去就是黑封面（2026-10-25 实测有
+# 一条黑屏封面上线）。封面专用此更严阈值，帧抽取的黑帧过滤维持 18 不变。
+DARK_COVER_LUMA = 26.0
+
 _SCORE_PROMPT = """你是短视频封面评审。下面是同一条视频按时间顺序均匀抽取的 %d 帧（第 1 张对应约 10%% 处，最后 1 张约 90%% 处）。
 
 请给每一帧打封面适用分（0~10，可一位小数），三个维度各占 1/3：
@@ -61,7 +66,12 @@ def _extract_candidates(video: Path, work_dir: Path, sc: str) -> list[Path]:
         t = lo + step * i
         f = work_dir / f"{sc}_cand{i}.jpg"
         if f.exists():
-            frames.append(f)
+            # 缓存帧同样过黑帧检测：重试任务会复用旧候选文件，
+            # 不复查的话旧黑帧会混进候选（2026-10-25 补漏）
+            if not ffmpeg.is_black_frame(f):
+                frames.append(f)
+            else:
+                log.debug("[%s] 缓存候选帧 t=%.1fs 是黑帧，跳过", sc, t)
             continue
         try:
             ffmpeg._run([  # noqa: SLF001 —— 复用模块内 ffmpeg 调用
@@ -148,12 +158,45 @@ def _vision_rank(frames: list[Path], s) -> list[tuple[Path, float, bool]] | None
     return None
 
 
+def _pick_brightest(frames: list[Path]) -> tuple[Path, float] | None:
+    """候选里挑最亮的一帧（vision 不可用时的回退，比固定第 2 帧稳）。"""
+    best: tuple[Path, float] | None = None
+    for f in frames:
+        y = ffmpeg.mean_luma(f)
+        if y is None:
+            continue
+        if best is None or y > best[1]:
+            best = (f, y)
+    return best
+
+
+def _cover_is_dark(cover: Path) -> bool:
+    y = ffmpeg.mean_luma(cover)
+    return y is not None and y < DARK_COVER_LUMA
+
+
+def _extract_representative_frame(video: Path, out_path: Path) -> bool:
+    """全片暗色素材的兜底：thumbnail 滤镜选信息量代表帧。成功返回 True。"""
+    try:
+        ffmpeg._run([  # noqa: SLF001 —— 同模块风格，复用 ffmpeg 调用
+            ffmpeg._ffmpeg(), "-y", "-i", str(video),
+            "-vf", "thumbnail=200", "-frames:v", "1", "-q:v", "2",
+            str(out_path),
+        ], timeout=120)
+        return out_path.exists() and out_path.stat().st_size > 2500
+    except Exception as e:
+        log.debug("代表帧抽取失败：%s", str(e)[:80])
+        return False
+
+
 def pick_best_cover(video: Path, work_dir: Path, sc: str,
                     out_path: Path, s) -> Path:
     """主入口：选优封面写到 out_path。
 
     降级链：候选帧抽取失败 → 第 1 秒截帧（旧行为）；
-    vision 打分失败 → 候选帧里取中间帧（25% 处比片头信息量大）。
+    vision 打分失败 → 候选帧里取最亮帧（2026-10-25 前是固定第 2 帧）。
+    选定后过暗校验：luma < DARK_COVER_LUMA 的帧不当封面，全暗时用
+    thumbnail 代表帧兜底（暗色素材也该有能看清的封面）。
     永不抛异常 —— 封面选优失败不能挡住发布。
     """
     try:
@@ -164,15 +207,35 @@ def pick_best_cover(video: Path, work_dir: Path, sc: str,
             return out_path
 
         ranked = _vision_rank(frames, s)
+        chosen: Path | None = None
+        note = ""
         if ranked:
-            best, score, _has_person = ranked[0]
-            out_path.write_bytes(best.read_bytes())
-            log.info("[%s] 封面选定：%s（%.1f 分，共 %d 候选）",
-                     sc, best.name, score, len(frames))
+            # 按分降序取第一个「不暗」的帧；分数最高的太暗就顺延
+            for cand, score, _has_person in ranked:
+                if not _cover_is_dark(cand):
+                    chosen = cand
+                    note = f"{score:.1f} 分"
+                    break
+            if chosen is None:
+                log.warning("[%s] vision 高分帧全部过暗，改用代表帧兜底", sc)
         else:
-            mid = frames[min(1, len(frames) - 1)]
-            out_path.write_bytes(mid.read_bytes())
-            log.info("[%s] vision 不可用，封面退化为候选第 2 帧", sc)
+            bright = _pick_brightest(frames)
+            if bright and not _cover_is_dark(bright[0]):
+                chosen = bright[0]
+                note = f"最亮帧 luma={bright[1]:.0f}"
+
+        if chosen is not None:
+            out_path.write_bytes(chosen.read_bytes())
+            log.info("[%s] 封面选定：%s（%s，共 %d 候选）",
+                     sc, chosen.name, note, len(frames))
+        elif _extract_representative_frame(video, out_path):
+            log.info("[%s] 封面使用全片代表帧（候选均过暗）", sc)
+        else:
+            # 代表帧也失败：退回最亮候选，哪怕暗（总比没有强）
+            bright = _pick_brightest(frames)
+            fallback = bright[0] if bright else frames[min(1, len(frames) - 1)]
+            out_path.write_bytes(fallback.read_bytes())
+            log.info("[%s] 封面兜底：最亮候选 %s", sc, fallback.name)
         _maybe_pad_cover(video, out_path)
         return out_path
     except Exception as e:
