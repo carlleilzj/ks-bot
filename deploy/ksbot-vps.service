@@ -1,15 +1,46 @@
 [Unit]
 Description=ks-bot VPS 处理端（采集/转码/ASR/文案/字幕 + Remote API）
-After=network-online.target tailscaled.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# 2026-10-28 起以专用系统用户运行（原 root）。装机：
+#   useradd --system --home-dir /opt/ks-bot --no-create-home --shell /usr/sbin/nologin ksbot
+#   mkdir -p /var/cache/ksbot && rsync -a /root/.cache/huggingface/ /var/cache/ksbot/huggingface/
+#   chown -R ksbot:ksbot /var/cache/ksbot /opt/ks-bot/{data,logs,media}
+#   chown ksbot:ksbot .env && chmod 600 .env
+#   代码树需可读：chmod -R o+rX bot scripts tests tools deploy
+User=ksbot
+Group=ksbot
 WorkingDirectory=/opt/ks-bot
 ExecStart=/opt/ks-bot/.venv/bin/python -m bot.main --stage=process
 Restart=always
 RestartSec=15
 Environment=PYTHONUNBUFFERED=1
+# faster-whisper 模型缓存（本地 ASR；原 /root/.cache/huggingface 已迁出）
+Environment=HF_HOME=/var/cache/ksbot/huggingface
+Environment=XDG_CACHE_HOME=/var/cache/ksbot
+
+# ---- 沙箱加固（2026-10-28）----
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
+ReadWritePaths=/opt/ks-bot/data /opt/ks-bot/logs /opt/ks-bot/media /var/cache/ksbot
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target
