@@ -24,17 +24,11 @@ log = logging.getLogger(__name__)
 # URL 正则：匹配消息里的 http(s) 链接
 _URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
 
-# 审核/改文案/指定平台的文本指令前缀（TG callback_query 不方便时用文本走）
-_EDIT_PREFIX = "edit:"
-_TARGET_PREFIX = "target:"
-
 # getUpdates long-poll 超时（秒）
 _POLL_TIMEOUT = 30
 
 # 状态中文映射（给用户看的回复）
 _STATE_LABELS = {
-    State.CANDIDATE: "待审核",
-    State.PENDING_REVIEW: "待审核",
     State.DETECTED: "待下载",
     State.DOWNLOADED: "已下载，待转码",
     State.TRANSCODED: "已转码，待转录",
@@ -225,15 +219,8 @@ class TelegramListener(threading.Thread):
         if not text:
             return
 
-        # 文本指令：改文案 / 指定平台（callback_query 不方便时的备选入口）
-        t = text.strip()
-        if t.lower().startswith(_EDIT_PREFIX):
-            self._handle_edit_text(t)
-            return
-        if t.lower().startswith(_TARGET_PREFIX):
-            self._handle_target_text(t)
-            return
         # /login 指令：远程触发平台扫码重登（跑在协调端，二维码由发布端 TG 推送）
+        t = text.strip()
         if t.lower().startswith("/login"):
             self._handle_login_cmd(t)
             return
@@ -256,10 +243,7 @@ class TelegramListener(threading.Thread):
                     "不指定则发到所有启用的平台\n\n"
                     "🔑 /login —— 平台扫码重登（不带参数弹菜单）\n"
                     "   /login weixin / kuaishou / douyin / toutiao\n"
-                    "   中文别名也行：/login 快手、/login 快手2\n\n"
-                    "🎬 发现层自动采集后发审核卡片，点按钮即可\n"
-                    "  edit:<id> 你的标题    # 改文案\n"
-                    "  target:<id> 抖音  # 指定发布平台",
+                    "   中文别名也行：/login 快手、/login 快手2\n",
                 )
             return
 
@@ -287,152 +271,22 @@ class TelegramListener(threading.Thread):
                 log.exception("处理链接失败：%s", raw_url)
                 telegram.send_text(self.s, f"❌ 处理链接失败：{str(e)[:200]}\n链接：{raw_url}")
 
-    # ---------- callback_query 处理（审核按钮） ----------
+    # ---------- callback_query 处理（登录菜单按钮） ----------
 
     def _handle_callback(self, cq: dict) -> None:
-        """处理审核卡片内联按钮回调。callback_data 格式：action:task_id。"""
+        """处理内联按钮回调。callback_data 格式：login:<platform>。"""
         data = cq.get("data") or ""
-        action, _, tid_str = data.partition(":")
+        action, _, platform = data.partition(":")
         cq_id = cq.get("id", "")
-        # login:<platform> —— 平台菜单按钮，不走任务审核分支
-        if action == "login":
-            key = tid_str.strip().lower()
-            if key not in ("weixin", "toutiao", "kuaishou", "kuaishou2", "douyin", "xhs"):
-                telegram.answer_callback(self.s, cq_id, "不支持的平台")
-                return
-            telegram.answer_callback(self.s, cq_id, f"已触发 {key} 扫码登录")
-            self._handle_login_cmd(f"/login {key}")
+        if action != "login":
+            telegram.answer_callback(self.s, cq_id, "不支持的操作")
             return
-        try:
-            tid = int(tid_str)
-        except ValueError:
-            telegram.answer_callback(self.s, cq_id, "无效的回调数据")
+        key = platform.strip().lower()
+        if key not in ("weixin", "toutiao", "kuaishou", "kuaishou2", "douyin", "xhs"):
+            telegram.answer_callback(self.s, cq_id, "不支持的平台")
             return
-
-        task = self.db.get(tid)
-        if not task:
-            telegram.answer_callback(self.s, cq_id, "任务不存在")
-            return
-
-        # 只允许审核态任务被按钮操作
-        if task.get("state") not in (State.CANDIDATE, State.PENDING_REVIEW):
-            telegram.answer_callback(self.s, cq_id,
-                                     f"该任务已 {task.get('state','')}，不可再审核")
-            return
-
-        if action == "approve":
-            ok = self.db.approve(tid)
-            if ok:
-                telegram.answer_callback(self.s, cq_id,
-                                         f"✅ 已通过，进入流水线：{task.get('shortcode','')}")
-                # 更新原卡片文本（把按钮换成状态）
-                msg = cq.get("message")
-                if msg:
-                    telegram.edit_review_message(
-                        self.s, str(msg.get("chat", {}).get("id", "")),
-                        msg.get("message_id", 0),
-                        f"✅ 已通过 [{task.get('shortcode','')}]\n"
-                        f"{task.get('title','')[:60]}\n"
-                        f"状态：待下载处理"
-                    )
-                if self._wakeup is not None:
-                    self._wakeup.set()
-            else:
-                telegram.answer_callback(self.s, cq_id, "操作失败（可能已被处理）")
-        elif action == "reject":
-            ok = self.db.reject(tid, "人工拒绝")
-            if ok:
-                telegram.answer_callback(self.s, cq_id, "❌ 已丢弃")
-                msg = cq.get("message")
-                if msg:
-                    telegram.edit_review_message(
-                        self.s, str(msg.get("chat", {}).get("id", "")),
-                        msg.get("message_id", 0),
-                        f"❌ 已丢弃 [{task.get('shortcode','')}]\n"
-                        f"{task.get('title','')[:60]}"
-                    )
-            else:
-                telegram.answer_callback(self.s, cq_id, "操作失败")
-        elif action == "edit":
-            telegram.answer_callback(
-                self.s, cq_id,
-                f"发新消息给我改好的标题，格式：edit:{tid} 你的标题文案",
-                show_alert=True,
-            )
-        elif action == "platform":
-            telegram.answer_callback(
-                self.s, cq_id,
-                f"发新消息：target:{tid} 抖音,小红书  （可选：快手/抖音/小红书/视频号）",
-                show_alert=True,
-            )
-        else:
-            telegram.answer_callback(self.s, cq_id, f"未知操作：{action}")
-
-    # ---------- 文本指令处理（改文案 / 指定平台） ----------
-
-    def _handle_edit_text(self, text: str) -> None:
-        """edit:<id> <新标题>：更新任务的 title 后通过审核。"""
-        body = text[len(_EDIT_PREFIX):].strip()
-        tid_str, _, new_title = body.partition(" ")
-        try:
-            tid = int(tid_str)
-        except ValueError:
-            telegram.send_text(self.s, "格式：edit:<id> 你的新标题")
-            return
-        task = self.db.get(tid)
-        if not task:
-            telegram.send_text(self.s, f"任务 {tid} 不存在")
-            return
-        if task.get("state") not in (State.CANDIDATE, State.PENDING_REVIEW):
-            telegram.send_text(self.s, f"任务 {tid} 已 {task.get('state')}，不可改文案")
-            return
-        new_title = new_title.strip()
-        if not new_title:
-            telegram.send_text(self.s, "标题不能为空")
-            return
-        self.db.update(tid, title=new_title)
-        self.db.approve(tid)
-        telegram.send_text(self.s, f"✏️ 已改文案并通过 [{task.get('shortcode','')}]\n"
-                                    f"新标题：{new_title[:80]}")
-        if self._wakeup is not None:
-            self._wakeup.set()
-
-    def _handle_target_text(self, text: str) -> None:
-        """target:<id> 平台列表：指定发布平台后通过审核。"""
-        body = text[len(_TARGET_PREFIX):].strip()
-        tid_str, _, rest = body.partition(" ")
-        try:
-            tid = int(tid_str)
-        except ValueError:
-            telegram.send_text(self.s, "格式：target:<id> 抖音,小红书")
-            return
-        task = self.db.get(tid)
-        if not task:
-            telegram.send_text(self.s, f"任务 {tid} 不存在")
-            return
-        if task.get("state") not in (State.CANDIDATE, State.PENDING_REVIEW):
-            telegram.send_text(self.s, f"任务 {tid} 已 {task.get('state')}，不可再指定平台")
-            return
-        # 解析平台名
-        targets, unknown = _parse_target_platforms(rest)
-        if not targets:
-            avail = "、".join(_PUBLISH_PLATFORM_CN.get(p.name, p.name)
-                              for p in enabled_publishers(self.s))
-            telegram.send_text(self.s, f"未识别平台名。可用：{avail}")
-            return
-        targets, disabled = _split_disabled_targets(self.s, targets)
-        if not targets:
-            names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in disabled)
-            telegram.send_text(self.s, f"⛔ {names} 已停用，无法指定")
-            return
-        if disabled:
-            names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in disabled)
-            telegram.send_text(self.s, f"⚠️ {names} 已停用，已从指定中剔除")
-        self.db.approve(tid, target_platforms=targets)
-        pub_names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in targets)
-        telegram.send_text(self.s, f"🎯 已指定发布到 {pub_names}，通过审核 [{task.get('shortcode','')}]")
-        if self._wakeup is not None:
-            self._wakeup.set()
+        telegram.answer_callback(self.s, cq_id, f"已触发 {key} 扫码登录")
+        self._handle_login_cmd(f"/login {key}")
 
     def _handle_login_cmd(self, text: str) -> None:
         """远程触发平台扫码重登。二维码由发布端脚本推到 TG。

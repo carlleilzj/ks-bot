@@ -43,7 +43,6 @@ from .notify import telegram
 from .publish import all_publishers, default_publishers, enabled_publishers, get_publisher
 from .publish.base import LoginExpired
 from .source import downloader
-from .source.scheduler import DiscoveryScheduler
 from .source.telegram_listener import TelegramListener
 
 log = logging.getLogger("bot")
@@ -539,16 +538,6 @@ def advance_task(s: Settings, db: Database, task_id: int,
         if st == State.NOTIFIED:
             return
         try:
-            if st == State.CANDIDATE:
-                # 发现层入库后应已被 scheduler 推到 PENDING_REVIEW；
-                # 若卡在 CANDIDATE（如重启后），补发审核卡片
-                db.update(task_id, state=State.PENDING_REVIEW)
-                telegram.send_review_card(s, task)
-                return
-            if st == State.PENDING_REVIEW:
-                # 等用户点 TG 审核按钮，不自动推进
-                log.debug("[%s] 等待人工审核", task["shortcode"])
-                return
             if st == State.DETECTED:
                 step_download(s, db, task)
             elif st == State.DOWNLOADED:
@@ -950,11 +939,6 @@ def main() -> None:
     if not args.once:
         listener.start()
 
-    # 启动发现层调度线程（周期采集 → 过滤 → 入库 CANDIDATE → 发审核卡片）
-    discovery = DiscoveryScheduler(s, db, wakeup=pipeline_wakeup)
-    if not args.once:
-        discovery.start()
-
     try:
         while True:
             try:
@@ -975,7 +959,6 @@ def main() -> None:
         telegram.notify_info(s, f"🔴 bot 崩溃退出\n{str(e)[:300]}\n请检查日志 logs/bot.log 后重启")
     finally:
         listener.stop()
-        discovery.stop()
         db.close()
         telegram.notify_info(s, "⚪ bot 已停止运行")
 

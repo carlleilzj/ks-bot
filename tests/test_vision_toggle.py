@@ -1,9 +1,8 @@
 """真人检测总开关（vision.real_person_check）的回归测试。
 
 背景：2026-09-16 起改为手动发链接模式，素材由人工筛选，真人检测不再需要。
-开关必须同时作用于两个质检点：
-  1. 发现层（scheduler）—— 不再因真人丢弃候选
-  2. 转码层（main.step_transcode）—— 不再因真人跳过任务
+开关作用于转码层（main.step_transcode）—— 不再因真人跳过任务。
+（发现层已于 2026-10-28 整体移除，本文件只剩转码层质检点的回归。）
 且关闭真人检测不得影响水印擦除等其他逻辑。
 """
 from __future__ import annotations
@@ -82,19 +81,6 @@ def test_transcode_runs_qc_when_enabled(tmp_path):
     weixin_only = targets and all(t.strip() == "weixin" for t in targets.split(",") if t.strip())
     should_qc = cover.exists() and not weixin_only and s.vision.real_person_check
     assert should_qc is True
-
-
-# ---------- 发现层：开关关闭时不丢弃候选 ----------
-
-def test_discovery_gate_requires_both_switches():
-    """发现层需要 reject_real_person 与 real_person_check 同时为真。"""
-    def gate(reject_rule: bool, vision_switch: bool) -> bool:
-        return reject_rule and vision_switch
-
-    assert gate(True, False) is False, "总开关关了就不该拦"
-    assert gate(False, True) is False, "规则关了也不拦"
-    assert gate(True, True) is True, "两者都开才拦"
-    assert gate(False, False) is False
 
 
 # ---------- 水印逻辑不受开关影响 ----------

@@ -159,36 +159,7 @@ def discover_chat_ids(s: Settings) -> list[str]:
     return ids
 
 
-# ---------- 审核卡片 + 回调交互 ----------
-
-def _review_keyboard(task_id: int) -> dict:
-    """审核卡片的 InlineKeyboard：通过/丢弃/改文案/指定平台。"""
-    return {"inline_keyboard": [
-        [{"text": "✅ 通过并发布", "callback_data": f"approve:{task_id}"},
-         {"text": "❌ 丢弃", "callback_data": f"reject:{task_id}"}],
-        [{"text": "✏️ 改文案再发", "callback_data": f"edit:{task_id}"},
-         {"text": "🎯 指定平台", "callback_data": f"platform:{task_id}"}],
-    ]}
-
-
-def send_review_card(s: Settings, task: dict) -> None:
-    """发审核卡片：封面图 + 元数据 + 4 个按钮。无封面回退纯文本卡片。"""
-    from pathlib import Path
-    tid = task.get("id")
-    cover = Path(task["cover_path"]) if task.get("cover_path") else None
-    duration = task.get("duration") or 0
-    dur_str = f"{int(duration)}秒" if duration else "未知时长"
-    caption = (
-        f"🎬 待审核 [{task.get('shortcode', '?')}]\n"
-        f"来源：{task.get('source_platform', '')}  @{task.get('username', '')}\n"
-        f"标题：{(task.get('title') or '')[:80]}\n"
-        f"时长：{dur_str}\n"
-        f"链接：{task.get('source_url', '')}\n"
-        f"来源标签：{task.get('source_tag', '') or '-'}"
-    )
-    keyboard = _review_keyboard(tid) if tid else None
-    send_photo(s, cover, caption, reply_markup=keyboard)
-
+# ---------- 回调交互（/login 菜单按钮） ----------
 
 def answer_callback(s: Settings, callback_query_id: str, text: str = "",
                     show_alert: bool = False) -> None:
@@ -196,21 +167,3 @@ def answer_callback(s: Settings, callback_query_id: str, text: str = "",
     _post(s, "answerCallbackQuery",
           json_payload={"callback_query_id": callback_query_id,
                         "text": text[:200], "show_alert": show_alert})
-
-
-def edit_message_text(s: Settings, chat_id: str, message_id: int, text: str,
-                      reply_markup: dict | None = None) -> None:
-    """编辑已发送的消息文本（审核后更新卡片状态用）。"""
-    _post(s, "editMessageText",
-          json_payload={"chat_id": chat_id, "message_id": message_id, "text": text,
-                        "disable_web_page_preview": True},
-          extra_json={"reply_markup": reply_markup} if reply_markup else None)
-
-
-def edit_review_message(s: Settings, chat_id: str, message_id: int, text: str) -> None:
-    """审核后更新卡片：图片消息(caption)用 editMessageCaption，纯文本用 editMessageText。
-
-    不传 reply_markup 时 TG 会自动移除内联按钮（卡片定格为已处理状态）。
-    """
-    _post(s, "editMessageCaption",
-          json_payload={"chat_id": chat_id, "message_id": message_id, "caption": text})

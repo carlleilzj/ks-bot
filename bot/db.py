@@ -10,9 +10,7 @@ from .config import DB_PATH
 
 
 class State:
-    CANDIDATE = "CANDIDATE"          # 发现层入库，待过滤/待发审核卡片
-    PENDING_REVIEW = "PENDING_REVIEW"  # 已发 TG 审核卡片，等用户点按钮
-    DETECTED = "DETECTED"            # 审核通过，待下载（原流水线入口）
+    DETECTED = "DETECTED"            # 投链入库，待下载（流水线入口）
     DOWNLOADED = "DOWNLOADED"        # 已下载原始视频
     TRANSCODED = "TRANSCODED"        # 已转码 + 封面
     TRANSCRIBED = "TRANSCRIBED"      # 已语音识别（可能无语音）
@@ -27,9 +25,7 @@ class State:
 
 
 # 流水线上待推进的状态，按顺序排列
-# CANDIDATE/PENDING_REVIEW 在 advance_task 里只发卡片/不推进，但仍需被 cycle() 扫到
 PENDING_STATES = [
-    State.CANDIDATE, State.PENDING_REVIEW,
     State.DETECTED, State.DOWNLOADED, State.TRANSCODED, State.TRANSCRIBED,
     State.COPYWRITTEN, State.SUBTITLED, State.READY, State.PUBLISHED,
 ]
@@ -372,8 +368,8 @@ class Database:
         去重键：source_url UNIQUE。已存在返回 None。
         新任务的 ig_media_id 用 shortcode 占位（兼容旧 NOT NULL UNIQUE 约束）。
         target_platforms: 指定发布平台列表（如 ["douyin","xhs"]），None 表示全部启用平台。
-        state: 入库状态。投链走 DETECTED（默认）；发现层走 CANDIDATE。
-        source_tag: 发现层的来源标签（如 yt_search:anime），用于追溯；投链留空。
+        state: 入库状态，投链走 DETECTED（默认）。
+        source_tag: 来源标签（历史字段，发现层已下线，现留空）。
         """
         ts = now_iso()
         targets_str = ",".join(target_platforms) if target_platforms else None
@@ -402,59 +398,6 @@ class Database:
             )
             self.conn.commit()
             return cur.lastrowid if cur.rowcount else None
-
-    def approve(self, task_id: int, target_platforms: list[str] | None = None) -> bool:
-        """审核通过：CANDIDATE/PENDING_REVIEW → DETECTED，进原流水线。
-
-        target_platforms 不为空时同时更新发布平台（用户在 TG 里指定了平台）。
-        返回是否成功（任务不在审核态返回 False）。
-        """
-        ts = now_iso()
-        targets_str = ",".join(target_platforms) if target_platforms else None
-        with self._lock:
-            cur = self.conn.execute(
-                """UPDATE tasks SET state=?, error=NULL, retries=0, updated_at=?
-                   WHERE id=? AND state IN (?, ?)""",
-                (State.DETECTED, ts, task_id, State.CANDIDATE, State.PENDING_REVIEW),
-            )
-            if targets_str is not None and cur.rowcount:
-                self.conn.execute(
-                    "UPDATE tasks SET target_platforms=?, updated_at=? WHERE id=?",
-                    (targets_str, ts, task_id),
-                )
-            self.conn.commit()
-            return cur.rowcount > 0
-
-    def reject(self, task_id: int, reason: str = "") -> bool:
-        """审核拒绝：CANDIDATE/PENDING_REVIEW → SKIPPED。"""
-        ts = now_iso()
-        with self._lock:
-            cur = self.conn.execute(
-                """UPDATE tasks SET state=?, error=?, updated_at=?
-                   WHERE id=? AND state IN (?, ?)""",
-                (State.SKIPPED, f"审核拒绝: {reason}" if reason else "审核拒绝",
-                 ts, task_id, State.CANDIDATE, State.PENDING_REVIEW),
-            )
-            self.conn.commit()
-            return cur.rowcount > 0
-
-    def pending_review(self, limit: int = 50) -> list[dict]:
-        """待审核任务列表（重启后重发卡片用）。"""
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT * FROM tasks WHERE state IN (?, ?) ORDER BY id ASC LIMIT ?",
-                (State.CANDIDATE, State.PENDING_REVIEW, limit),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
-    def pending_review_count(self) -> int:
-        """待审核任务数量（堆积保护用）。"""
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT COUNT(*) c FROM tasks WHERE state IN (?, ?)",
-                (State.CANDIDATE, State.PENDING_REVIEW),
-            ).fetchone()
-        return row["c"]
 
     def update(self, task_id: int, **fields) -> None:
         assert fields, "no fields"
@@ -511,7 +454,6 @@ class Database:
         已 NOTIFIED 的任务本身不动（其他平台可能已发出），只放弃其失败/待发的 job。
         """
         abandonable = (
-            State.CANDIDATE, State.PENDING_REVIEW,
             State.DETECTED, State.DOWNLOADED, State.TRANSCODED, State.TRANSCRIBED,
             State.COPYWRITTEN, State.SUBTITLED, State.READY,
         )
@@ -553,7 +495,6 @@ class Database:
     def keep_media_shortcodes(self) -> set[str]:
         """仍在流水线或已发布的 shortcode，孤儿文件清理时保留。"""
         keep = (
-            State.CANDIDATE, State.PENDING_REVIEW,
             State.DETECTED, State.DOWNLOADED, State.TRANSCODED, State.TRANSCRIBED,
             State.COPYWRITTEN, State.SUBTITLED, State.READY, State.PUBLISHED, State.NOTIFIED,
         )

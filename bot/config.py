@@ -123,28 +123,13 @@ class PlatformConfig:
 
 
 @dataclass
-class DiscoveryConfig:
-    """发现层配置：主动去各大平台采集热门动画短视频候选，发 TG 审核。"""
-    enabled: bool = False
-    interval_min: int = 60            # 每轮发现的间隔（分钟）
-    limit_per_source: int = 20        # 每个适配器每轮最多取多少条
-    max_pending_review: int = 10      # 待审核堆积上限（避免 TG 刷屏）
-    sources: list[dict] = field(default_factory=list)  # [{type, ...params}]
-    # 过滤规则（扁平化，方便 FilterRules.from_dict 读取）
-    filters_min_duration: float = 5
-    filters_max_duration: float = 120
-    filters_min_score: float = 0
-    filters: dict = field(default_factory=dict)   # 原始 filters 段，给 FilterRules 用
-
-
-@dataclass
 class VisionConfig:
     """AI 画面质检开关。
 
     2026-09-16 起改为手动发链接模式：素材由人工筛选，真人检测不再需要，
     故 real_person_check 默认 False。水印与动画判定不受影响。
     """
-    real_person_check: bool = False   # False = 完全停用真人检测（含发现层与转码层）
+    real_person_check: bool = False   # False = 完全停用真人检测（转码层）
 
 
 @dataclass
@@ -184,7 +169,6 @@ class Settings:
     watermark: WatermarkConfig = field(default_factory=WatermarkConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
-    discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     categories: list[str] = field(default_factory=lambda: list(DEFAULT_CATEGORIES))  # 快手分区（兼容旧配置）
     platforms: dict[str, PlatformConfig] = field(default_factory=dict)
 
@@ -228,7 +212,7 @@ def _build_vision(raw: dict | None) -> VisionConfig:
 
     real_person_check:
       False（默认，2026-09-16 起）= 完全停用真人检测；
-      True = 恢复真人检测（发现层丢弃真人候选 + 转码层跳过真人镜头）。
+      True = 恢复真人检测（转码层跳过真人镜头）。
     注意：无论开关如何，水印擦除（watermark 段）与动画判定都照常工作。
     """
     d = raw or {}
@@ -311,25 +295,6 @@ def _build_publish(raw: dict) -> PublishConfig:
     return cfg
 
 
-def _build_discovery(raw: dict | None) -> DiscoveryConfig:
-    """解析 discovery 段。raw 为 config.yaml 的 discovery 子树。"""
-    raw = raw or {}
-    cfg = DiscoveryConfig(
-        enabled=bool(raw.get("enabled", False)),
-        interval_min=int(raw.get("interval_min", 60) or 60),
-        limit_per_source=int(raw.get("limit_per_source", 20) or 20),
-        max_pending_review=int(raw.get("max_pending_review", 10) or 10),
-        sources=list(raw.get("sources") or []) if isinstance(raw.get("sources"), list) else [],
-        filters=dict(raw.get("filters") or {}),
-    )
-    # 扁平化过滤规则，方便 discovery.py 的 build_adapters 直接读
-    f = cfg.filters
-    cfg.filters_min_duration = float(f.get("min_duration", 5))
-    cfg.filters_max_duration = float(f.get("max_duration", 120))
-    cfg.filters_min_score = float(f.get("min_score", 0))
-    return cfg
-
-
 def load_settings() -> Settings:
     load_dotenv(ENV_PATH)
     raw = _load_yaml()
@@ -373,7 +338,6 @@ def load_settings() -> Settings:
     s.watermark = _build_watermark(raw.get("watermark"))
     s.vision = _build_vision(raw.get("vision"))
     s.publish = _build_publish(raw.get("publish") or {})
-    s.discovery = _build_discovery(raw.get("discovery"))
     cats = raw.get("categories")
     if isinstance(cats, list) and cats:
         s.categories = [str(c).strip() for c in cats if str(c).strip()]
