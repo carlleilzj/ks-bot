@@ -1189,17 +1189,22 @@ def _upload_cover(page: Page, cover: Path, title: str = "") -> None:
     大字报在裁切**之后**叠：文字按最终 1280×960 版面取宽（居中放置，
     裁切不裁中心，但先裁后叠的字号才是用户实际看到的字号）。
     """
-    from ..media.cover_text import overlay_title_text
     from ..media.ffmpeg import prepare_platform_covers
 
     try:
         variants = prepare_platform_covers(cover)
         img = variants.get("landscape") or cover
+        titled = False
         if title:
-            img = overlay_title_text(img, title)
-            titled = img.name.endswith("_titled.jpg")
-        else:
-            titled = False
+            # 延迟导入 + 内层兜底：cover_text 依赖 Pillow，发布机 venv
+            # 历史上从不需要 PIL；万一缺库，降级为无字封面继续上传，
+            # 而不是让整个封面步骤失败（平台改用视频帧，损失更大）。
+            try:
+                from ..media.cover_text import overlay_title_text
+                img = overlay_title_text(img, title)
+                titled = img.name.endswith("_titled.jpg")
+            except Exception as e:
+                log.warning("封面大字叠字失败（按无字封面发布）：%s", str(e)[:120])
         img_input = page.locator(SELECTORS["cover_input"]).first
         opened = img_input.count() > 0
         if not opened:
