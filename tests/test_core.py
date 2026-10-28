@@ -664,3 +664,60 @@ def test_toutiao_success_requires_leaving_upload_page():
     assert publish_succeeded("", manage, upload)
     assert account_blocked_reason("该账号信息未完善，完善后才能发布视频") == "该账号信息未完善"
     assert account_blocked_reason(body) is None
+
+
+# ---------- 幽灵 kuaishou job 回归（2026-10-28 双平台时代回填 bug） ----------
+
+def _mk_published_task(db, tgt=None):
+    """插入一个带 published_at 的 PUBLISHED 任务，返回 task_id。"""
+    from bot.db import State
+    ts = datetime.now().isoformat(timespec="seconds")
+    db.conn.execute(
+        """INSERT INTO tasks
+           (ig_media_id, shortcode, state, target_platforms, published_at,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        ("yt_ghost", "yt_ghost", State.PUBLISHED, tgt, ts, ts, ts),
+    )
+    db.conn.commit()
+    return db.conn.execute("SELECT id FROM tasks WHERE shortcode='yt_ghost'").fetchone()["id"]
+
+
+def test_backfill_no_phantom_job_when_task_has_other_platform_jobs(tmp_path):
+    """tgt=kuaishou2 的任务已有 kuaishou2 job：新建 Database() 不得补幽灵 kuaishou job。
+
+    回归背景：单平台时代回填无条件给带 published_at 的任务补 kuaishou job，
+    copywriter 的 top_tags 每次生成都现开 Database()，导致 B 号任务在
+    published_at 落库后 1 秒内被补一条幽灵 kuaishou PUBLISHED job
+    （url=None、created_at==published_at）。实测 task 462-466 五条。
+    """
+    db = Database(tmp_path / "t.db")
+    tid = _mk_published_task(db, tgt="kuaishou2")
+    ts = datetime.now().isoformat(timespec="seconds")
+    db.conn.execute(
+        """INSERT INTO publish_jobs (task_id, platform, state, published_at, created_at, updated_at)
+           VALUES (?, 'kuaishou2', 'PUBLISHED', ?, ?, ?)""",
+        (tid, ts, ts, ts),
+    )
+    db.conn.commit()
+    db.close()
+
+    # 模拟 copywriter 的 top_tags：重新构造 Database，_migrate 再跑一遍
+    db2 = Database(tmp_path / "t.db")
+    jobs = db2.jobs(tid)
+    db2.close()
+    assert [j["platform"] for j in jobs] == ["kuaishou2"], \
+        f"不得出现幽灵 kuaishou job：{[j['platform'] for j in jobs]}"
+
+
+def test_backfill_still_fills_single_platform_era_tasks(tmp_path):
+    """零 job 的存量任务（单平台时代）：回填语义保留，仍补 kuaishou job。"""
+    db = Database(tmp_path / "t.db")
+    tid = _mk_published_task(db)
+    db.close()
+
+    db2 = Database(tmp_path / "t.db")
+    jobs = db2.jobs(tid)
+    db2.close()
+    assert [j["platform"] for j in jobs] == ["kuaishou"]
+    assert jobs[0]["state"] == JobState.PUBLISHED

@@ -199,13 +199,23 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source_url "
             "ON tasks(source_url) WHERE source_url IS NOT NULL AND source_url != ''"
         )
-        # 单平台时代已发布的任务，回填为 kuaishou 平台 job，避免被新代码重新发布
+        # 单平台时代已发布的任务，回填为 kuaishou 平台 job，避免被新代码重新发布。
+        # 2026-10-28 修复：必须限定「任务一个 job 都没有」——否则多平台时代的任务
+        # （如 tgt=kuaishou2 只发 B 号）在 published_at 落库后，任何新建 Database()
+        # 实例（copywriter 的 top_tags 每次生成都现开一个）都会给它补一条幽灵
+        # kuaishou PUBLISHED job（url=None、created_at==published_at 同秒），
+        # 污染 stats 匹配候选集、A 号数据混入 B 号内容。
+        # 幽灵样本：task 462-466（10-28，5 条），已手工清除。
+        backfill_guard = (
+            " AND NOT EXISTS (SELECT 1 FROM publish_jobs pj WHERE pj.task_id = tasks.id)"
+        )
         self.conn.execute(
             """INSERT OR IGNORE INTO publish_jobs
                (task_id, platform, state, url, published_at, created_at, updated_at)
                SELECT id, 'kuaishou', 'PUBLISHED', ks_url, published_at, published_at, published_at
                FROM tasks
-               WHERE state IN (?, ?) AND published_at IS NOT NULL AND ks_url IS NOT NULL""",
+               WHERE state IN (?, ?) AND published_at IS NOT NULL AND ks_url IS NOT NULL"""
+            + backfill_guard,
             (State.PUBLISHED, State.NOTIFIED),
         )
         # 快手发了但没抓到链接的（ks_url 为空），按任务时间回填
@@ -214,7 +224,8 @@ class Database:
                (task_id, platform, state, url, published_at, created_at, updated_at)
                SELECT id, 'kuaishou', 'PUBLISHED', NULL, published_at, published_at, published_at
                FROM tasks
-               WHERE state IN (?, ?) AND published_at IS NOT NULL AND ks_url IS NULL""",
+               WHERE state IN (?, ?) AND published_at IS NOT NULL AND ks_url IS NULL"""
+            + backfill_guard,
             (State.PUBLISHED, State.NOTIFIED),
         )
 
