@@ -635,9 +635,12 @@ def publish(
             if category:
                 _select_category(page, category)
 
-            # 5. 上传自定义封面（可选，失败不阻断；过暗封面先现场换帧）
+            # 5. 上传自定义封面（可选，失败不阻断；过暗封面先现场换帧，再叠标题大字）
+            #    大字报（2026-10-29 增长项②）：快手双列发现页先看封面再点，
+            #    1280×960 裁切版中央叠 ≤2 行标题钩子（失败按原图发布）。
             if cover and Path(cover).exists():
-                _upload_cover(page, rescue_dark_cover(Path(cover), Path(video)))
+                _upload_cover(page, rescue_dark_cover(Path(cover), Path(video)),
+                              title=title)
 
             # 5.5 挂星火「关联变现任务」（需 App 先收藏；失败**阻断发布**）
             #     与分区/封面不同，星火挂载失败 = 作品拿不到奖金池收益，
@@ -1177,17 +1180,26 @@ def rescue_dark_cover(cover: Path | None, video: Path) -> Path | None:
         return cover
 
 
-def _upload_cover(page: Page, cover: Path) -> None:
-    """上传选优封面的 4:3 / 1280×960 裁切版。
+def _upload_cover(page: Page, cover: Path, title: str = "") -> None:
+    """上传选优封面的 4:3 / 1280×960 裁切版（title 非空时叠标题大字）。
 
     快手官方提示不低于 1280×960；直接塞 720×1280 的 9:16 会弹「应用成功」
     但信息流仍用视频帧。必须写到 file input，并用页面文案回读。
+
+    大字报在裁切**之后**叠：文字按最终 1280×960 版面取宽（居中放置，
+    裁切不裁中心，但先裁后叠的字号才是用户实际看到的字号）。
     """
+    from ..media.cover_text import overlay_title_text
     from ..media.ffmpeg import prepare_platform_covers
 
     try:
         variants = prepare_platform_covers(cover)
         img = variants.get("landscape") or cover
+        if title:
+            img = overlay_title_text(img, title)
+            titled = img.name.endswith("_titled.jpg")
+        else:
+            titled = False
         img_input = page.locator(SELECTORS["cover_input"]).first
         opened = img_input.count() > 0
         if not opened:
@@ -1222,7 +1234,7 @@ def _upload_cover(page: Page, cover: Path) -> None:
         except Exception:
             body = ""
         if "封面应用成功" in body or "应用成功" in body:
-            log.info("已上传自定义封面（1280x960，已回读）")
+            log.info("已上传自定义封面（1280x960，已回读%s）", "，叠标题大字" if titled else "")
             shot(page, "ks_cover_uploaded")
         else:
             log.warning("快手封面已写文件，但页面未回读到「应用成功」")
