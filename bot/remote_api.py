@@ -193,6 +193,23 @@ class RemoteApi:
             log.info("[stats] %s 播放回流：%d 条落库", platform, res["updated"])
         return {"ok": True, **res}
 
+    def hot_topics_ingest(self, data: dict) -> dict:
+        """接收发布端（阿里云）每天推送的平台热门话题并归档到 data/<platform>_hot_topics.json。"""
+        from .monitor.kuaishou_hot import KS_HOT_FILE
+        platform = str(data.get("platform") or "kuaishou").strip()
+        topics = data.get("topics") or []
+        if not isinstance(topics, list):
+            return {"ok": False, "error": "topics must be a list"}
+        payload = {
+            "platform": platform,
+            "updated_at": now_iso(),
+            "count": len(topics),
+            "topics": topics,
+        }
+        KS_HOT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        log.info("[hot_topics] %s 热门话题已归档：%d 条 -> %s", platform, len(topics), KS_HOT_FILE)
+        return {"ok": True, "count": len(topics), "updated_at": payload["updated_at"]}
+
     # ---------- 远程登录指令（TG /login → 协调端落标记 → 发布端取走执行） ----------
 
     def set_login_request(self, platform: str) -> dict:
@@ -518,6 +535,13 @@ class RemoteApi:
                     # 中间靠这个端点桥接）→ persist 进本库供话题榜归因
                     try:
                         self._send_json(200, api.stats_ingest(data))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
+                if parsed.path == "/api/hot_topics":
+                    # 发布端每日推送快手等平台热门话题榜单（国内抓取→协调端存储）
+                    try:
+                        self._send_json(200, api.hot_topics_ingest(data))
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return

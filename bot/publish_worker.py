@@ -116,6 +116,18 @@ def push_stats(base: str, s: Settings, platform: str, rows: list[dict]) -> dict 
         return None
 
 
+def push_hot_topics(base: str, s: Settings, platform: str, topics: list[dict]) -> dict | None:
+    """把抓到的平台热门话题推回协调端储存。"""
+    try:
+        with httpx.Client(timeout=30) as c:
+            r = c.post(f"{base}/api/hot_topics", headers=_headers(s),
+                       json={"platform": platform, "topics": topics})
+            return _check(r, f"推送热门话题 {platform}")
+    except Exception as e:
+        log.warning("热门话题推送失败: %s", e)
+        return None
+
+
 def report_audit(base: str, s: Settings, task_id: int, note: str, deleted: bool) -> None:
     with httpx.Client(timeout=30) as c:
         r = c.post(f"{base}/api/audit", headers=_headers(s),
@@ -545,7 +557,50 @@ def run_once(base: str, s: Settings) -> int:
     maybe_audit(base, s)
     maybe_refresh_stats(s, base)
     maybe_refresh_spark_income(s)
+    maybe_refresh_hot_topics(s, base)
     return n
+
+
+_last_hot_topics_day: str = ""
+
+
+def maybe_refresh_hot_topics(s: Settings, base: str = "") -> None:
+    """每天早上 8:00（或启动冷启动时）从快手抓取热门话题并推送到协调端。"""
+    global _last_hot_topics_day
+    if not base:
+        base = s.remote_api_url.rstrip("/") if s.remote_api_url else ""
+    if not base:
+        return
+
+    from datetime import datetime
+
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+
+    # 当天已经成功拉取过则跳过
+    if _last_hot_topics_day == today_str:
+        return
+
+    # 冷启动（_last_hot_topics_day 为空）先拉一次备用，或者当前小时已达 8:00
+    is_cold_start = _last_hot_topics_day == ""
+    if not (is_cold_start or now.hour >= 8):
+        return
+
+    from .monitor.kuaishou_hot import fetch_kuaishou_hot_topics
+
+    try:
+        topics = fetch_kuaishou_hot_topics()
+        if topics:
+            res = push_hot_topics(base, s, "kuaishou", topics)
+            if res and res.get("ok"):
+                _last_hot_topics_day = today_str
+                log.info("快手热门话题已抓取并同步至协调端: %d 条", len(topics))
+            else:
+                log.warning("快手热门话题推送失败: %s", res)
+        else:
+            log.warning("快手热门话题未抓取到任何条目")
+    except Exception as e:
+        log.warning("抓取/推送快手热门话题异常: %s", e)
 
 
 def maybe_refresh_spark_income(s: Settings) -> None:
