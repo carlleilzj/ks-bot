@@ -99,8 +99,17 @@ platforms:
     default: false              # 只有显式 @快手2 才发，绝不占默认队列
     daily_limit: 6              # 与 A 号相同节奏（间隔 2h，全天分散）
     min_gap_hours: 2            # 覆盖全局，与 A 号一致
-    spark_task: false           # B 号 App 里收藏星火任务后再改 true
+    # 2026-11-03 配置与 A 号保持一致：
+    #   改挂「作者服务」推广任务（短剧 CPS / 商品 CPS 兜底），软降级不阻断；
+    #   关闭封面大字报（cover_title: false）。
+    attach_service: "关联推广任务"
+    attach_prefer: "短剧"
+    attach_fallback: "关联商品"
+    cover_title: false
+    spark_task: false           # 星火已下架；留字段便于日后恢复
     anchors:
+      热点: "治愈"
+      地点: "郴州"
       声明: "内容由AI生成"
   douyin:
     enabled: false

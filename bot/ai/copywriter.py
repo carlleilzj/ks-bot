@@ -71,8 +71,8 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
         tag_fixed_pool=("搞笑动画", "萌宠日常", "笑到肚子疼", "今日快乐源泉"),
     ),
     # 快手2号：女性生活内容（四件套/睡衣展示、化妆/盘发教程）。
-    # 标题口吻按内容类型自适应；话题不用「无声视频」锚——教程类有人声，
-    # 挂无声标签会伤账号垂直度，锚位让给 AI 按内容选。
+    # 2026-11-03 升级：同 A 号保持一致，4 槽位 100% 动态生成（赛道+主体+钩子+热门），
+    # 注入快手每日热搜榜优先匹配第 4 槽位。
     "kuaishou2": PlatformProfile(
         name="kuaishou2", display_name="快手2号", max_title_len=40, max_tags=4,
         supports_category=True,
@@ -89,8 +89,8 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
             "   只学口气，禁止照抄；卖点必须来自画面和转录里的真实信息。"
         ),
         tag_base="",
-        tag_content_slots=3,
-        tag_fixed_pool=("好物分享", "变美日常", "穿搭分享", "美妆教程", "生活好物"),
+        tag_content_slots=4,
+        tag_fixed_pool=("好物分享", "变美日常", "居家好物", "梦中情房"),
     ),
     "douyin": PlatformProfile(
         name="douyin", display_name="抖音", max_title_len=55, max_tags=5,
@@ -150,15 +150,26 @@ def _system_prompt(profile: PlatformProfile) -> str:
                 "萌宠小动物剧情、无对白的幽默短片。")
         style_lead = "标题要像 2026 年 9 月打出过百万播放的那种短句，而不是专栏海报。"
 
-    if profile.name == "kuaishou":
+    if profile.name in ("kuaishou", "kuaishou2"):
+        if profile.name == "kuaishou2":
+            example_roles = (
+                "  1. 行业垂直赛道词（如：好物推荐、变美干货、家居生活、美妆教程、穿搭分享）—— 负责进入垂类分发池；\n"
+                "  2. 画面场景/角色主体词（如：纯棉四件套、早八通勤妆、丝绸睡衣、梦中情房、法式盘发）—— 提取画面核心主体，吃精准搜索；\n"
+                "  3. 情绪动机/互动钩子词（如：手残党福音、高级感拉满、显白必备、平价好物、沉浸式开箱）—— 激发完播动机与评论共鸣；\n"
+                "  4. 平台热门/破圈标签（重点：优先从用户提示词给出的【快手今日热门话题榜】中，挑选与本视频最匹配、最具流量热度的话题；若无直接吻合的热搜词，则选用该领域大盘爆款常青词）—— 借势破圈引入增量。\n"
+            )
+        else:
+            example_roles = (
+                "  1. 行业垂直赛道词（如：搞笑动画、3D动画、动漫日常、奇幻小剧场）—— 负责进入行业垂类分发池；\n"
+                "  2. 画面场景/角色主体词（如：萌宠日常、霸王龙、神龙烤肠、小狗打架）—— 提取画面核心主体，吃精准搜索；\n"
+                "  3. 情绪动机/互动钩子词（如：笑到肚子疼、脑洞大开、今日快乐源泉、神反转）—— 激发完播动机与评论共鸣；\n"
+                "  4. 平台热门/破圈标签（重点：优先从用户提示词给出的【快手今日热门话题榜】中，挑选与本视频最匹配、最具流量热度的话题；若无直接吻合的热搜词，则选用该领域大盘爆款常青词）—— 借势破圈引入增量。\n"
+            )
         tag_rule = (
             "【话题（tags）—— 严格生成 4 个话题，各自承担明确分工】\n"
             "必须输出恰好 4 个贴合视频的话题词（不带 #，按以下 4 个角色分工顺序排列）：\n"
-            "  1. 行业垂直赛道词（如：搞笑动画、3D动画、动漫日常、奇幻小剧场）—— 负责进入行业垂类分发池；\n"
-            "  2. 画面场景/角色主体词（如：萌宠日常、霸王龙、神龙烤肠、小狗打架）—— 提取画面核心主体，吃精准搜索；\n"
-            "  3. 情绪动机/互动钩子词（如：笑到肚子疼、脑洞大开、今日快乐源泉、神反转）—— 激发完播动机与评论共鸣；\n"
-            "  4. 平台热门/破圈标签（重点：优先从用户提示词给出的【快手今日热门话题榜】中，挑选与本视频最匹配、最具流量热度的话题；若无直接吻合的热搜词，则选用该领域大盘爆款常青词）—— 借势破圈引入增量。\n"
-            "每个标签不超过 8 个字，4 个词严禁词根重叠（例如赛道用了搞笑动画，情绪就用神反转/脑洞大开/笑到肚子疼，不要再重复使用搞笑二字）。"
+            f"{example_roles}"
+            "每个标签不超过 8 个字，4 个词严禁词根重叠（例如赛道用了好物推荐/搞笑动画，情绪就用高级感拉满/脑洞大开，不要重复同义词根）。"
         )
         tag_json_sample = '["赛道词", "主体词", "情绪词", "平台热门词"]'
     else:
@@ -422,7 +433,7 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     hot_block = ""
     try:
         from ..db import Database
-        from .hot_tags import top_tags, format_for_prompt
+        from .hot_tags import format_for_prompt, top_tags
         ranked = top_tags(Database(), min_play=500, limit=10,
                           exclude={"无声视频"})
         hot_block = format_for_prompt(ranked)
@@ -447,7 +458,7 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
                 f"相符的（相符才用，硬凑会伤账号），也可以用新的长尾词，"
                 f"但必须遵守上面的多样性硬要求。\n"
             )
-        if profile.name == "kuaishou":
+        if profile.name in ("kuaishou", "kuaishou2"):
             try:
                 from ..monitor.kuaishou_hot import format_hot_topics_for_prompt, load_cached_hot_topics
                 ks_hots = load_cached_hot_topics()
