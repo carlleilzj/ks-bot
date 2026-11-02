@@ -44,6 +44,14 @@ SPARK_TYPE_PLACEHOLDER = "选择服务类型"
 # 2026-09 起实际页面显示「关联成功可获得更多收益」。两版都带上以兼容。
 SPARK_TASK_PLACEHOLDERS = ("关联成功可获得更多收益", "关联变现任务获得更多收入")
 
+# 「作者服务」各服务类型的二级下拉占位符（2026-11-02 实机核对 A 号万粉页面）。
+# 星火下架后主力改挂：关联推广任务（星任务/短剧 CPS）+ 关联商品（日用百货 CPS）。
+SERVICE_TASK_PLACEHOLDERS = {
+    "关联变现任务": SPARK_TASK_PLACEHOLDERS,
+    "关联推广任务": ("关联推广任务获得更多收入",),
+    "关联商品": ("关联商品获得更多收入",),
+}
+
 # 转码等待上限（秒）
 UPLOAD_TIMEOUT = 15 * 60
 
@@ -593,6 +601,9 @@ def publish(
     spark_task: bool = False,
     spark_task_title: str = "",
     spark_sink: list | None = None,
+    attach_service: str = "",
+    attach_prefer: str = "",
+    attach_fallback: str = "",
 ) -> str | None:
     """上传并发布一条视频，成功返回快手作品链接（获取不到时 None）。
 
@@ -642,13 +653,25 @@ def publish(
                 _upload_cover(page, rescue_dark_cover(Path(cover), Path(video)),
                               title=title)
 
-            # 5.5 挂星火「关联变现任务」（需 App 先收藏；失败**阻断发布**）
-            #     与分区/封面不同，星火挂载失败 = 作品拿不到奖金池收益，
-            #     属静默收益损失，故此处必须硬失败：
-            #     SparkAttachError → worker 回报失败 → job 回 PENDING 待重试。
-            #     重试无解时（平台侧任务下架/额度满）人工介入：
-            #     去 App 重新收藏任务，或把 config.yaml 的 spark_task 设为 false。
-            if spark_task:
+            # 5.5 挂「作者服务」推广（2026-11-02：星火已下架，改挂关联推广任务）
+            #     attach_service 优先：任务池发布页实时读，失败软降级（不阻断）；
+            #     attach_fallback：主挂池空时兜底（如关联商品日用品 CPS）。
+            #     spark_task 保留原语义：星火挂不上硬阻断（防静默无收益白发）。
+            #     挂上的条目名写进 spark_sink，供协调端落库做收益归因。
+            attached: str | None = None
+            if attach_service:
+                attached = _attach_service(page, attach_service, attach_prefer,
+                                           state_path=state_path)
+                if not attached and attach_fallback:
+                    log.info("主挂 %s 未成功，改挂兜底 %s", attach_service, attach_fallback)
+                    attached = _attach_service(page, attach_fallback,
+                                               state_path=state_path)
+                if not attached:
+                    # 软降级：平台改版/池空时照常发布。连续出现请查
+                    # ks_service_*.png 截图与日志，重新核对下拉占位符。
+                    log.warning("⚠️ 推广挂载未生效（按无挂载发布）：%s", attach_service)
+                    shot(page, "ks_service_soft_fail")
+            elif spark_task:
                 attached = _attach_spark_task(page, prefer=spark_task_title,
                                               state_path=state_path)
                 if not attached:
@@ -657,10 +680,8 @@ def publish(
                         "星火变现任务挂载未生效，已阻断发布（避免无收益白发）。"
                         "请检查：快手 App 星火计划里任务是否仍可挂、额度是否已满、"
                         "或把 config.yaml 的 spark_task 设为 false 以跳过")
-                # 传出任务名供调用方落库：星火收益按任务维度结算，
-                # 记下每条挂了哪个任务才能统计各任务产出（收益归因）。
-                if spark_sink is not None:
-                    spark_sink.append(attached)
+            if attached and spark_sink is not None:
+                spark_sink.append(attached)
 
             # 6. 点击发布
             _click_publish(page, title=title)
@@ -1016,6 +1037,158 @@ def _select_spark_option(page: Page, chosen: str) -> bool:
         return bool(ok)
     except Exception:
         return False
+
+
+# ---------- 作者服务通用挂载（2026-11-02，星火替代路线） ----------
+
+def _pick_service_item(items: list[str], prefer: str = "", cursor: int = 0) -> tuple[str, int]:
+    """从二级下拉条目里选一个：prefer 命中的条目内轮换；无命中则全量轮换。
+
+    短剧任务常同时有 2 条（030 期/031 期），轮换能让两条都吃到曝光，
+    也便于按任务维度做收益归因。
+    """
+    clean = [t.strip() for t in items if t and t.strip()]
+    if not clean:
+        return "", cursor
+    if prefer:
+        hits = [t for t in clean if prefer in t]
+        if hits:
+            return hits[cursor % len(hits)], cursor + 1
+    return clean[cursor % len(clean)], cursor + 1
+
+
+def _open_service_dropdown(page: Page) -> list[str]:
+    """展开「作者服务」类型下拉并读选项。
+
+    首次展开时占位符是「选择服务类型」；若本轮已选过一次（主挂失败改兜底），
+    占位符消失，此时直接展开第一个 .ant-select。
+    """
+    opts = _open_select_dropdown(page, SPARK_TYPE_PLACEHOLDER)
+    if opts:
+        return opts
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        sel = page.locator(".ant-select").nth(0)
+        if sel.count():
+            sel.click()
+            page.wait_for_timeout(900)
+            return _dropdown_option_texts(page)
+    except Exception:
+        pass
+    return []
+
+
+def _service_attached(page: Page, service_label: str, chosen: str) -> bool:
+    """回读表单：服务类型栏 == service_label 且任务栏出现所选条目（前缀匹配）。
+
+    复用 _spark_form_state 的 picks（所有 antd 选中项文本）——它对服务类型
+    的归类假设是星火，但 picks 本身是通用的。
+    """
+    picks = [_spark_title_probe(page, p) for p in (_spark_form_state(page).get("picks") or [])]
+    picks = [p for p in picks if p]
+    if service_label not in picks:
+        return False
+    key = _spark_title_probe(page, chosen)
+    if not key:
+        return False
+    return any(
+        p != service_label and (p == key or key[:6] in p or p[:6] in key)
+        for p in picks
+    )
+
+
+def _attach_service(page: Page, service_label: str, prefer: str = "",
+                    state_path: Path | str | None = None) -> str | None:
+    """挂「作者服务」下指定类型的推广条目（关联推广任务/关联商品/星火）。
+
+    成功返回挂上的条目文本（平台可能带「任务时间：…」/价格后缀），
+    失败一律返回 None —— 由调用方决定硬阻断（星火）还是软降级（推广/商品）。
+    """
+    try:
+        dismiss_dialogs(page)
+        _remove_joyride(page)
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(400)
+
+        # 第一层：服务类型
+        opts = _open_service_dropdown(page)
+        if not opts:
+            log.warning("挂 %s 失败：作者服务下拉打不开/为空", service_label)
+            shot(page, "ks_service_no_entry")
+            return None
+        if service_label not in opts:
+            log.warning("挂 %s 失败：下拉里没有该类型，实际=%s", service_label, opts)
+            shot(page, "ks_service_no_type")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return None
+        if not _click_visible_option(page, service_label):
+            log.warning("挂 %s 失败：点不开该类型", service_label)
+            shot(page, "ks_service_type_click_fail")
+            return None
+        page.wait_for_timeout(1200)
+
+        # 第二层：任务/商品下拉（占位符按类型）
+        titles: list[str] = []
+        matched_ph = ""
+        for ph in SERVICE_TASK_PLACEHOLDERS.get(service_label, ()):
+            titles = _open_select_dropdown(page, ph)
+            if titles:
+                matched_ph = ph
+                break
+        if not titles:
+            log.warning("挂 %s 失败：二级下拉打不开或列表为空（占位符 %s）",
+                        service_label, list(SERVICE_TASK_PLACEHOLDERS.get(service_label, ())))
+            shot(page, "ks_service_empty_list")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return None
+        log.info("%s 下拉已展开（%s）：%d 个候选 %s",
+                 service_label, matched_ph, len(titles), titles[:4])
+
+        rr_path = _spark_sidecars(state_path)[0]
+        chosen, nxt = _pick_service_item(titles, prefer=prefer,
+                                         cursor=_spark_rr_load(rr_path))
+        if not chosen:
+            log.warning("挂 %s 失败：未能选出条目", service_label)
+            shot(page, "ks_service_pick_fail")
+            return None
+        if not _select_spark_option(page, chosen):
+            log.warning("挂 %s 失败：条目「%s」点不到", service_label, chosen)
+            shot(page, "ks_service_option_click_fail")
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return None
+
+        # 回读验证：交互成功 ≠ 平台已接受（2026-09-13 起的老教训）
+        page.wait_for_timeout(900)
+        if not _service_attached(page, service_label, chosen):
+            log.warning("挂 %s 未生效：点选「%s」后表单回读未确认", service_label, chosen)
+            shot(page, "ks_service_verify_fail")
+            return None
+
+        _spark_rr_save(nxt, rr_path)
+        page.wait_for_timeout(400)
+        log.info("已挂 %s（回读校验通过）：%s", service_label, chosen)
+        return chosen
+    except Exception as e:
+        log.warning("挂 %s 异常：%s", service_label, e)
+        shot(page, "ks_service_attach_fail")
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return None
 
 
 def _attach_spark_task(page: Page, prefer: str = "",

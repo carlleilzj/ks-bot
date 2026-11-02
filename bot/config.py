@@ -114,6 +114,16 @@ class PlatformConfig:
     categories: list[str] = field(default_factory=list)  # 该平台的分区列表（无分区概念的平台留空）
     spark_task: bool = False          # 快手：发布时挂星火「关联变现任务」
     spark_task_title: str = ""        # 可选，收藏任务标题包含该字符串则优先；空则轮询
+    # 快手「作者服务」通用挂载（2026-11-02 起，星火的替代路线）：
+    #   attach_service  —— 服务类型，如「关联推广任务」「关联商品」「关联变现任务」
+    #                      （发布页下拉实测值；空 = 不挂）
+    #   attach_prefer   —— 二级条目关键词优先匹配（如「短剧」；空 = 轮换）
+    #   attach_fallback —— 主挂失败（池空/未找到）时的兜底服务类型（如「关联商品」）
+    # 与 spark_task 的区别：这些任务池在发布页实时读取，无需 App 收藏；
+    # 挂载失败**软降级**（记日志继续发布），不像星火那样硬阻断。
+    attach_service: str = ""
+    attach_prefer: str = ""
+    attach_fallback: str = ""
     anchors: dict = field(default_factory=dict)  # 抖音：挂载标签 {类型: 搜索词}
     hot_topic: str = ""               # 抖音：关联热点词
     # 每平台覆盖 publish 段的全局节奏（None = 用全局值）。
@@ -358,6 +368,9 @@ def load_settings() -> Settings:
                 default=bool(conf.get("default", True)),
                 spark_task=bool(conf.get("spark_task", False)),
                 spark_task_title=str(conf.get("spark_task_title") or "").strip(),
+                attach_service=str(conf.get("attach_service") or "").strip(),
+                attach_prefer=str(conf.get("attach_prefer") or "").strip(),
+                attach_fallback=str(conf.get("attach_fallback") or "").strip(),
                 anchors={str(k): str(v) for k, v in _anchors.items() if v},
                 hot_topic=str(conf.get("hot_topic") or "").strip(),
                 daily_limit=_opt_int(conf.get("daily_limit")),

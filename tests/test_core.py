@@ -721,3 +721,37 @@ def test_backfill_still_fills_single_platform_era_tasks(tmp_path):
     db2.close()
     assert [j["platform"] for j in jobs] == ["kuaishou"]
     assert jobs[0]["state"] == JobState.PUBLISHED
+
+
+# ---------- 作者服务通用挂载（2026-11-02 星火替代） ----------
+
+def test_pick_service_item_prefer_rotation():
+    from bot.publish.kuaishou import _pick_service_item
+
+    items = [
+        "星任务短剧A任务时间：2026.09.13-2026.12.13",
+        "星任务短剧B任务时间：2026.10.17-2026.12.31",
+        "星任务拼多多2026换机津贴活动任务时间：2026.09.11-2026.12.31",
+    ]
+    a, c1 = _pick_service_item(items, prefer="短剧", cursor=0)
+    b, c2 = _pick_service_item(items, prefer="短剧", cursor=c1)
+    # 偏好命中的两条短剧轮流曝光，不重复挂同一条
+    assert "短剧A" in a and "短剧B" in b
+    # 无偏好 → 全量轮换（从第一条开始）
+    x, _ = _pick_service_item(items, cursor=0)
+    assert x == items[0]
+    # 偏好未命中 → 退化为全量轮换
+    y, _ = _pick_service_item(items, prefer="不存在的词", cursor=0)
+    assert y == items[0]
+    # 空列表：不抛，返回空选
+    assert _pick_service_item([], prefer="短剧") == ("", 0)
+
+
+def test_platform_attach_fields_default_empty(tmp_path):
+    """旧配置（无 attach_* 字段）必须保持默认空值，行为不变。"""
+    from bot.config import PlatformConfig
+
+    pc = PlatformConfig(enabled=True)
+    assert pc.attach_service == ""
+    assert pc.attach_prefer == ""
+    assert pc.attach_fallback == ""

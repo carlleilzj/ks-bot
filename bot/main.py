@@ -380,7 +380,12 @@ def step_publish(s: Settings, db: Database, task: dict, headed: bool) -> None:
             extra = {}
             if pub.name == "kuaishou":
                 plat = s.platforms.get("kuaishou")
-                if plat and plat.spark_task:
+                if plat and plat.attach_service:
+                    # 2026-11-02：星火下架，改挂作者服务推广（软降级）
+                    extra["attach_service"] = plat.attach_service
+                    extra["attach_prefer"] = plat.attach_prefer
+                    extra["attach_fallback"] = plat.attach_fallback
+                elif plat and plat.spark_task:
                     extra["spark_task"] = True
                     extra["spark_task_title"] = plat.spark_task_title
             elif pub.name == "toutiao":

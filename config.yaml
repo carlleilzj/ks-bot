@@ -71,7 +71,15 @@ publish:
 platforms:
   kuaishou:
     enabled: true
-    spark_task: false           # 2026-11-02 星火收益过低已下架，暂停挂载（避免硬阻断发布）
+    # 2026-11-02 星火下架（收益过低），改挂「作者服务」推广：
+    #   主营业务 = 关联推广任务（星任务/短剧 CPS），发布页实时选任务，无需 App 收藏；
+    #   池空/失败时兜底挂关联商品（日用百货 CPS，佣金低但稳定）；
+    #   挂载失败软降级（记日志照常发布），不用再担心硬阻断。
+    # 关掉推广挂载：attach_service 留空即可。
+    attach_service: "关联推广任务"
+    attach_prefer: "短剧"        # 短剧 CPS 单价最高，受众（家庭主妇）重合度最高
+    attach_fallback: "关联商品"
+    spark_task: false            # 星火已下架；留着字段便于日后星火恢复
     # spark_task_title 留空 = 按收益加权轮换（权重见 bot/publish/kuaishou.py
     # 的 SPARK_TASK_WEIGHTS）；填子串 = 固定只挂该任务
     # 收益归因报告：python -m bot.monitor.spark_income --report
