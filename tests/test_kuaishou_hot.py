@@ -47,11 +47,13 @@ def test_fetch_kuaishou_hot_topics_parse():
     <script>window.__APOLLO_STATE__={"defaultClient":{"ROOT_QUERY":{"visionHotRank({\\"page\\":\\"home\\"})":{"items":[{"id":"VisionHotRankItem:热搜1"},{"id":"VisionHotRankItem:置顶通知"}]}},"VisionHotRankItem:热搜1":{"name":"热搜1","hotValue":"1000万","tagType":null},"VisionHotRankItem:置顶通知":{"name":"置顶通知","hotValue":"2000万","tagType":"置顶"}}};(function(){})()</script>
     </html>
     """
+    mock_client = MagicMock()
     mock_resp = MagicMock()
-    mock_resp.read.return_value = mock_html.encode("utf-8")
-    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.text = mock_html
+    mock_client.get.return_value = mock_resp
+    mock_client.__enter__.return_value = mock_client
 
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    with patch("httpx.Client", return_value=mock_client):
         res = fetch_kuaishou_hot_topics()
         assert len(res) == 1
         assert res[0]["topic"] == "热搜1"

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
-import urllib.request
 from datetime import datetime
+
+import httpx
 
 from ..config import DATA_DIR
 
@@ -28,20 +29,35 @@ def fetch_kuaishou_hot_topics(timeout: float = 15.0) -> list[dict]:
         ...
     ]
     """
-    url = "https://www.kuaishou.com/?isHome=1"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        },
-    )
+    cookies: dict[str, str] = {}
+    for state_name in ("ks_state.json", "ks2_state.json", "kuaishou_state.json"):
+        p = DATA_DIR / state_name
+        if p.exists():
+            try:
+                d = json.loads(p.read_text(encoding="utf-8"))
+                for c in d.get("cookies", []):
+                    if "name" in c and "value" in c:
+                        cookies[c["name"]] = c["value"]
+                if cookies:
+                    break
+            except Exception:
+                pass
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
+        with httpx.Client(headers=headers, cookies=cookies, follow_redirects=True, timeout=timeout) as client:
+            if not cookies:
+                client.get("https://www.kuaishou.com/")
+            resp = client.get("https://www.kuaishou.com/?isHome=1")
+            html = resp.text
     except Exception as e:
         log.warning("快手热榜请求失败: %s", e)
         return []
