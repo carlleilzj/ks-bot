@@ -604,6 +604,7 @@ def publish(
     attach_service: str = "",
     attach_prefer: str = "",
     attach_fallback: str = "",
+    cover_title: bool = True,
 ) -> str | None:
     """上传并发布一条视频，成功返回快手作品链接（获取不到时 None）。
 
@@ -651,7 +652,7 @@ def publish(
             #    1280×960 裁切版中央叠 ≤2 行标题钩子（失败按原图发布）。
             if cover and Path(cover).exists():
                 _upload_cover(page, rescue_dark_cover(Path(cover), Path(video)),
-                              title=title)
+                              title=title if cover_title else "")
 
             # 5.5 挂「作者服务」推广（2026-11-02：星火已下架，改挂关联推广任务）
             #     attach_service 优先：任务池发布页实时读，失败软降级（不阻断）；

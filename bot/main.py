@@ -380,6 +380,8 @@ def step_publish(s: Settings, db: Database, task: dict, headed: bool) -> None:
             extra = {}
             if pub.name == "kuaishou":
                 plat = s.platforms.get("kuaishou")
+                if plat:
+                    extra["cover_title"] = plat.cover_title
                 if plat and plat.attach_service:
                     # 2026-11-02：星火下架，改挂作者服务推广（软降级）
                     extra["attach_service"] = plat.attach_service

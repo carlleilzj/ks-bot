@@ -755,3 +755,4 @@ def test_platform_attach_fields_default_empty(tmp_path):
     assert pc.attach_service == ""
     assert pc.attach_prefer == ""
     assert pc.attach_fallback == ""
+    assert pc.cover_title is True   # 默认叠字，A 号在 config 里显式关

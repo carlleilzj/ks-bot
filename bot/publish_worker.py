@@ -275,6 +275,8 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         spark_sink: list = []          # 快手：接收本条实际挂上的星火任务名
         plat_cfg = s.platforms.get(platform)
         if platform.startswith("kuaishou"):
+            if plat_cfg:
+                extra["cover_title"] = plat_cfg.cover_title
             if plat_cfg and plat_cfg.attach_service:
                 # 2026-11-02：星火已下架，改挂「作者服务」推广（推广任务/商品）
                 extra["attach_service"] = plat_cfg.attach_service
