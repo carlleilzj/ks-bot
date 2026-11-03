@@ -1902,26 +1902,48 @@ def post_first_comment(
         page.keyboard.type(first_comment, delay=30)
         page.wait_for_timeout(500)
 
-        # 3. 找到并点击「发送」按钮
-        btn = page.locator(
-            ".author-comment-input__row__btn:not(.author-comment-input__row__btn--disabled)"
-        ).first
-        if not (btn.count() and btn.is_visible()):
-            btn = page.locator("text=发送").first
-        if not (btn.count() and btn.is_visible()):
-            log.warning("未找到可用的发送按钮，跳过首评")
+        # 3. 找到并点击「发送」按钮（严格断言与回读校验）
+        # 必须等待 Vue 输入状态响应式更新（去除 --disabled 类名），且绝对不能用 text=发送（会误选外层 968px 容器）
+        sent_ok = False
+        btn = page.locator(".author-comment-input__row__btn").first
+        for send_attempt in range(1, 4):
+            page.wait_for_timeout(600)
+            if btn.count() and btn.is_visible():
+                btn_cls = btn.get_attribute("class") or ""
+                if "disabled" not in btn_cls:
+                    btn.click(force=True)
+                else:
+                    # 若仍带 disabled，点击一下输入框触发 input 事件再试
+                    box.click()
+                    page.keyboard.press("Space")
+                    page.keyboard.press("Backspace")
+                    page.wait_for_timeout(300)
+                    btn.click(force=True)
+
+            page.wait_for_timeout(1500)
+            # 校验是否发送成功：输入框清空，或列表中出现首评文字
+            box_text = box.inner_text().strip() if box.count() else ""
+            comment_rendered = bool(page.locator(".comment-item, [class*='comment-item']").filter(has_text=first_comment[:8]).count())
+            if not box_text or comment_rendered:
+                sent_ok = True
+                break
+            log.warning("作者首评发送后输入框未清空，重试点击发送 (第 %d 次)...", send_attempt)
+
+        shot(page, "ks_comment_sent")
+        if not sent_ok:
+            log.warning("作者首评点击后未成功清空输入框，放弃置顶")
             return False
 
-        btn.click()
-        page.wait_for_timeout(2500)
-        shot(page, "ks_comment_sent")
         log.info("作者首评已发送: %s", first_comment)
 
         # 4. 置顶评论（如果 pin=True）
         if pin:
             try:
                 page.wait_for_timeout(1000)
-                pin_btn = page.locator("text=置顶").first
+                # 定位该评论行内的「置顶」按钮
+                target_item = page.locator(".comment-item, [class*='comment-item']").filter(has_text=first_comment[:8]).first
+                pin_btn = (target_item.locator("text=置顶").first if target_item.count()
+                           else page.locator("text=置顶").first)
                 if pin_btn.count() and pin_btn.is_visible():
                     pin_btn.click()
                     page.wait_for_timeout(1000)

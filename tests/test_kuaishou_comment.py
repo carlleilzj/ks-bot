@@ -50,6 +50,7 @@ def test_post_first_comment_mock():
     mock_box = MagicMock()
     mock_box.count.return_value = 1
     mock_box.is_visible.return_value = True
+    mock_box.inner_text.return_value = ""
 
     mock_btn = MagicMock()
     mock_btn.count.return_value = 1
@@ -68,6 +69,11 @@ def test_post_first_comment_mock():
     mock_title.inner_text.return_value = "测试视频标题"
     mock_title.first = mock_title
 
+    mock_item = MagicMock()
+    mock_item.count.return_value = 1
+    mock_item.locator.return_value.first = mock_pin_btn
+    mock_item.first = mock_item
+
     mock_box.first = mock_box
     mock_btn.first = mock_btn
     mock_pin_btn.first = mock_pin_btn
@@ -80,6 +86,11 @@ def test_post_first_comment_mock():
             return mock_box
         if "author-comment-input__row__btn" in selector:
             return mock_btn
+        if "comment-item" in selector:
+            mock_ret = MagicMock()
+            mock_ret.filter.return_value = mock_item
+            mock_ret.count.return_value = 1
+            return mock_ret
         if "置顶" in selector:
             return mock_pin_btn
         if "确定" in selector:
