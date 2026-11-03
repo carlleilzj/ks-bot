@@ -1635,14 +1635,16 @@ def _click_publish(page: Page, title: str = "") -> None:
             break
 
     # 注意：pc/submit 返回 200 不代表发布成功——账号被风控时接口照常 200 但作品被拦截。
-    # 可靠标志：URL 跳转到内容管理页（?status=2 审核中）。
+    # 可靠标志：URL 跳转到内容管理页，或内容管理页确实出现了这条标题。
     #
-    # 2026-11-04 修正两处误判：
+    # 2026-11-04 修正三处误判：
     #  1) 「违规」不能全页模糊匹配 —— 创作者中心每页都有「请勿发布违规内容」
     #     「违规记录」等常驻文案，一旦命中就在视频其实已发出后判失败 → 重试 → 重复发布。
     #     改为只看可见的 toast/弹窗容器，且只认精确的风控短语。
-    #  2) 「审核中」不能算成功 —— 发布页本身就可能出现该字样，会把「还停在表单页」
-    #     误判成已发布。成功只认「已跳转管理页」或强成功 toast。
+    #  2) 「审核中」从成功标志里移除（发布页本身就有该字样 → 假阳性）。
+    #  3) 即使看到「发布成功」字样，也要求已经离开发布表单页才认 ——
+    #     上传页自身文案里的成功字样不能当作提交成功。
+    #  4) 标题回查在作品卡片内逐块核对，不再拿整页 body 做 in。
     BLOCK_TOASTS = ("操作过于频繁", "发布失败，请稍后再试", "发布失败")
     deadline = time.time() + 60
     while time.time() < deadline:
@@ -1650,6 +1652,7 @@ def _click_publish(page: Page, title: str = "") -> None:
         if "/article/manage" in page.url:
             log.info("已跳转至作品管理页：%s", page.url)
             return
+        left_form = PUBLISH_URL not in page.url
         toast_text = _visible_toast_text(page)
         if toast_text:
             for text in BLOCK_TOASTS:
@@ -1661,9 +1664,11 @@ def _click_publish(page: Page, title: str = "") -> None:
                         f"可能是 IP 风控或页面改版，查看截图确认"
                     )
             for text in SELECTORS["success_texts"]:
-                if text in toast_text:
-                    log.info("检测到快手发布成功提示：%s", text)
+                if text in toast_text and left_form:
+                    log.info("检测到快手发布成功提示且已离开发布页：%s", text)
                     return
+                if text in toast_text:
+                    log.debug("看到「%s」但仍停在发布页，继续等待跳转", text)
     # 未检测到跳转：打开内容管理页核实最新作品是否出现（必须核实标题）
     try:
         page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30000)

@@ -647,10 +647,14 @@ def run_once(base: str, s: Settings) -> int:
 
     # 卡死 job 回收要每轮做（幂等、开销小）：只在启动时做会漏掉「部署重启时
     # 正在发布、updated_at 还很新」的那条，它会永久停在 PUBLISHING。
+    #
+    # 阈值必须 > 单条正常发布的合法最长耗时，否则会把「还在跑」的 job 抢回队列，
+    # 造成同一条视频重复发布。快手上传超时单独就 15 分钟（UPLOAD_TIMEOUT），
+    # 加上转码等待/提交/首评，合法上限约 18~20 分钟 → 用 30 分钟留足余量。
     try:
         with httpx.Client(timeout=15) as c:
             r = c.post(f"{base}/api/release_stale", headers=_headers(s),
-                       json={"older_than_minutes": 15})
+                       json={"older_than_minutes": 30})
         released = (r.json() or {}).get("released", 0)
         if released:
             log.warning("回收 %d 条卡死的发布中 job（已放回待发布队列）", released)

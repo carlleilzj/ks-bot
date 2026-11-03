@@ -477,18 +477,25 @@ class Database:
         场景：发布端逐平台回报时，最后一个平台 SUCCESS 与 PUBLISHED 落库之间
         进程重启/被 kill，任务永远停在 READY。这类任务既不会被发布（无 job），
         也不会进 NOTIFIED（等不到 PUBLISHED），在 pending() 里白白占名额，
-        还会让 READY 变成只增不减的堆积。只处理「有 job 且全部终态」的情况，
-        建 job 失败的任务（job 数 0）不动，留给人工。
+        还会让 READY 变成只增不减的堆积。
+
+        ⚠️ 必须至少有一个 job 真的 PUBLISHED 才补写。
+        曾经写成「所有 job 都是终态即可」——那会把「全部平台 SKIPPED」
+        （比如人工跳过的 t440）也标成 PUBLISHED，凭空伪造一条已发布记录。
+        全 SKIPPED/FAILED 的任务不在这里处理，留给人工判断。
         """
+        finals = ",".join("?" * len(JOB_FINAL_STATES))
         with self._lock:
             cur = self.conn.execute(
                 f"""UPDATE tasks SET state=?, updated_at=?
                     WHERE state=? AND EXISTS (
-                        SELECT 1 FROM publish_jobs j WHERE j.task_id = tasks.id)
+                        SELECT 1 FROM publish_jobs j
+                        WHERE j.task_id = tasks.id AND j.state = ?)
                       AND NOT EXISTS (
                         SELECT 1 FROM publish_jobs j
-                        WHERE j.task_id = tasks.id AND j.state NOT IN ({",".join("?" * len(JOB_FINAL_STATES))}))""",
-                (State.PUBLISHED, now_iso(), State.READY, *JOB_FINAL_STATES),
+                        WHERE j.task_id = tasks.id AND j.state NOT IN ({finals}))""",
+                (State.PUBLISHED, now_iso(), State.READY,
+                 JobState.PUBLISHED, *JOB_FINAL_STATES),
             )
             self.conn.commit()
         return cur.rowcount

@@ -44,11 +44,34 @@ def test_pending_still_returns_ready_when_no_others(db):
 
 
 def test_finalize_orphan_ready(db):
-    """READY 但所有平台 job 已终态 → 补写 PUBLISHED。"""
+    """READY 但所有平台 job 已终态、且至少一个真的 PUBLISHED → 补写 PUBLISHED。"""
     t = _make_task(db, 1, State.READY)
     db.create_publish_jobs(t, ["kuaishou"])
     for j in db.jobs(t):
         db.update_job(j["id"], state=JobState.PUBLISHED, published_at="2026-01-01T10:00:00")
+
+    assert db.finalize_orphan_ready() == 1
+    assert db.get(t)["state"] == State.PUBLISHED
+
+
+def test_finalize_orphan_ready_skips_all_skipped(db):
+    """全部 SKIPPED 不能补写成 PUBLISHED（会凭空伪造已发布记录）。"""
+    t = _make_task(db, 2, State.READY)
+    db.create_publish_jobs(t, ["kuaishou2"])
+    for j in db.jobs(t):
+        db.update_job(j["id"], state=JobState.SKIPPED)
+
+    assert db.finalize_orphan_ready() == 0
+    assert db.get(t)["state"] == State.READY
+
+
+def test_finalize_orphan_ready_mixed_states(db):
+    """一个 PUBLISHED + 一个 SKIPPED → 可以补写（确实发出去过）。"""
+    t = _make_task(db, 3, State.READY)
+    db.create_publish_jobs(t, ["kuaishou", "douyin"])
+    jobs = db.jobs(t)
+    db.update_job(jobs[0]["id"], state=JobState.PUBLISHED, published_at="2026-01-01T10:00:00")
+    db.update_job(jobs[1]["id"], state=JobState.SKIPPED)
 
     assert db.finalize_orphan_ready() == 1
     assert db.get(t)["state"] == State.PUBLISHED
