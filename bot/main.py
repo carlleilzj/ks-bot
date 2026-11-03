@@ -285,6 +285,7 @@ def step_copywrite(s: Settings, db: Database, task: dict) -> None:
     db.update(task["id"], state=State.COPYWRITTEN, title=ks["title"],
               description=ks["description"], tags=" ".join(ks["tags"]),
               category=ks["category"],
+              first_comment=ks.get("first_comment") or "",
               copy_json=json.dumps(copy_all, ensure_ascii=False), error=None)
     log.info("[%s] 文案生成完成（%d 个平台，画面探针=%s）：%s",
              sc, len(copy_all), "有" if content else "无", ks["title"])
@@ -378,10 +379,12 @@ def step_publish(s: Settings, db: Database, task: dict, headed: bool) -> None:
         copy = _platform_copy(s, db, task, pub)
         try:
             extra = {}
-            if pub.name == "kuaishou":
-                plat = s.platforms.get("kuaishou")
+            if pub.name.startswith("kuaishou"):
+                plat = s.platforms.get(pub.name)
                 if plat:
                     extra["cover_title"] = plat.cover_title
+                if copy.get("first_comment"):
+                    extra["first_comment"] = copy["first_comment"]
                 if plat and plat.attach_service:
                     # 2026-11-02：星火下架，改挂作者服务推广（软降级）
                     extra["attach_service"] = plat.attach_service

@@ -250,6 +250,7 @@ def _platform_copy(task: dict, platform: str) -> dict:
         "description": copy.get("description") or task.get("description") or "",
         "tags": copy.get("tags") or task.get("tags") or [],
         "category": copy.get("category") or task.get("category") or None,
+        "first_comment": copy.get("first_comment") or task.get("first_comment") or "",
     }
 
 
@@ -289,6 +290,8 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         if platform.startswith("kuaishou"):
             if plat_cfg:
                 extra["cover_title"] = plat_cfg.cover_title
+            if copy.get("first_comment"):
+                extra["first_comment"] = copy["first_comment"]
             if plat_cfg and plat_cfg.attach_service:
                 # 2026-11-02：星火已下架，改挂「作者服务」推广（推广任务/商品）
                 extra["attach_service"] = plat_cfg.attach_service

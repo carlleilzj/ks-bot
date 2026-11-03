@@ -42,7 +42,7 @@ JOB_FINAL_STATES = (JobState.PUBLISHED, JobState.FAILED, JobState.SKIPPED)
 
 _COLUMNS = {
     "state", "error", "retries", "transcript", "caption", "title", "description",
-    "tags", "category", "ks_url", "copy_json", "raw_path", "work_path",
+    "tags", "category", "first_comment", "ks_url", "copy_json", "raw_path", "work_path",
     "final_path", "cover_path", "srt_path", "published_at", "updated_at",
     "media_url", "source_url", "source_platform", "target_platforms", "source_tag",
     "play_count", "like_count", "stats_at",
@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     description TEXT,
     tags TEXT,
     category TEXT,
+    first_comment TEXT,
     ks_url TEXT,
     copy_json TEXT,
     raw_path TEXT,
@@ -163,6 +164,8 @@ class Database:
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
         if "copy_json" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN copy_json TEXT")
+        if "first_comment" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN first_comment TEXT")
         if "source_url" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN source_url TEXT")
         if "source_platform" not in cols:

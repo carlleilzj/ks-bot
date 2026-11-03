@@ -158,12 +158,24 @@ def _system_prompt(profile: PlatformProfile) -> str:
                 "  3. 情绪动机/互动钩子词（如：手残党福音、高级感拉满、显白必备、平价好物、沉浸式开箱）—— 激发完播动机与评论共鸣；\n"
                 "  4. 平台热门/破圈标签（重点：优先从用户提示词给出的【快手今日热门话题榜】中，挑选与本视频最匹配、最具流量热度的话题；若无直接吻合的热搜词，则选用该领域大盘爆款常青词）—— 借势破圈引入增量。\n"
             )
+            comment_rule = (
+                "【作者置顶首评（first_comment）—— 激发评论区互动】\n"
+                "生成 1 条作者置顶首评（10~25 字，不带【】、不带 #，作为视频发布后的第一条评论置顶）：\n"
+                "- 角色定位：以真实体验者或自嘲/提问口吻抢占首评沙发，给普通观众提供评论和互动模板。\n"
+                "- 示例：\"谁懂啊，扑上去那一瞬间真的治愈了整周的班味\"、\"手残党亲测，第三步稍微慢一点就能成\"、\"这个色系真的太戳我了，你们平时喜欢深色还是浅色？\"\n\n"
+            )
         else:
             example_roles = (
                 "  1. 行业垂直赛道词（如：搞笑动画、3D动画、动漫日常、奇幻小剧场）—— 负责进入行业垂类分发池；\n"
                 "  2. 画面场景/角色主体词（如：萌宠日常、霸王龙、神龙烤肠、小狗打架）—— 提取画面核心主体，吃精准搜索；\n"
                 "  3. 情绪动机/互动钩子词（如：笑到肚子疼、脑洞大开、今日快乐源泉、神反转）—— 激发完播动机与评论共鸣；\n"
                 "  4. 平台热门/破圈标签（重点：优先从用户提示词给出的【快手今日热门话题榜】中，挑选与本视频最匹配、最具流量热度的话题；若无直接吻合的热搜词，则选用该领域大盘爆款常青词）—— 借势破圈引入增量。\n"
+            )
+            comment_rule = (
+                "【作者置顶首评（first_comment）—— 激发评论区互动】\n"
+                "生成 1 条作者置顶首评（10~25 字，不带【】、不带 #，作为视频发布后的第一条评论置顶）：\n"
+                "- 角色定位：以作者第一人称神补刀、神吐槽或主角自嘲口吻抢占沙发，给观众提供吐槽与争论模板。\n"
+                "- 示例：\"神龙：我几千年的修为，你拿来烤淀粉肠？\"、\"我要是那只仓鼠，当场就躺平罢工了\"、\"这换我上去，估计帅不过第一秒\"\n\n"
             )
         tag_rule = (
             "【话题（tags）—— 严格生成 4 个话题，各自承担明确分工】\n"
@@ -172,6 +184,7 @@ def _system_prompt(profile: PlatformProfile) -> str:
             "每个标签不超过 8 个字，4 个词严禁词根重叠（例如赛道用了好物推荐/搞笑动画，情绪就用高级感拉满/脑洞大开，不要重复同义词根）。"
         )
         tag_json_sample = '["赛道词", "主体词", "情绪词", "平台热门词"]'
+        comment_json_sample = '\n  "first_comment": "作者首评神补刀/自嘲/互动问句（10~25 字，留作置顶神评）",'
     else:
         tag_rule = (
             "【话题（tags）—— 按内容给，不照抄固定组合】\n"
@@ -182,6 +195,8 @@ def _system_prompt(profile: PlatformProfile) -> str:
             "你只负责内容相关的那几个。"
         )
         tag_json_sample = '["贴合画面内容的话题词1", "话题词2"]'
+        comment_rule = ""
+        comment_json_sample = ""
 
     return f"""{role}
 {style_lead}
@@ -220,12 +235,12 @@ def _system_prompt(profile: PlatformProfile) -> str:
 
 {tag_rule}
 
-【输出格式】
+{comment_rule}【输出格式】
 只输出一个合法的 JSON 对象，不要输出任何代码块标记、思考过程或多余说明：
 {{
   "title": "一句贴合账号口吻的短钩子，不带【】、不带「没声音/太绝了」垫句（不超过 {profile.max_title_len} 字）",
   "description": "{profile.desc_hint}（1~2句话，真实呼应视频内容）",
-  "tags": {tag_json_sample},
+  "tags": {tag_json_sample},{comment_json_sample}
   {category_rule}
 }}
 
@@ -302,7 +317,18 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     else:
         category = ""
 
-    return {"title": title, "description": description, "tags": tags, "category": category}
+    first_comment = str(obj.get("first_comment", "")).strip().strip('"\'“”')
+    first_comment = re.sub(r"^[#【\[\(（]+|[#】\]\)）]+$", "", first_comment).strip()
+    if len(first_comment) > 50:
+        first_comment = first_comment[:50]
+
+    return {
+        "title": title,
+        "description": description,
+        "tags": tags,
+        "category": category,
+        "first_comment": first_comment,
+    }
 
 
 def merge_tags(model_tags: list[str], max_tags: int, title: str = "",

@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 
 PUBLISH_URL = "https://cp.kuaishou.com/article/publish/video"
 MANAGE_URL = "https://cp.kuaishou.com/article/manage"
+COMMENT_URL = "https://cp.kuaishou.com/article/comment"
 SPARK_RR_PATH = DATA_DIR / "ks_spark_rr.json"
 SPARK_TYPE_LABEL = "关联变现任务"
 # 发布页「作者服务」区两个下拉的占位符（2026-09-16 实机核对）
@@ -605,6 +606,8 @@ def publish(
     attach_prefer: str = "",
     attach_fallback: str = "",
     cover_title: bool = True,
+    first_comment: str = "",
+    pin_comment: bool = True,
 ) -> str | None:
     """上传并发布一条视频，成功返回快手作品链接（获取不到时 None）。
 
@@ -686,6 +689,13 @@ def publish(
 
             # 6. 点击发布
             _click_publish(page, title=title)
+
+            # 6.5 发表作者首评并置顶（神评互动引导，失败软降级）
+            if first_comment:
+                try:
+                    post_first_comment(page, first_comment=first_comment, title=title, pin=pin_comment)
+                except Exception as e:
+                    log.warning("发表作者首评异常（不影响视频发布）: %s", e)
 
             ks_url = _fetch_ks_url(context)
             shot(page, "ks_publish_done")
@@ -1552,3 +1562,88 @@ def _fetch_ks_url(context) -> str | None:
     except Exception as e:
         log.debug("获取作品链接失败：%s", e)
     return None
+
+
+def post_first_comment(
+    page: Page,
+    first_comment: str,
+    title: str = "",
+    pin: bool = True,
+    timeout_sec: float = 25.0,
+) -> bool:
+    """在快手创作者中心互动管理-评论管理页，发表作者首评并置顶（神评互动引导）。
+
+    失败静默打 warning，绝不阻断发布主流程。
+    """
+    first_comment = (first_comment or "").strip()
+    if not first_comment:
+        return False
+
+    log.info("准备发表快手作者首评: %s", first_comment)
+    try:
+        page.goto(COMMENT_URL, wait_until="domcontentloaded", timeout=int(timeout_sec * 1000))
+        page.wait_for_timeout(3000)
+
+        # 1. 核对当前页面是否已选中该作品（若有 title 则尽力核对，刚发布可能略有延迟）
+        clean_title = re.sub(r"[【】《》#\s]", "", title)[:8]
+        if clean_title:
+            matched = False
+            for _ in range(5):
+                body = page.locator("body").inner_text()
+                if clean_title in body:
+                    matched = True
+                    break
+                page.wait_for_timeout(2000)
+            if not matched:
+                log.info("评论管理页未明确匹配到标题「%s」，尝试在当前最新作品下发表首评", clean_title)
+
+        # 2. 找到评论输入框
+        box = page.locator(".author-comment-input__row__input, [placeholder*='有爱评论']").first
+        if not (box.count() and box.is_visible()):
+            log.warning("未找到作者评论输入框，跳过首评")
+            return False
+
+        box.click()
+        page.wait_for_timeout(300)
+        page.keyboard.type(first_comment, delay=30)
+        page.wait_for_timeout(500)
+
+        # 3. 找到并点击「发送」按钮
+        btn = page.locator(
+            ".author-comment-input__row__btn:not(.author-comment-input__row__btn--disabled)"
+        ).first
+        if not (btn.count() and btn.is_visible()):
+            btn = page.locator("text=发送").first
+        if not (btn.count() and btn.is_visible()):
+            log.warning("未找到可用的发送按钮，跳过首评")
+            return False
+
+        btn.click()
+        page.wait_for_timeout(2000)
+        shot(page, "ks_comment_sent")
+        log.info("作者首评已发送: %s", first_comment)
+
+        # 4. 置顶评论（如果 pin=True）
+        if pin:
+            try:
+                page.wait_for_timeout(1000)
+                pin_btn = page.locator("text=置顶").first
+                if pin_btn.count() and pin_btn.is_visible():
+                    pin_btn.click()
+                    page.wait_for_timeout(1000)
+                    confirm_btn = page.locator(
+                        ".el-dialog button:has-text('确定'), .el-message-box button:has-text('确定'), button:has-text('确定')"
+                    ).first
+                    if confirm_btn.count() and confirm_btn.is_visible():
+                        confirm_btn.click()
+                        page.wait_for_timeout(1000)
+                    log.info("作者首评已成功置顶: %s", first_comment)
+                    shot(page, "ks_comment_pinned")
+            except Exception as e:
+                log.debug("置顶评论失败（不影响已发送评论）: %s", e)
+
+        return True
+    except Exception as e:
+        log.warning("发表作者首评异常（不影响视频发布）: %s", e)
+        shot(page, "ks_comment_fail")
+        return False
