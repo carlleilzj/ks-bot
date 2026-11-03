@@ -729,14 +729,16 @@ def publish(
             # 6. 点击发布
             _click_publish(page, title=title)
 
-            # 6.5 发表作者首评并置顶（神评互动引导，失败软降级）
+            # 6.1 先获取视频链接（等待新作品在管理页同步落库，给快手后台留足异步时间）
+            ks_url = _fetch_ks_url(context, title=title)
+
+            # 6.5 发表作者首评并置顶（神评互动引导，新作品落库后进行，严格防错位）
             if first_comment:
                 try:
                     post_first_comment(page, first_comment=first_comment, title=title, pin=pin_comment)
                 except Exception as e:
                     log.warning("发表作者首评异常（不影响视频发布）: %s", e)
 
-            ks_url = _fetch_ks_url(context, title=title)
             shot(page, "ks_publish_done")
             log.info("发布成功：%s", ks_url or "（作品链接获取失败，见创作者中心-内容管理）")
             return ks_url
@@ -1803,18 +1805,51 @@ def post_first_comment(
         page.goto(COMMENT_URL, wait_until="domcontentloaded", timeout=int(timeout_sec * 1000))
         page.wait_for_timeout(3000)
 
-        # 1. 核对当前页面是否已选中该作品（若有 title 则尽力核对，刚发布可能略有延迟）
-        clean_title = re.sub(r"[【】《》#\s]", "", title)[:8]
-        if clean_title:
+        # 1. 核对当前页面是否已选中该作品，未选中则通过「选择视频」抽屉精准定位（严格防错位）
+        clean_target = re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", title)[:8].lower()
+        if clean_target:
             matched = False
-            for _ in range(5):
-                body = page.locator("body").inner_text()
-                if clean_title in body:
-                    matched = True
+            for attempt in range(4):
+                try:
+                    cur_title_el = page.locator(".video-info__content__title, [class*='video-info'] [class*='title']").first
+                    cur_title = cur_title_el.inner_text() if cur_title_el.count() else ""
+                    clean_cur = re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", cur_title).lower()
+                    if clean_target in clean_cur or clean_cur[:8] in clean_target:
+                        matched = True
+                        break
+                except Exception:
+                    pass
+
+                # 主卡片不一致，打开「选择视频」抽屉定位
+                select_btn = page.get_by_text("选择视频")
+                if select_btn.count() and select_btn.is_visible():
+                    try:
+                        select_btn.click()
+                        page.wait_for_timeout(1500)
+                        items = page.locator(".drawer .video-info, [class*='drawer'] .video-info").all()
+                        for it in items:
+                            it_text = re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", it.inner_text()).lower()
+                            if clean_target in it_text or it_text[:8] in clean_target:
+                                it.click()
+                                page.wait_for_timeout(2000)
+                                matched = True
+                                break
+                    except Exception as e:
+                        log.debug("抽屉选择视频异常: %s", e)
+
+                if matched:
                     break
+
+                page.wait_for_timeout(3000)
+                try:
+                    page.reload(wait_until="domcontentloaded")
+                except Exception:
+                    pass
                 page.wait_for_timeout(2000)
+
             if not matched:
-                log.info("评论管理页未明确匹配到标题「%s」，尝试在当前最新作品下发表首评", clean_title)
+                log.warning("评论管理页未匹配到目标视频「%s」，放弃发表首评（严格防止错位发到历史作品）", clean_target)
+                return False
 
         # 2. 找到评论输入框
         box = page.locator(".author-comment-input__row__input, [placeholder*='有爱评论']").first
@@ -1838,7 +1873,7 @@ def post_first_comment(
             return False
 
         btn.click()
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(2500)
         shot(page, "ks_comment_sent")
         log.info("作者首评已发送: %s", first_comment)
 
@@ -1851,7 +1886,9 @@ def post_first_comment(
                     pin_btn.click()
                     page.wait_for_timeout(1000)
                     confirm_btn = page.locator(
-                        ".el-dialog button:has-text('确定'), .el-message-box button:has-text('确定'), button:has-text('确定')"
+                        ".cp-dialog-wrapper button:has-text('确认'), .cp-dialog button:has-text('确认'), "
+                        ".el-dialog button:has-text('确定'), .el-dialog button:has-text('确认'), "
+                        ".el-message-box button:has-text('确定'), button:has-text('确认'), button:has-text('确定')"
                     ).first
                     if confirm_btn.count() and confirm_btn.is_visible():
                         confirm_btn.click()

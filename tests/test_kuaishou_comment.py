@@ -63,12 +63,19 @@ def test_post_first_comment_mock():
     mock_confirm_btn.count.return_value = 1
     mock_confirm_btn.is_visible.return_value = True
 
+    mock_title = MagicMock()
+    mock_title.count.return_value = 1
+    mock_title.inner_text.return_value = "测试视频标题"
+    mock_title.first = mock_title
+
     mock_box.first = mock_box
     mock_btn.first = mock_btn
     mock_pin_btn.first = mock_pin_btn
     mock_confirm_btn.first = mock_confirm_btn
 
     def locator_side_effect(selector):
+        if "title" in selector:
+            return mock_title
         if "author-comment-input__row__input" in selector:
             return mock_box
         if "author-comment-input__row__btn" in selector:
