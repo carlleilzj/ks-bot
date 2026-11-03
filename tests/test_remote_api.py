@@ -419,3 +419,74 @@ def test_released_job_no_longer_blocks_gap(api_env):
     # 锚点已清 → 放行
     assert db.last_publish_anchor_at("kuaishou") is None
     assert publish_gate(s, db, "kuaishou") is None
+
+
+# ---------- 作品链接补齐（发布后补链接兜底） ----------
+
+def test_missing_urls_lists_published_jobs_without_url(api_env):
+    """已发布但 url 为空的 job 必须能被补链接任务查到。"""
+    base, s, db, tid = api_env["base"], api_env["s"], api_env["db"], api_env["task_id"]
+
+    httpx.post(f"{base}/api/claim", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    # 发布成功但不带链接（现场轮询没赶上的真实场景）
+    httpx.post(f"{base}/api/report", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou", "ok": True}, timeout=5)
+
+    r = httpx.get(f"{base}/api/missing-urls", headers=_h(s),
+                  params={"platform": "kuaishou", "days": 2}, timeout=5)
+    data = r.json()
+    assert data["ok"] is True
+    assert data["count"] == 1
+    item = data["items"][0]
+    assert item["task_id"] == tid
+    assert item["title"] == "测试视频"
+    assert item["shortcode"] == "youtube_abc"
+
+
+def test_report_url_backfills_job_and_task(api_env):
+    """补录链接：publish_jobs.url 与 tasks.ks_url 都要被回填，且不再出现在待补清单。"""
+    base, s, db, tid = api_env["base"], api_env["s"], api_env["db"], api_env["task_id"]
+
+    httpx.post(f"{base}/api/claim", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    httpx.post(f"{base}/api/report", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou", "ok": True}, timeout=5)
+
+    url = "https://www.kuaishou.com/short-video/3xabc123"
+    r = httpx.post(f"{base}/api/report-url", headers=_h(s),
+                   json={"task_id": tid, "platform": "kuaishou", "url": url}, timeout=5)
+    assert r.json()["ok"] is True
+    assert r.json()["updated"] == 1
+
+    assert db.jobs(tid)[0]["url"] == url
+    assert db.get(tid)["ks_url"] == url
+    assert httpx.get(f"{base}/api/missing-urls", headers=_h(s),
+                     params={"platform": "kuaishou", "days": 2},
+                     timeout=5).json()["count"] == 0
+
+
+def test_report_url_is_idempotent_and_never_overwrites(api_env):
+    """已有链接的 job 不覆盖（幂等），重复补录返回 updated=0。"""
+    base, s, db, tid = api_env["base"], api_env["s"], api_env["db"], api_env["task_id"]
+
+    httpx.post(f"{base}/api/claim", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou"}, timeout=5)
+    first = "https://www.kuaishou.com/short-video/first0001"
+    httpx.post(f"{base}/api/report", headers=_h(s),
+               json={"task_id": tid, "platform": "kuaishou", "ok": True, "url": first},
+               timeout=5)
+
+    r = httpx.post(f"{base}/api/report-url", headers=_h(s),
+                   json={"task_id": tid, "platform": "kuaishou",
+                         "url": "https://www.kuaishou.com/short-video/second0002"},
+                   timeout=5)
+    assert r.json()["updated"] == 0
+    assert db.jobs(tid)[0]["url"] == first
+
+
+def test_report_url_requires_fields(api_env):
+    base, s = api_env["base"], api_env["s"]
+    r = httpx.post(f"{base}/api/report-url", headers=_h(s),
+                   json={"task_id": api_env["task_id"], "platform": "kuaishou"}, timeout=5)
+    assert r.json()["ok"] is False

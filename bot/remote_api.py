@@ -11,6 +11,8 @@
   GET  /api/file?path=...      下载成品视频/封面（路径必须位于 media/final|work 下）
   POST /api/claim              {task_id, platform} 认领一个平台 job（PENDING→PUBLISHING）
   POST /api/report             {task_id, platform, ok, url?, error?, login_expired?} 回报结果
+  GET  /api/missing-urls       已发布但链接为空的 job 清单（发布端补链接用）
+  POST /api/report-url         {task_id, platform, url} 补录作品公开链接
   GET  /api/published          近期已发布作品清单（审核巡检测匹配用）
   POST /api/audit              {task_id, note, deleted} 审核违规处理回报
   GET  /api/health             健康检查（token 可选，用于 worker 心跳）
@@ -257,6 +259,60 @@ class RemoteApi:
             })
         return {"ok": True, "platform": platform, "count": len(items), "items": items}
 
+    def missing_url_payload(self, platform: str = "kuaishou", days: int = 2) -> dict:
+        """已发布但链接为空的 job 清单（发布端补链接任务用）。"""
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = (_dt.now() - _td(days=days)).isoformat(timespec="seconds")
+        rows = self.db.conn.execute(
+            "SELECT j.task_id, j.platform, j.published_at, t.shortcode, t.title "
+            "FROM publish_jobs j JOIN tasks t ON t.id = j.task_id "
+            "WHERE j.platform = ? AND j.state = 'PUBLISHED' "
+            "  AND (j.url IS NULL OR j.url = '') "
+            "  AND j.published_at >= ? "
+            "ORDER BY j.published_at DESC LIMIT 50",
+            (platform, cutoff)).fetchall()
+        items = [{
+            "task_id": r[0], "platform": r[1], "published_at": r[2] or "",
+            "shortcode": r[3] or "", "title": r[4] or "",
+        } for r in rows]
+        return {"ok": True, "platform": platform, "count": len(items), "items": items}
+
+    def report_url(self, data: dict) -> dict:
+        """补录已发布作品的公开链接（发布端补链接任务回报）。
+
+        仅更新 url 为空的 PUBLISHED job；同时回填 tasks.ks_url（快手）并推一条 TG。
+        """
+        task_id = int(data.get("task_id") or 0)
+        platform = str(data.get("platform") or "").strip()
+        url = str(data.get("url") or "").strip()[:500]
+        if not task_id or not platform or not url:
+            return {"ok": False, "error": "task_id/platform/url 必填"}
+
+        with self.db._lock:
+            cur = self.db.conn.execute(
+                "UPDATE publish_jobs SET url=?, updated_at=? "
+                "WHERE task_id=? AND platform=? AND state='PUBLISHED' "
+                "  AND (url IS NULL OR url='')",
+                (url, now_iso(), task_id, platform))
+            self.db.conn.commit()
+            updated = cur.rowcount
+            if updated and platform.startswith("kuaishou"):
+                self.db.conn.execute(
+                    "UPDATE tasks SET ks_url=? WHERE id=? AND (ks_url IS NULL OR ks_url='')",
+                    (url, task_id))
+                self.db.conn.commit()
+
+        task = self.db.get(task_id) or {}
+        shortcode = task.get("shortcode") or str(task_id)
+        if updated:
+            log.info("[%s] %s 补录作品链接：%s", shortcode, platform, url)
+            try:
+                from .notify import telegram
+                telegram.notify_info(self.s, f"🔗 [{shortcode}] 作品链接已补录\n{url}")
+            except Exception:
+                pass
+        return {"ok": True, "updated": updated}
+
     def claim(self, task_id: int, platform: str, force: bool = False) -> dict:
         """原子认领：UPDATE ... WHERE state='PENDING' 抢占，防两端并发重复发布。
 
@@ -456,6 +512,11 @@ class RemoteApi:
                     days = int((qs.get("days", ["7"])[0]) or 7)
                     self._send_json(200, api.published_payload(plat, days))
                     return
+                if parsed.path == "/api/missing-urls":
+                    plat = qs.get("platform", ["kuaishou"])[0]
+                    days = int((qs.get("days", ["2"])[0]) or 2)
+                    self._send_json(200, api.missing_url_payload(plat, days))
+                    return
                 if parsed.path == "/api/login_request":
                     # 发布端轮询取走登录指令（GET = 取走并清除；?peek=1 只看不取）
                     self._send_json(200, api.take_login_request(
@@ -535,6 +596,13 @@ class RemoteApi:
                     # 中间靠这个端点桥接）→ persist 进本库供话题榜归因
                     try:
                         self._send_json(200, api.stats_ingest(data))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
+                if parsed.path == "/api/report-url":
+                    # 发布端事后补录作品公开链接（发布时未抓到链接的兜底）
+                    try:
+                        self._send_json(200, api.report_url(data))
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return

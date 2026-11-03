@@ -1654,14 +1654,16 @@ def _click_publish(page: Page, title: str = "") -> None:
     raise KuaishouError("点击发布后未检测到成功标志（管理页未见新作品），请查看 logs/ 截图确认")
 
 
-def _fetch_ks_url(context, title: str = "", max_attempts: int = 4) -> str | None:
+def _fetch_ks_url(context, title: str = "", max_attempts: int = 10) -> str | None:
     """发布成功后到内容管理页抓最新作品链接（尽力而为）。
 
     关键要求与反脆弱机制（吸取 2026-11-03 实测踩坑教训）：
     1. 绝不盲目取 items[0]：快手置顶作品排在最前且常驻，盲目取第一条会把历史置顶视频误判为刚发布的新片！
     2. 优先按标题多重匹配：提取标题核心（去掉前后缀、标点、话题），双向包含比对；
-    3. 多轮轮询与刷新：刚点击发布后，快手服务端同步到列表通常需要 3~15 秒，未命中时 reload 刷新重试；
-    4. 兜底保护：若最终仍未命中目标标题，宁可返回 None（由 TG 提示稍后在创作者中心查看），也坚决不误报置顶视频。
+    3. 多轮轮询与定时刷新：实测新作品从「审核中」进入作品列表需 30~90 秒，
+       默认 10 轮 × 6 秒（约 60 秒）+ 每 2 轮 reload，覆盖绝大多数同步延迟；
+    4. 兜底保护：若最终仍未命中目标标题，返回 None（由发布端后续补链接任务兜底），
+       也坚决不误报置顶视频。
     """
     page = None
     try:
@@ -1669,9 +1671,19 @@ def _fetch_ks_url(context, title: str = "", max_attempts: int = 4) -> str | None
         page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30_000)
 
         for attempt in range(1, max_attempts + 1):
-            page.wait_for_timeout(3500)
+            page.wait_for_timeout(6000)
             try:
                 page.wait_for_selector(".video-item", timeout=6000)
+                # 滚到底触发懒加载，保证新作品卡片被渲染
+                page.evaluate("""() => {
+                    window.scrollTo(0, document.documentElement.scrollHeight);
+                    document.querySelectorAll('*').forEach(el => {
+                        if (el.scrollHeight > el.clientHeight + 100 && el.clientHeight > 200) {
+                            el.scrollTop = 0;
+                        }
+                    });
+                }""")
+                page.wait_for_timeout(800)
             except Exception:
                 pass
 
@@ -1723,10 +1735,12 @@ def _fetch_ks_url(context, title: str = "", max_attempts: int = 4) -> str | None
 
             if attempt < max_attempts:
                 log.info("快手新作品尚未同步到列表（第 %d/%d 次），刷新管理页重试...", attempt, max_attempts)
-                try:
-                    page.reload(wait_until="domcontentloaded", timeout=20_000)
-                except Exception:
-                    pass
+                # 每 2 轮才 reload 一次：reload 开销大（2~4s），频繁刷新反而挤占同步窗口
+                if attempt % 2 == 0:
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=20_000)
+                    except Exception:
+                        pass
 
         # 策略 2：最后一轮谨慎兜底——必须严格排除置顶卡片，检查第 1 个非置顶卡片标题是否部分关联
         try:
@@ -1783,6 +1797,32 @@ def _fetch_ks_url(context, title: str = "", max_attempts: int = 4) -> str | None
             except Exception:
                 pass
     return None
+
+
+def fetch_published_url(state_path: Path | str, title: str,
+                        max_attempts: int = 4) -> str | None:
+    """补链接专用：独立开会话，按标题到作品管理页找已发布作品的公开链接。
+
+    与发布流程内的 _fetch_ks_url 同一套匹配规则（按标题、过滤置顶），
+    但轮次更少（发布后补链接通常已在列表里，几轮即可）。
+    找不到返回 None，绝不返回不确定结果的链接。
+    """
+    state_path = Path(state_path)
+    if not state_path.exists():
+        return None
+    with sync_playwright() as p:
+        browser = launch_chromium(p, headless=True)
+        try:
+            context = new_context(browser, state_path)
+            try:
+                return _fetch_ks_url(context, title=title, max_attempts=max_attempts)
+            finally:
+                context.close()
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 def post_first_comment(

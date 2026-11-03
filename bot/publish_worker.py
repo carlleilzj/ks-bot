@@ -104,6 +104,23 @@ def report_spark_task(base: str, s: Settings, task_id: int, platform: str,
         log.debug("星火任务名回报失败（不影响发布）：%s", e)
 
 
+def fetch_missing_urls(base: str, s: Settings, platform: str = "kuaishou",
+                       days: int = 2) -> list[dict]:
+    """拉协调端上已发布但链接为空的 job 清单（补链接任务用）。"""
+    with httpx.Client(timeout=30) as c:
+        r = c.get(f"{base}/api/missing-urls",
+                  params={"platform": platform, "days": days}, headers=_headers(s))
+        return (_check(r, "拉取待补链接清单") or {}).get("items", [])
+
+
+def report_url(base: str, s: Settings, task_id: int, platform: str, url: str) -> None:
+    """补录作品公开链接到协调端（更新 publish_jobs.url 与 tasks.ks_url）。"""
+    with httpx.Client(timeout=30) as c:
+        r = c.post(f"{base}/api/report-url", headers=_headers(s),
+                   json={"task_id": task_id, "platform": platform, "url": url})
+        _check(r, f"补录链接 {task_id}/{platform}")
+
+
 def push_stats(base: str, s: Settings, platform: str, rows: list[dict]) -> dict | None:
     """把抓到的播放量回传协调端落库（失败静默，返回 None）。"""
     try:
@@ -570,7 +587,71 @@ def run_once(base: str, s: Settings) -> int:
     maybe_refresh_stats(s, base)
     maybe_refresh_spark_income(s)
     maybe_refresh_hot_topics(s, base)
+    maybe_backfill_urls(base, s)
     return n
+
+
+_last_backfill_at: float = 0.0
+_backfilled_task_keys: set[tuple[int, str]] = set()
+BACKFILL_INTERVAL = 10 * 60      # 补链接任务最小间隔（秒）
+BACKFILL_MAX_PER_RUN = 3         # 单轮最多补 3 条，避免占用发布窗口
+
+
+def maybe_backfill_urls(base: str, s: Settings) -> None:
+    """周期性补齐「已发布但链接为空」的快手作品链接（每 10 分钟一次）。
+
+    背景（2026-11-03 实测）：新作品从「审核中」进入作品管理页列表需 30~90 秒，
+    发布流程内的轮询窗口偶尔赶不上，导致 TG 消息里「链接未获取到」。
+    本任务在发布完成后异步兜底：查到空链接 → 按标题去管理页匹配 → 补录并 TG 提醒。
+    """
+    global _last_backfill_at
+    now = time.time()
+    if now - _last_backfill_at < BACKFILL_INTERVAL:
+        return
+    _last_backfill_at = now
+
+    try:
+        items = fetch_missing_urls(base, s, "kuaishou", days=2)
+    except Exception as e:
+        log.debug("补链接：拉取待补清单失败：%s", str(e)[:120])
+        return
+    if not items:
+        return
+
+    from .publish import get_publisher
+    from .publish.kuaishou import fetch_published_url
+
+    for item in items[:BACKFILL_MAX_PER_RUN]:
+        task_id = int(item.get("task_id") or 0)
+        platform = str(item.get("platform") or "kuaishou")
+        title = str(item.get("title") or "")
+        key = (task_id, platform)
+        if not task_id or not title or key in _backfilled_task_keys:
+            continue
+        _backfilled_task_keys.add(key)
+
+        try:
+            pub = get_publisher(platform)
+        except KeyError:
+            continue
+        if not pub.state_path.exists():
+            continue
+
+        try:
+            url = fetch_published_url(pub.state_path, title, max_attempts=4)
+        except Exception as e:
+            log.debug("[%s] 补链接抓取异常：%s", item.get("shortcode"), str(e)[:120])
+            url = None
+
+        if url:
+            try:
+                report_url(base, s, task_id, platform, url)
+                log.info("[%s] %s 链接已补录：%s",
+                         item.get("shortcode"), platform, url)
+            except Exception as e:
+                log.warning("[%s] 补链接回报失败：%s", item.get("shortcode"), str(e)[:120])
+        else:
+            log.info("[%s] 补链接暂未在管理页匹配到标题，稍后再试", item.get("shortcode"))
 
 
 _last_hot_topics_day: str = ""
