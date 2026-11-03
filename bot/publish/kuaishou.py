@@ -35,7 +35,7 @@ from .base import (
 log = logging.getLogger(__name__)
 
 PUBLISH_URL = "https://cp.kuaishou.com/article/publish/video"
-MANAGE_URL = "https://cp.kuaishou.com/article/manage"
+MANAGE_URL = "https://cp.kuaishou.com/article/manage/video"
 COMMENT_URL = "https://cp.kuaishou.com/article/comment"
 SPARK_RR_PATH = DATA_DIR / "ks_spark_rr.json"
 SPARK_TYPE_LABEL = "关联变现任务"
@@ -120,6 +120,42 @@ def _fill_desc_js(page: Page, text: str) -> bool:
     except Exception as e:
         log.debug("JS 注入描述失败：%s", str(e)[:100])
         return False
+
+
+def _read_desc_text(page: Page) -> str:
+    """读取快手当前描述编辑器内容（支持 contenteditable 及 textarea）。"""
+    try:
+        return page.evaluate("""() => {
+            for (const sel of ['#work-description-edit', 'div[contenteditable="true"]', 'textarea']) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    const t = (el.innerText || el.textContent || el.value || '').trim();
+                    if (t) return t;
+                }
+            }
+            return '';
+        }""") or ""
+    except Exception:
+        return ""
+
+
+def _assert_desc_not_empty(page: Page, expected_text: str) -> None:
+    """提交前最后防线：校验描述编辑器非空，防止因 React 重置或遮罩拦截发出空标题废片（借鉴 MatrixMedia #34）。"""
+    clean_expected = re.sub(r"\s+", "", expected_text or "")
+    if not clean_expected:
+        return
+    current = _read_desc_text(page)
+    clean_current = re.sub(r"\s+", "", current)
+    if clean_current:
+        return
+    log.warning("提交前检测到快手描述编辑器为空！尝试再次注入补救...")
+    if _fill_desc_js(page, expected_text):
+        current = _read_desc_text(page)
+        if re.sub(r"\s+", "", current):
+            log.info("描述补救注入成功")
+            return
+    shot(page, "ks_desc_empty_abort")
+    raise KuaishouError("快手提交前校验失败：描述编辑器为空（可能被页面重置），为避免发出空标题/空描述废片已中止本次发布")
 
 
 def _desc_visible(page: Page) -> bool:
@@ -687,6 +723,9 @@ def publish(
             if attached and spark_sink is not None:
                 spark_sink.append(attached)
 
+            # 5.9 提交前最后防线：断言描述内容非空（防静默发出空标题废片）
+            _assert_desc_not_empty(page, desc_full)
+
             # 6. 点击发布
             _click_publish(page, title=title)
 
@@ -697,7 +736,7 @@ def publish(
                 except Exception as e:
                     log.warning("发表作者首评异常（不影响视频发布）: %s", e)
 
-            ks_url = _fetch_ks_url(context)
+            ks_url = _fetch_ks_url(context, title=title)
             shot(page, "ks_publish_done")
             log.info("发布成功：%s", ks_url or "（作品链接获取失败，见创作者中心-内容管理）")
             return ks_url
@@ -1389,9 +1428,20 @@ def _upload_cover(page: Page, cover: Path, title: str = "") -> None:
                 titled = img.name.endswith("_titled.jpg")
             except Exception as e:
                 log.warning("封面大字叠字失败（按无字封面发布）：%s", str(e)[:120])
+
+        slot_src_before = ""
+        try:
+            slot_src_before = page.evaluate("""() => {
+                const img = document.querySelector('[class*="_default-cover"] img, [class*="cover"] img');
+                return img ? img.src : '';
+            }""") or ""
+        except Exception:
+            pass
+
         img_input = page.locator(SELECTORS["cover_input"]).first
         opened = img_input.count() > 0
         if not opened:
+            # 尝试通过按钮文案或类名定位封面编辑器入口（借鉴 MatrixMedia 探针经验）
             for text in ("编辑封面", "修改封面", "更换封面", "设置封面", "上传封面"):
                 btn = page.get_by_text(text, exact=False).first
                 if not (btn.count() and btn.is_visible()):
@@ -1406,27 +1456,83 @@ def _upload_cover(page: Page, cover: Path, title: str = "") -> None:
                 if img_input.count():
                     opened = True
                     break
+
+            if not opened:
+                # 尝试类名选择器 [class*="_cover-full-editor"] / [class*="_default-cover"]
+                opened = bool(page.evaluate("""() => {
+                    const el = document.querySelector('[class*="_cover-full-editor"], [class*="_default-cover"]');
+                    if (el) { el.click(); return true; }
+                    return false;
+                }"""))
+                if opened:
+                    rand_sleep(1.0, 1.5)
+                    up = page.get_by_text("上传封面", exact=False).first
+                    if up.count() and up.is_visible():
+                        up.click()
+                        rand_sleep()
+                    img_input = page.locator(SELECTORS["cover_input"]).first
+
         if not opened or not img_input.count():
             log.info("未找到封面上传入口，平台将用视频帧")
             shot(page, "ks_cover_no_input")
             return
         img_input.set_input_files(str(img))
         rand_sleep(1.2, 2.0)
-        for t in ("完成", "确定", "应用"):
+
+        # 裁剪比例锁定 3:4（借鉴 MatrixMedia 探针实证配方，3:4 适配快手双列发现流）
+        try:
+            ratio_res = page.evaluate("""() => {
+                const norm = (t) => String(t || '').replace(/\\s+/g, '').trim();
+                const m = document.querySelector('.ant-modal');
+                if (!m) return false;
+                const cands = [];
+                for (const el of m.querySelectorAll('[class*="ratio"] *')) {
+                    const t = norm(el.textContent);
+                    if ((t === '3:4' || t === '3:4推荐') && el.children.length <= 2) {
+                        cands.push(el);
+                    }
+                }
+                if (!cands.length) return false;
+                cands.sort((a, b) => a.children.length - b.children.length);
+                cands[0].click();
+                return true;
+            }""")
+            if ratio_res:
+                log.info("已选定快手封面裁剪比例 3:4")
+        except Exception as e:
+            log.debug("3:4 裁剪比例选择异常（忽略）：%s", e)
+
+        for t in ("完成", "确定", "应用", "确认"):
             b = page.get_by_text(t, exact=True).first
             if b.count() and b.is_visible():
                 b.click()
                 break
-        rand_sleep(0.6, 1.0)
+        rand_sleep(0.8, 1.5)
+
+        # 回读与校验：1. 检查 CDN / src 变化（MatrixMedia 强信号）；2. 检查页面提示文案
+        after_src = ""
+        try:
+            after_src = page.evaluate("""() => {
+                const img = document.querySelector('[class*="_default-cover"] img, [class*="cover"] img');
+                return img ? img.src : '';
+            }""") or ""
+        except Exception:
+            pass
+        cdn_ok = bool(re.search(r"ssrcdn|kwaicdn|kwcdn|kscdn|yximgs", after_src))
+        changed_ok = bool(after_src and after_src != slot_src_before)
+
         try:
             body = page.locator("body").inner_text(timeout=3000) or ""
         except Exception:
             body = ""
-        if "封面应用成功" in body or "应用成功" in body:
-            log.info("已上传自定义封面（1280x960，已回读%s）", "，叠标题大字" if titled else "")
+        text_ok = "封面应用成功" in body or "应用成功" in body
+
+        if cdn_ok or changed_ok or text_ok:
+            log.info("已上传自定义封面（1280x960，已回读%s，CDN=%s）",
+                     "，叠标题大字" if titled else "", cdn_ok)
             shot(page, "ks_cover_uploaded")
         else:
-            log.warning("快手封面已写文件，但页面未回读到「应用成功」")
+            log.warning("快手封面已写文件，但页面未回读到「应用成功」或 CDN 变更")
             shot(page, "ks_cover_uploaded")
     except Exception as e:
         log.warning("封面上传失败（不影响发布）：%s", e)
@@ -1546,21 +1652,134 @@ def _click_publish(page: Page, title: str = "") -> None:
     raise KuaishouError("点击发布后未检测到成功标志（管理页未见新作品），请查看 logs/ 截图确认")
 
 
-def _fetch_ks_url(context) -> str | None:
-    """发布成功后到内容管理页抓最新作品链接（尽力而为）。"""
+def _fetch_ks_url(context, title: str = "", max_attempts: int = 4) -> str | None:
+    """发布成功后到内容管理页抓最新作品链接（尽力而为）。
+
+    关键要求与反脆弱机制（吸取 2026-11-03 实测踩坑教训）：
+    1. 绝不盲目取 items[0]：快手置顶作品排在最前且常驻，盲目取第一条会把历史置顶视频误判为刚发布的新片！
+    2. 优先按标题多重匹配：提取标题核心（去掉前后缀、标点、话题），双向包含比对；
+    3. 多轮轮询与刷新：刚点击发布后，快手服务端同步到列表通常需要 3~15 秒，未命中时 reload 刷新重试；
+    4. 兜底保护：若最终仍未命中目标标题，宁可返回 None（由 TG 提示稍后在创作者中心查看），也坚决不误报置顶视频。
+    """
+    page = None
     try:
         page = context.new_page()
         page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30_000)
-        page.wait_for_timeout(4000)
-        link = page.locator("a[href*='short-video']").first
-        if link.count():
-            href = link.get_attribute("href") or ""
-            if href.startswith("http"):
-                return href
-            if href:
-                return "https://www.kuaishou.com" + href
+
+        for attempt in range(1, max_attempts + 1):
+            page.wait_for_timeout(3500)
+            try:
+                page.wait_for_selector(".video-item", timeout=6000)
+            except Exception:
+                pass
+
+            # 策略 1：通过封面图片的 clientCacheKey 提取匹配标题的作品 URL
+            try:
+                res = page.evaluate("""([name]) => {
+                    const norm = (t) => String(t || '').replace(/[\\s\\-_，。！？、“”"''（）《》【】#]/g, '').toLowerCase();
+                    const cleanName = norm(name).slice(0, 15);
+                    const items = document.querySelectorAll('.video-item');
+                    if (!items.length) return null;
+
+                    for (let i = 0; i < items.length; i++) {
+                        const item = items[i];
+                        const titleEl = item.querySelector('.video-item__detail__row__title, [class*="title"]');
+                        const titleText = titleEl ? (titleEl.textContent || '') : '';
+                        const cleanTitle = norm(titleText);
+
+                        let matched = false;
+                        if (cleanName && cleanTitle) {
+                            if (cleanTitle.includes(cleanName) || cleanName.includes(cleanTitle.slice(0, 15))) {
+                                matched = true;
+                            }
+                        }
+
+                        if (matched) {
+                            const img = item.querySelector('.video-item__cover img, [class*="cover"] img, img');
+                            const src = img ? (img.getAttribute('src') || img.src || '') : '';
+                            const m = src.match(/clientCacheKey=([^&]+)/);
+                            if (m && m[1]) {
+                                const key = m[1].split('.')[0];
+                                return {
+                                    url: 'https://www.kuaishou.com/short-video/' + key,
+                                    title: titleText.split('\\n')[0].trim(),
+                                    idx: i
+                                };
+                            }
+                        }
+                    }
+                    return null;
+                }""", [title])
+
+                if res and res.get("url"):
+                    log.info("通过 clientCacheKey 精确匹配到快手作品链接 (第 %d 次尝试, idx=%s): %s",
+                             attempt, res.get("idx"), res["url"])
+                    return res["url"]
+
+            except Exception as e:
+                log.debug("第 %d 次尝试通过 clientCacheKey 提取快手链接异常：%s", attempt, e)
+
+            if attempt < max_attempts:
+                log.info("快手新作品尚未同步到列表（第 %d/%d 次），刷新管理页重试...", attempt, max_attempts)
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=20_000)
+                except Exception:
+                    pass
+
+        # 策略 2：最后一轮谨慎兜底——必须严格排除置顶卡片，检查第 1 个非置顶卡片标题是否部分关联
+        try:
+            fallback_res = page.evaluate("""([name]) => {
+                const norm = (t) => String(t || '').replace(/[\\s\\-_，。！？、“”"''（）《》【】#]/g, '').toLowerCase();
+                const cleanName = norm(name).slice(0, 8);
+                const items = document.querySelectorAll('.video-item');
+                for (let i = 0; i < items.length; i++) {
+                    const it = items[i];
+                    // 严格排除置顶
+                    const hasTopEl = !!it.querySelector('.video-item__detail__row__top');
+                    const hasTopText = /\\b置顶\\b|\\s置顶\\s/.test(it.innerText);
+                    if (hasTopEl || hasTopText) {
+                        continue;
+                    }
+
+                    const titleEl = it.querySelector('.video-item__detail__row__title, [class*="title"]');
+                    const titleText = titleEl ? (titleEl.textContent || '') : '';
+                    const cleanTitle = norm(titleText);
+
+                    // 仅当首个非置顶卡片包含标题前缀时才采纳，否则宁可放弃兜底
+                    if (cleanName && cleanTitle && (cleanTitle.includes(cleanName) || cleanName.includes(cleanTitle.slice(0, 8)))) {
+                        const img = it.querySelector('.video-item__cover img, [class*="cover"] img, img');
+                        const src = img ? (img.getAttribute('src') || img.src || '') : '';
+                        const m = src.match(/clientCacheKey=([^&]+)/);
+                        if (m && m[1]) {
+                            const key = m[1].split('.')[0];
+                            return {
+                                url: 'https://www.kuaishou.com/short-video/' + key,
+                                title: titleText.split('\\n')[0].trim()
+                            };
+                        }
+                    }
+                    break;
+                }
+                return null;
+            }""", [title])
+
+            if fallback_res and fallback_res.get("url"):
+                log.info("通过非置顶兜底匹配到快手作品链接: %s", fallback_res["url"])
+                return fallback_res["url"]
+        except Exception as e:
+            log.debug("非置顶兜底提取异常：%s", e)
+
+        log.warning("快手内容管理页经 %d 轮轮询未匹配到新作品标题「%s」，放弃返回链接（避免误判置顶视频）",
+                    max_attempts, title[:20])
+
     except Exception as e:
         log.debug("获取作品链接失败：%s", e)
+    finally:
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
     return None
 
 

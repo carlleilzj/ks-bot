@@ -214,3 +214,82 @@ class TestParseDt:
     def test_garbage(self):
         assert sm._parse_dt("") is None
         assert sm._parse_dt("not a date") is None
+
+
+class TestKsSnifferStats:
+    def test_work_stat_from_photo_item(self):
+        item = {
+            "workId": "5201314",
+            "title": "小猫咪的治愈日常 #萌宠 #治愈系 #猫咪",
+            "uploadTime": 1726625160000,
+            "playCount": 18200,
+            "likeCount": 350,
+            "commentCount": 42,
+        }
+        st = sm._work_stat_from_photo_item(item)
+        assert st is not None
+        assert st.play_count == 18200
+        assert st.like_count == 350
+        assert st.tags == ["萌宠", "治愈系", "猫咪"]
+        assert "小猫咪的治愈日常" in st.title_hint
+
+    def test_fetch_kuaishou_stats_with_sniffed_response(self):
+        from unittest.mock import MagicMock
+        mock_page = MagicMock()
+        callbacks = []
+
+        def mock_on(event, cb):
+            if event == "response":
+                callbacks.append(cb)
+
+        mock_page.on.side_effect = mock_on
+
+        mock_resp = MagicMock()
+        mock_resp.url = "https://cp.kuaishou.com/rest/cp/works/photo/list"
+        mock_resp.status = 200
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {
+            "result": 1,
+            "data": {
+                "list": [
+                    {
+                        "workId": "111",
+                        "title": "测试作品1 #动画",
+                        "uploadTime": 1726625160000,
+                        "playCount": 5000,
+                        "likeCount": 100,
+                    }
+                ]
+            }
+        }
+
+        def trigger_response(*args, **kwargs):
+            for cb in callbacks:
+                cb(mock_resp)
+
+        mock_page.wait_for_timeout.side_effect = trigger_response
+
+        res = sm.fetch_kuaishou_stats(mock_page)
+        assert len(res) == 1
+        assert res[0].play_count == 5000
+        assert res[0].like_count == 100
+        assert res[0].tags == ["动画"]
+
+    def test_fetch_kuaishou_user_info(self):
+        from unittest.mock import MagicMock
+        mock_page = MagicMock()
+        mock_page.evaluate.return_value = {
+            "result": 1,
+            "data": {
+                "coreUserInfo": {
+                    "userId": "user_123",
+                    "userName": "测试快手号",
+                    "fansNum": 25800,
+                }
+            }
+        }
+        info = sm.fetch_kuaishou_user_info(mock_page)
+        assert info is not None
+        assert info["fans"] == 25800
+        assert info["user_id"] == "user_123"
+        assert info["name"] == "测试快手号"

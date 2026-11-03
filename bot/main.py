@@ -772,6 +772,13 @@ def main() -> None:
                              "供话题优化使用")
     parser.add_argument("--stats-report", action="store_true",
                         help="只看已回流数据的话题效果报表，不抓取")
+    parser.add_argument("--reply-comments", nargs="?", const="kuaishou", default=None,
+                        metavar="PLATFORM",
+                        help="自动嗅探拉取作品评论并进行 AI 互动回复（默认 dry-run 校验，配合 --execute 真实发送）")
+    parser.add_argument("--execute", action="store_true",
+                        help="与 --reply-comments 配合：执行真实回复（未指定则为安全 dry-run）")
+    parser.add_argument("--max-replies", type=int, default=3, metavar="N",
+                        help="--reply-comments 单轮最大回复条数（默认 3，硬上限 10）")
     parser.add_argument("--retry-failed", action="store_true", help="重置失败任务并续跑")
     parser.add_argument("--abandon-unpublished", action="store_true",
                         help="放弃积压未发（流水线中任务 + PENDING/FAILED 平台 job），不补发")
@@ -866,6 +873,27 @@ def main() -> None:
                 tag_s = r["tags"] or ""
             print(f"{r['play_count']:>7}  {r['like_count'] or 0:>5}  "
                   f"{(r['published_at'] or '')[:16]:<17} {tag_s}")
+        sys.exit(0)
+
+    if args.reply_comments is not None:
+        platform = str(args.reply_comments).strip().lower()
+        if platform not in ("kuaishou", "ks"):
+            print(f"⚠️  当前评论互动回复仅支持快手（kuaishou），不支持 {platform!r}")
+            sys.exit(1)
+        from .publish.kuaishou_reply import run_kuaishou_reply_task
+        is_dry = not args.execute
+        mode_str = "【DRY-RUN 模拟校验】" if is_dry else "【EXECUTE 真实发送】"
+        print(f"\n>>> 启动快手评论互动回复任务 {mode_str}")
+        print(f">>> 单轮上限: {args.max_replies} 条 | 台账: data/ks_reply_log.jsonl\n")
+        res = run_kuaishou_reply_task(
+            dry_run=is_dry,
+            max_replies=args.max_replies,
+            headed=args.headed,
+        )
+        if "error" in res:
+            print(f"❌ 执行失败: {res['error']}")
+            sys.exit(1)
+        print(f"\n>>> 完成: 目标 {res['total']} 条 | 成功 {res['succeeded']} 条 | 失败 {res['failed']} 条")
         sys.exit(0)
 
     if args.login_qr is not None:

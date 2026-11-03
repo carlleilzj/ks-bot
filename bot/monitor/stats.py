@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
 log = logging.getLogger(__name__)
 
@@ -190,24 +191,95 @@ def fetch_douyin_stats(page, settle_ms: int = 10_000) -> list[WorkStat]:
     return stats
 
 
+def _work_stat_from_photo_item(v: dict) -> WorkStat | None:
+    """从快手官方 photo/list 响应对象构建 WorkStat（零正则解析，数据绝对精确）。"""
+    if not isinstance(v, dict):
+        return None
+    st = WorkStat()
+    st.play_count = int(v.get("playCount") or 0)
+    st.like_count = int(v.get("likeCount") or 0)
+
+    upload_time = v.get("uploadTime")
+    if upload_time:
+        try:
+            ts = float(upload_time)
+            if ts > 1e11:
+                ts /= 1000.0
+            dt = datetime.fromtimestamp(ts)
+            st.published_at = dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+    title = (v.get("title") or "").strip()
+    st.title_hint = title[:80]
+
+    tags: list[str] = []
+    for raw in re.findall(r"#([^\s#]+)", title):
+        tag = raw.strip()
+        if tag and len(tag) <= 12 and tag not in tags:
+            tags.append(tag)
+    st.tags = tags[:10]
+
+    if not st.published_at and st.play_count == 0:
+        return None
+    return st
+
+
 def fetch_kuaishou_stats(page, settle_ms: int = 12_000) -> list[WorkStat]:
     """从快手作品管理页抓数据（需登录态有效）。
 
-    快手卡片结构与抖音完全不同（2026-09-19 实测）：
-
-        00:49                        ← MM:SS 时长行 = 卡片天然分界
-        【纯享放松】安安静静看完全程… #无声视频 #纯享放松 #治愈系 #视觉解压
-        已发布
-        2026-09-18 10:06             ← 短横线日期
-         1.7万                        ← 播放（中文缩写，无「播放」字样）
-         3                            ← 评论
-         83                           ← 点赞
-
-    三列裸数字固定顺序：播放 / 评论 / 点赞。列序判定依据：67.4万 播放的
-    作品三列是 98 / 2,784 —— 98 只能是评论、2784 是点赞，反了不合常理。
+    优先通过网络嗅探截获页面自身发出的 photo/list 结构化 JSON（借鉴 MatrixMedia），
+    数据零误差且无需反编译签名；如果未嗅探到数据，自动回退到页面 DOM 文本正则解析。
     """
+    captured_items: list[dict] = []
+
+    def _on_response(response):
+        try:
+            url = getattr(response, "url", "")
+            if "photo/list" in url and getattr(response, "status", 0) == 200:
+                data = response.json()
+                if isinstance(data, dict) and data.get("result") == 1:
+                    lst = (data.get("data") or {}).get("list") or []
+                    for it in lst:
+                        if isinstance(it, dict):
+                            captured_items.append(it)
+        except Exception:
+            pass
+
     try:
-        page.wait_for_timeout(settle_ms)
+        page.on("response", _on_response)
+    except Exception:
+        pass
+
+    try:
+        # 页面滚动，触发懒加载与 photo/list 网络请求
+        page.wait_for_timeout(min(settle_ms, 3000))
+        page.evaluate("""() => {
+            window.scrollTo(0, document.documentElement.scrollHeight);
+            document.querySelectorAll('*').forEach(el => {
+                if (el.scrollHeight > el.clientHeight + 100 && el.clientHeight > 200) {
+                    el.scrollTop = el.scrollHeight;
+                }
+            });
+        }""")
+        page.wait_for_timeout(min(settle_ms, 3000))
+    except Exception as e:
+        log.debug("快手页面滚动触发异常：%s", e)
+
+    # 1. 优先使用网络嗅探捕获的精确数据
+    if captured_items:
+        sniffed_stats: list[WorkStat] = []
+        for it in captured_items:
+            st = _work_stat_from_photo_item(it)
+            if st:
+                sniffed_stats.append(st)
+        if sniffed_stats:
+            sniffed_stats = _dedupe(sniffed_stats)
+            log.info("快手作品数据：通过网络嗅探(photo/list)捕获到 %d 条精确数据", len(sniffed_stats))
+            return sniffed_stats
+
+    # 2. 兜底回退：原有 DOM 文本正则解析
+    try:
         body = page.locator("body").inner_text(timeout=15_000)
     except Exception as e:
         log.warning("快手作品数据抓取失败：%s", str(e)[:120])
@@ -227,8 +299,37 @@ def fetch_kuaishou_stats(page, settle_ms: int = 12_000) -> list[WorkStat]:
         if st:
             stats.append(st)
     stats = _dedupe(stats)
-    log.info("快手作品数据：解析到 %d 条", len(stats))
+    log.info("快手作品数据：DOM文本解析到 %d 条", len(stats))
     return stats
+
+
+def fetch_kuaishou_user_info(page) -> dict | None:
+    """读取快手创作者粉丝总量等概览数据（借鉴 MatrixMedia，无需复杂签名）。"""
+    try:
+        res = page.evaluate("""async () => {
+            const m = document.cookie.match(/(?:^|;\\s*)kuaishou\\.web\\.cp\\.api_ph=([^;]+)/);
+            const apiPh = m ? m[1] : '';
+            const resp = await fetch('/rest/cp/creator/pc/home/userInfo', {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/json;charset=UTF-8',
+                    'accept': 'application/json, text/plain, */*'
+                },
+                credentials: 'include',
+                body: JSON.stringify({ "kuaishou.web.cp.api_ph": apiPh })
+            });
+            return await resp.json();
+        }""")
+        if isinstance(res, dict) and res.get("result") == 1:
+            core = (res.get("data") or {}).get("coreUserInfo") or {}
+            return {
+                "fans": int(core.get("fansNum") or 0),
+                "user_id": core.get("userId"),
+                "name": core.get("userName"),
+            }
+    except Exception as e:
+        log.debug("获取快手创作者信息失败：%s", e)
+    return None
 
 
 def _parse_ks_block(blk: str) -> WorkStat | None:

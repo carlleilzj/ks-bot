@@ -290,8 +290,17 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         if platform.startswith("kuaishou"):
             if plat_cfg:
                 extra["cover_title"] = plat_cfg.cover_title
-            if copy.get("first_comment"):
-                extra["first_comment"] = copy["first_comment"]
+            fc = copy.get("first_comment")
+            if not fc and s.ai_api_key:
+                # 现场容错兜底：防止历史/未生成首评的任务漏发置顶首评
+                try:
+                    from .publish.kuaishou_reply import generate_comment_reply
+                    fc = generate_comment_reply(copy.get("title") or "", author_name="")
+                    log.info("[%s] 任务缺少首评，现场兜底生成: %s", task.get("shortcode"), fc)
+                except Exception as e:
+                    log.debug("现场生成首评兜底失败：%s", e)
+            if fc:
+                extra["first_comment"] = fc
             if plat_cfg and plat_cfg.attach_service:
                 # 2026-11-02：星火已下架，改挂「作者服务」推广（推广任务/商品）
                 extra["attach_service"] = plat_cfg.attach_service

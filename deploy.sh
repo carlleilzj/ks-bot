@@ -34,6 +34,16 @@ case "$TARGET" in
 esac
 
 echo "== 重启服务 =="
-[ "$TARGET" = aliyun ] || ssh gc-jp 'systemctl restart ks-bot.service && sleep 2 && systemctl is-active ks-bot.service'
-[ "$TARGET" = aliyun ] && ssh aliyun-gz 'systemctl restart ksbot-publish.service && sleep 2 && systemctl is-active ksbot-publish.service'
+case "$TARGET" in
+  japan|germany)
+    ssh gc-jp 'systemctl restart ks-bot.service && sleep 2 && systemctl is-active ks-bot.service'
+    ;;
+  aliyun)
+    ssh aliyun-gz 'systemctl restart ksbot-publish.service && sleep 2 && systemctl is-active ksbot-publish.service'
+    ;;
+  all)
+    ssh gc-jp 'systemctl restart ks-bot.service && sleep 2 && systemctl is-active ks-bot.service'
+    ssh aliyun-gz 'systemctl restart ksbot-publish.service && sleep 2 && systemctl is-active ksbot-publish.service'
+    ;;
+esac
 echo "完成。"
