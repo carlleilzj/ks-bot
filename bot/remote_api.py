@@ -259,10 +259,15 @@ class RemoteApi:
             })
         return {"ok": True, "platform": platform, "count": len(items), "items": items}
 
-    def missing_url_payload(self, platform: str = "kuaishou", days: int = 2) -> dict:
-        """已发布但链接为空的 job 清单（发布端补链接任务用）。"""
+    def missing_url_payload(self, platform: str = "kuaishou", days: int = 2,
+                            hours: int = 0) -> dict:
+        """已发布但链接为空的 job 清单（发布端补链接任务用）。
+
+        hours > 0 时按小时切窗（发布端自动兜底只补「刚发布」的作品，不动历史存量）。
+        """
         from datetime import datetime as _dt, timedelta as _td
-        cutoff = (_dt.now() - _td(days=days)).isoformat(timespec="seconds")
+        delta = _td(hours=hours) if hours > 0 else _td(days=days)
+        cutoff = (_dt.now() - delta).isoformat(timespec="seconds")
         rows = self.db.conn.execute(
             "SELECT j.task_id, j.platform, j.published_at, t.shortcode, t.title "
             "FROM publish_jobs j JOIN tasks t ON t.id = j.task_id "
@@ -515,7 +520,8 @@ class RemoteApi:
                 if parsed.path == "/api/missing-urls":
                     plat = qs.get("platform", ["kuaishou"])[0]
                     days = int((qs.get("days", ["2"])[0]) or 2)
-                    self._send_json(200, api.missing_url_payload(plat, days))
+                    hours = int((qs.get("hours", ["0"])[0]) or 0)
+                    self._send_json(200, api.missing_url_payload(plat, days, hours))
                     return
                 if parsed.path == "/api/login_request":
                     # 发布端轮询取走登录指令（GET = 取走并清除；?peek=1 只看不取）

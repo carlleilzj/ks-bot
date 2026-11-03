@@ -105,11 +105,14 @@ def report_spark_task(base: str, s: Settings, task_id: int, platform: str,
 
 
 def fetch_missing_urls(base: str, s: Settings, platform: str = "kuaishou",
-                       days: int = 2) -> list[dict]:
+                       days: int = 2, hours: int = 0) -> list[dict]:
     """拉协调端上已发布但链接为空的 job 清单（补链接任务用）。"""
+    params = {"platform": platform, "days": days}
+    if hours > 0:
+        params["hours"] = hours
     with httpx.Client(timeout=30) as c:
         r = c.get(f"{base}/api/missing-urls",
-                  params={"platform": platform, "days": days}, headers=_headers(s))
+                  params=params, headers=_headers(s))
         return (_check(r, "拉取待补链接清单") or {}).get("items", [])
 
 
@@ -598,11 +601,13 @@ BACKFILL_MAX_PER_RUN = 3         # 单轮最多补 3 条，避免占用发布窗
 
 
 def maybe_backfill_urls(base: str, s: Settings) -> None:
-    """周期性补齐「已发布但链接为空」的快手作品链接（每 10 分钟一次）。
+    """周期性补齐「刚发布但链接为空」的快手作品链接（每 10 分钟一次）。
 
     背景（2026-11-03 实测）：新作品从「审核中」进入作品管理页列表需 30~90 秒，
     发布流程内的轮询窗口偶尔赶不上，导致 TG 消息里「链接未获取到」。
     本任务在发布完成后异步兜底：查到空链接 → 按标题去管理页匹配 → 补录并 TG 提醒。
+
+    范围限定最近 3 小时：只保单条新发布作品的链接，不回补历史存量。
     """
     global _last_backfill_at
     now = time.time()
@@ -611,7 +616,9 @@ def maybe_backfill_urls(base: str, s: Settings) -> None:
     _last_backfill_at = now
 
     try:
-        items = fetch_missing_urls(base, s, "kuaishou", days=2)
+        # 只扫最近 3 小时内发布的作品：仅兜底「刚发出去、现场没来得及抓到链接」的新片，
+        # 不动历史存量（历史作品链接不再回补）。
+        items = fetch_missing_urls(base, s, "kuaishou", hours=3)
     except Exception as e:
         log.debug("补链接：拉取待补清单失败：%s", str(e)[:120])
         return
