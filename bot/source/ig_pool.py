@@ -146,6 +146,10 @@ def _has_sessionid(cf: Path) -> bool:
     try:
         with cf.open("r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
+                # 浏览器/常见插件导出的 Netscape 文件会用 `#HttpOnly_` 前缀
+                # 标记 HttpOnly cookie（sessionid 通常就是），必须先剥掉前缀
+                # 再判注释，否则会把「已登录」的合法 cookie 误判成缺 sessionid。
+                line = line.removeprefix("#HttpOnly_")
                 if line.startswith("#") or not line.strip():
                     continue
                 parts = line.rstrip("\n").split("\t")

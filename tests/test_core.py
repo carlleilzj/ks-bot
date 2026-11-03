@@ -60,8 +60,10 @@ def test_merge_tags_keeps_anchor_and_content_slots():
     assert out[0] == "无声视频"
     assert "萌宠日常" in out and "动物搞笑" in out
     assert len(out) == 4
-    # 固定池补齐：内容位占 2 个后还剩 1 个位给池子
-    assert "搞笑日常" in out
+    # 补齐也做家族去重：内容位已占「搞笑」家族（动物搞笑），
+    # 池里的「搞笑日常/沙雕视频」同族被跳过，补「搞笑动画」（动画家族）。
+    assert "搞笑动画" in out
+    assert "沙雕视频" not in out
 
 
 def test_merge_tags_dedupes_same_family():
@@ -73,10 +75,11 @@ def test_merge_tags_dedupes_same_family():
 
 
 def test_merge_tags_falls_back_to_fixed_pool():
-    """AI 没给内容话题时，回固定组合，条数补满。"""
+    """AI 没给内容话题时，回固定组合，条数补满且池内也去重同族。"""
     from bot.ai.copywriter import merge_tags
     out = merge_tags([], 4)
-    assert out == ["无声视频", "搞笑日常", "沙雕视频", "搞笑动画"]
+    assert out == ["无声视频", "搞笑日常", "搞笑动画", "笑到肚子疼"]
+    assert len(out) == 4
 
 
 def test_merge_tags_custom_slots_and_pool():

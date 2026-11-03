@@ -129,7 +129,12 @@ def fetch_kuaishou_hot_topics(timeout: float = 15.0) -> list[dict]:
 
 
 def load_cached_hot_topics(max_age_hours: float = 48.0) -> list[dict]:
-    """读取本地缓存的快手热门话题。"""
+    """读取本地缓存的快手热门话题。
+
+    超过 max_age_hours 视为失效并返回空列表：热榜三天前就完全变了，
+    继续注入只会让第 4 个「平台热门」话题长期追过期热点，反向拉低账号。
+    返回空时 prompt 自然跳过注入，退化为「垂类常青词」。
+    """
     if not KS_HOT_FILE.exists():
         return []
     try:
@@ -139,10 +144,11 @@ def load_cached_hot_topics(max_age_hours: float = 48.0) -> list[dict]:
             dt = datetime.fromisoformat(updated_at)
             age = (datetime.now() - dt).total_seconds() / 3600
             if age > max_age_hours:
-                log.debug("快手热门话题缓存已过期 (%.1fh)", age)
+                log.info("快手热门话题缓存已过期（%.1fh > %.0fh），本次不注入", age, max_age_hours)
+                return []
         return data.get("topics") or []
     except Exception as e:
-        log.debug("读取快手热门话题缓存失败: %s", e)
+        log.warning("读取快手热门话题缓存失败（本次不注入）: %s", e)
         return []
 
 

@@ -24,7 +24,7 @@ from dotenv import set_key
 
 from .ai.asr import transcribe
 from .ai.copywriter import generate_copy
-from .ai.vision import check_real_person, inspect_video_frames, watermark_only_block
+from .ai.vision import inspect_video_frames, watermark_only_block
 from .config import (
     ENV_PATH,
     FINAL_DIR,
@@ -383,6 +383,8 @@ def step_publish(s: Settings, db: Database, task: dict, headed: bool) -> None:
                 plat = s.platforms.get(pub.name)
                 if plat:
                     extra["cover_title"] = plat.cover_title
+                    if plat.anchors:
+                        extra["anchors"] = dict(plat.anchors)
                 if copy.get("first_comment"):
                     extra["first_comment"] = copy["first_comment"]
                 if plat and plat.attach_service:
@@ -548,42 +550,13 @@ def advance_task(s: Settings, db: Database, task_id: int,
         if st == State.NOTIFIED:
             return
         try:
-            if st == State.DETECTED:
-                step_download(s, db, task)
-            elif st == State.DOWNLOADED:
-                step_transcode(s, db, task)
-            elif st == State.TRANSCODED:
-                step_transcribe(s, db, task)
-            elif st == State.TRANSCRIBED:
-                step_copywrite(s, db, task)
-            elif st == State.COPYWRITTEN:
-                step_subtitle(s, db, task)
-            elif st in (State.SUBTITLED, State.READY):
-                if dry_run:
-                    if st == State.SUBTITLED:
-                        db.update(task_id, state=State.READY)
-                        log.info("[dry-run] %s 已就绪，停在发布前：%s", task["shortcode"], task["final_path"])
-                    return
-                if stage == "process":
-                    # 分体部署 VPS 端：推进到 READY 即止，发布由家庭端 worker 认领
-                    if st == State.SUBTITLED:
-                        # 预创建平台 job：远程端 /api/pending 按 job 派发，没有 job 任务就不可见
-                        db.create_publish_jobs(task_id, [p.name for p in _task_platforms(s, task)])
-                        db.update(task_id, state=State.READY)
-                        log.info("[stage=process] %s 处理完成，等待远程发布端领取：%s",
-                                 task["shortcode"], task["final_path"])
-                    return
-                # 发布窗口是全局的（夜间不发），平台间隔/限额在 step_publish 内按平台独立判断
-                window_reason = _window_only_gate(s, db)
-                if window_reason:
-                    log.debug("发布等待：%s（%s）", task["shortcode"], window_reason)
-                    return
-                step_publish(s, db, task, headed)
-                return  # 发布阶段每轮最多推进一次：失败的 job 等下一轮再试，避免连烧伤重试次数
-            elif st == State.PUBLISHED:
-                step_notify(s, db, task)
-            else:
-                return
+            _advance_one_step(s, db, task, st, dry_run, headed, stage)
+            # 阶段推进成功即清零重试计数：retries 的语义是「同一阶段连续失败次数」。
+            # 此前全生命周期累计，任意 3 次瞬时错误（下载抖动 + ASR 超时 + 发布异常）
+            # 就会把任务打成 FAILED 终态，与「失败自动重试 3 次」的预期不符。
+            after = db.get(task_id)
+            if after and after["state"] != st and (after.get("retries") or 0):
+                db.update(task_id, retries=0)
         except Exception as e:
             retries = (task["retries"] or 0) + 1
             log.exception("[%s] 在 %s 阶段失败（第 %d 次）", task["shortcode"], st, retries)
@@ -598,6 +571,61 @@ def advance_task(s: Settings, db: Database, task_id: int,
                 telegram.notify_info(s, f"⚠️ 任务 [{task['shortcode']}] @{task.get('username','')} 在 {st} 阶段出错（第 {retries}/{MAX_RETRIES} 次），将自动重试\n"
                                         f"错误：{str(e)[:200]}")
             return
+        # 状态没变（等待窗口/发布阶段每轮一次）就结束本轮，避免空转
+        after = db.get(task_id)
+        if after is None or after["state"] == st:
+            return
+
+
+def _advance_one_step(s: Settings, db: Database, task: dict, st: str,
+                      dry_run: bool, headed: bool, stage: str) -> None:
+    """按当前状态推进一步。异常向调用方抛出（由 advance_task 统一计数/告警）。"""
+    task_id = task["id"]
+    if st == State.DETECTED:
+        step_download(s, db, task)
+    elif st == State.DOWNLOADED:
+        step_transcode(s, db, task)
+    elif st == State.TRANSCODED:
+        step_transcribe(s, db, task)
+    elif st == State.TRANSCRIBED:
+        step_copywrite(s, db, task)
+    elif st == State.COPYWRITTEN:
+        step_subtitle(s, db, task)
+    elif st in (State.SUBTITLED, State.READY):
+        if dry_run:
+            if st == State.SUBTITLED:
+                db.update(task_id, state=State.READY)
+                log.info("[dry-run] %s 已就绪，停在发布前：%s", task["shortcode"], task["final_path"])
+            return
+        if stage == "process":
+            # 分体部署 VPS 端：推进到 READY 即止，发布由家庭端 worker 认领
+            if st == State.SUBTITLED:
+                pubs = _task_platforms(s, task)
+                if not pubs:
+                    # 指定平台全被停用：既建不出 job 也不会有人认领，
+                    # 留在流水线里只会每轮空转并占 pending() 名额。
+                    db.update(task_id, state=State.SKIPPED,
+                              error=f"目标平台均不可用（target={task.get('target_platforms')!r}）")
+                    log.warning("[%s] 目标平台全部停用，标记 SKIPPED", task["shortcode"])
+                    telegram.notify_info(
+                        s, f"⏭️ [{task['shortcode']}] 目标平台全部停用，已跳过"
+                           f"（target={task.get('target_platforms')!r}）")
+                else:
+                    # 预创建平台 job：远程端 /api/pending 按 job 派发，没有 job 任务就不可见
+                    db.create_publish_jobs(task_id, [p.name for p in pubs])
+                    db.update(task_id, state=State.READY)
+                    log.info("[stage=process] %s 处理完成，等待远程发布端领取：%s",
+                             task["shortcode"], task["final_path"])
+            return
+        # 发布窗口是全局的（夜间不发），平台间隔/限额在 step_publish 内按平台独立判断
+        window_reason = _window_only_gate(s, db)
+        if window_reason:
+            log.debug("发布等待：%s（%s）", task["shortcode"], window_reason)
+            return
+        step_publish(s, db, task, headed)
+        return  # 发布阶段每轮最多推进一次：失败的 job 等下一轮再试，避免连烧伤重试次数
+    elif st == State.PUBLISHED:
+        step_notify(s, db, task)
 
 
 # ---------- 主循环 ----------
@@ -629,6 +657,15 @@ def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "
             telegram.notify_info(s, f"🩹 自愈：重开 {reopened} 个滞留任务（存在待发布平台 job）")
     except Exception:
         log.exception("reopen_stranded 失败")
+
+    # 1b) 自愈：READY 但所有平台 job 都已终态 → 补写 PUBLISHED，进通知阶段。
+    #     发布端逐平台回报时最后一步被打断会留下这种任务，它们不会自己前进。
+    try:
+        finalized = db.finalize_orphan_ready()
+        if finalized:
+            log.warning("自愈：%d 个 READY 任务所有平台已终态，补写 PUBLISHED", finalized)
+    except Exception:
+        log.exception("finalize_orphan_ready 失败")
 
     # 2) 推进流水线
     for task in db.pending():
@@ -805,9 +842,10 @@ def main() -> None:
         # 播放量回流：抓平台后台 → 写回 tasks.play_count，供话题优化使用。
         # 为什么要这一步：tasks 表原本没有播放量字段，AI 生成话题只能靠
         # 先验审美，导致话题退化成「治愈/解压/纯享」近义词排列组合。
-        from .monitor import stats as stats_mod
-        from .publish.base import launch_chromium, new_context, goto_with_retry
         from playwright.sync_api import sync_playwright
+
+        from .monitor import stats as stats_mod
+        from .publish.base import goto_with_retry, launch_chromium, new_context
 
         if args.fetch_stats == "all":
             targets = ["douyin", "kuaishou"]
@@ -899,9 +937,9 @@ def main() -> None:
     if args.login_qr is not None:
         # 无头登录：把二维码导成图片，人工用手机扫。用于发布端服务器（无桌面）。
         # 各平台的 login_qr_image 都在各自的 publish 模块里，签名一致。
-        from .publish.weixin import login_qr_image as weixin_qr
         from .publish.kuaishou import login_qr_image as kuaishou_qr
         from .publish.toutiao import login_qr_image as toutiao_qr
+        from .publish.weixin import login_qr_image as weixin_qr
 
         _QR_IMPL = {"weixin": weixin_qr, "kuaishou": kuaishou_qr,
                     "kuaishou2": kuaishou_qr, "toutiao": toutiao_qr}

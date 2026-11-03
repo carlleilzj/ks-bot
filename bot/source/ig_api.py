@@ -86,6 +86,8 @@ def _read_cookie(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
+            # 同上：`#HttpOnly_` 是 Netscape 格式对 HttpOnly cookie 的标记前缀
+            line = line.removeprefix("#HttpOnly_")
             if not line.strip() or line.startswith("#"):
                 continue
             f = line.split("\t")
@@ -96,8 +98,13 @@ def _read_cookie(path: Path) -> dict[str, str]:
     return out
 
 
-def _try_fetch(pk: int, cookies: dict, app_id: str, host: str) -> dict | None:
-    """请求 media info。返回 items[0] 或 None。"""
+def _try_fetch(pk: int, cookies: dict, app_id: str, host: str) -> tuple[dict | None, int]:
+    """请求 media info。返回 (items[0] 或 None, HTTP 状态码)。
+
+    返回状态码是为了区分「帖子真的没了（404）」和「登录态失效（401/403）/限流（429）」。
+    此前一律返回 None，会话过期被降级成「帖子不可访问」，账号永不冷却，
+    于是每轮都优先选这个坏账号，形成稳定失败循环。
+    """
     url = f"https://{host}/api/v1/media/{pk}/info/"
     headers = {
         "User-Agent": _MOBILE_UA,
@@ -113,17 +120,17 @@ def _try_fetch(pk: int, cookies: dict, app_id: str, host: str) -> dict | None:
             r = c.get(url, headers=headers)
     except Exception as e:
         log.debug("media info 请求异常（%s）：%s", host, e)
-        return None
+        return None, 0
 
     if r.status_code != 200:
         log.debug("media info %s HTTP %d: %s", host, r.status_code, r.text[:150])
-        return None
+        return None, r.status_code
     try:
         d = r.json()
     except Exception:
-        return None
+        return None, r.status_code
     items = d.get("items") or []
-    return items[0] if items else None
+    return (items[0] if items else None), r.status_code
 
 
 def _best_video_url(item: dict) -> str:
@@ -171,17 +178,27 @@ def extract(url: str):
     # 依次尝试：iOS 端点 → Web 端点
     item = None
     last_err = ""
+    auth_failed = False
     for host, app_id in (("i.instagram.com", _APP_ID_IOS),
                          ("www.instagram.com", _APP_ID_WEB)):
-        item = _try_fetch(pk, cookies, app_id, host)
+        item, status = _try_fetch(pk, cookies, app_id, host)
         if item:
             log.info("IG 解析成功：%s（%s，账号 %s）", shortcode, host, acct)
             break
-        last_err = f"{host} 无数据"
+        # 401/403 = 登录态失效；429 = 限流。这两种必须冷却账号，
+        # 否则坏账号会被反复优先选中（每轮都失败，运维看到的是「帖子删了」）。
+        if status in (401, 403, 429):
+            auth_failed = True
+        last_err = f"{host} HTTP {status or '异常'}"
 
     if not item:
+        if auth_failed and acct:
+            ig_pool.report_blocked(acct, f"IG 会话失效或限流（{last_err}）")
+            raise ValueError(
+                f"IG 账号 {acct} 会话失效/被限流，已冷却并切换其他账号。"
+                f"请到发布端重新扫码登录。详情：{last_err}"
+            )
         # 两个端点都没数据：绝大多数是帖子本身已删除/私密。
-        # 账号是否被风控由 probe() 判定，这里不冷却（避免误伤）。
         raise ValueError(
             f"IG 帖子不可访问（{shortcode}）。可能已被删除、设为私密，"
             f"或需要登录。详情：{last_err}"

@@ -78,7 +78,7 @@ def _base_opts(url: str = "") -> tuple[dict, str]:
     return opts, acct
 
 # 追踪参数黑名单（出现在这些里的查询参数一律删掉）
-_TRACKING_PREFIXES = ("utm_", "fbclid", "gclid", "igshi", "igsi", "ref", "_branch")
+_TRACKING_PREFIXES = ("utm_", "fbclid", "gclid", "igsh", "igshi", "igsi", "ref", "_branch")
 
 # 平台识别：extractor_key → 短名称
 _PLATFORM_MAP = {
@@ -156,6 +156,10 @@ def extract_meta(url: str) -> VideoMeta:
         "no_warnings": True,
         "skip_download": True,
         "extract_flat": False,
+        # 超时保护：yt-dlp 默认无 socket 超时，一条半死的链接能把唯一的
+        # TG 监听线程阻塞数分钟，期间所有投链与按钮回调全部排队。
+        "socket_timeout": 30,
+        "retries": 2,
         # 元数据阶段不选下载格式。mweb 在部分 Shorts 上没有可合并流，
         # 默认 bestvideo+bestaudio 会在拿到标题前就报 Requested format is not available。
         "format": None,

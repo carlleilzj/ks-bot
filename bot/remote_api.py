@@ -24,6 +24,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import shutil
 import threading
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -166,7 +167,8 @@ class RemoteApi:
         登录态只在发布端新鲜，published_at 只在协调端库里——两台机器
         各持一半，抓取在发布端、匹配在本端，靠这个端点桥起来。
         """
-        from .monitor.stats import WorkStat, persist as persist_stats
+        from .monitor.stats import WorkStat
+        from .monitor.stats import persist as persist_stats
         platform = str(data.get("platform") or "").strip()
         rows = data.get("stats") or []
         if not (platform and isinstance(rows, list)):
@@ -196,21 +198,49 @@ class RemoteApi:
         return {"ok": True, **res}
 
     def hot_topics_ingest(self, data: dict) -> dict:
-        """接收发布端（阿里云）每天推送的平台热门话题并归档到 data/<platform>_hot_topics.json。"""
+        """接收发布端（阿里云）每天推送的平台热门话题并归档到 data/kuaishou_hot_topics.json。
+
+        校验要求（2026-11-04 加固）：
+        - platform 白名单：目前只有 kuaishou 有榜单；传别的平台会覆盖掉快手榜。
+        - 逐条清洗：非 dict / 空 topic 一律丢弃，topic 截断到 32 字，最多 100 条。
+          下游 format_hot_topics_for_prompt 会直接 .get，脏数据会让热榜静默失效。
+        - 原子写入：先写临时文件再 os.replace，避免读到半截 JSON。
+        """
         from .monitor.kuaishou_hot import KS_HOT_FILE
-        platform = str(data.get("platform") or "kuaishou").strip()
+
+        platform = str(data.get("platform") or "kuaishou").strip().lower()
+        if platform != "kuaishou":
+            return {"ok": False, "error": f"unsupported platform: {platform}"}
         topics = data.get("topics") or []
         if not isinstance(topics, list):
             return {"ok": False, "error": "topics must be a list"}
+
+        clean: list[dict] = []
+        for item in topics[:100]:
+            if not isinstance(item, dict):
+                continue
+            topic = str(item.get("topic") or "").strip()
+            if not topic:
+                continue
+            clean.append({
+                "rank": len(clean) + 1,
+                "topic": topic[:32],
+                "hot_value": str(item.get("hot_value") or "").strip()[:16],
+            })
+        if not clean:
+            return {"ok": False, "error": "no valid topics"}
+
         payload = {
             "platform": platform,
             "updated_at": now_iso(),
-            "count": len(topics),
-            "topics": topics,
+            "count": len(clean),
+            "topics": clean,
         }
-        KS_HOT_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        log.info("[hot_topics] %s 热门话题已归档：%d 条 -> %s", platform, len(topics), KS_HOT_FILE)
-        return {"ok": True, "count": len(topics), "updated_at": payload["updated_at"]}
+        tmp = KS_HOT_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(KS_HOT_FILE)
+        log.info("[hot_topics] %s 热门话题已归档：%d 条 -> %s", platform, len(clean), KS_HOT_FILE)
+        return {"ok": True, "count": len(clean), "updated_at": payload["updated_at"]}
 
     # ---------- 远程登录指令（TG /login → 协调端落标记 → 发布端取走执行） ----------
 
@@ -235,7 +265,8 @@ class RemoteApi:
 
     def published_payload(self, platform: str = "douyin", days: int = 7) -> dict:
         """近期已发布作品清单（供家庭端审核巡检匹配通知）。"""
-        from datetime import datetime as _dt, timedelta as _td
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
         cutoff = (_dt.now() - _td(days=days)).isoformat(timespec="seconds")
         rows = self.db.conn.execute(
             "SELECT j.task_id, j.platform, j.state, j.url, j.published_at, "
@@ -265,7 +296,8 @@ class RemoteApi:
 
         hours > 0 时按小时切窗（发布端自动兜底只补「刚发布」的作品，不动历史存量）。
         """
-        from datetime import datetime as _dt, timedelta as _td
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
         delta = _td(hours=hours) if hours > 0 else _td(days=days)
         cutoff = (_dt.now() - delta).isoformat(timespec="seconds")
         rows = self.db.conn.execute(
@@ -356,7 +388,8 @@ class RemoteApi:
         阈值默认 30 分钟：正常发布耗时 1~3 分钟，超过 30 分钟必然是异常。
         发布端每次启动时调用一次即可（幂等）。
         """
-        from datetime import datetime as _dt, timedelta as _td
+        from datetime import datetime as _dt
+        from datetime import timedelta as _td
         cutoff = (_dt.now() - _td(minutes=max(1, older_than_minutes))).isoformat(timespec="seconds")
         with self.db._lock:
             cur = self.db.conn.execute(
@@ -398,17 +431,46 @@ class RemoteApi:
         err = str(data.get("error") or "")[:500]
         login_expired = bool(data.get("login_expired"))
         url = str(data.get("url") or "")[:500]
+        unrecoverable = bool(data.get("unrecoverable"))
+
+        # 失败重试上限：远端以前没有任何终态出口 —— retries 涨到 5 之后 worker
+        # 只是打一行 warning 跳过，job 永远停在 PENDING，任务永远 READY，
+        # 既不发布也不通知，只能人工翻库。这里给出终态。
+        MAX_JOB_RETRIES = 5
 
         with self.db._lock:
             # 登录态失效不能把 job 打成 SKIPPED（终态、永不重试）——
             # 那会在每次会话过期时**永久烧掉整个待发队列**，重登后也回不来，
             # 只能人工翻库恢复（2026-09-28/29 连续两次踩到）。
             # 正确做法：退回 PENDING 等重登，且不消耗 retries（不是任务本身的错）。
-            # 仅当 worker 明确报告「该账号已被封禁/不可恢复」时才 SKIPPED。
-            recoverable = login_expired and not bool(data.get("unrecoverable"))
-            new_state = (JobState.PUBLISHED if ok
-                         else (JobState.PENDING if (recoverable or not login_expired)
-                               else JobState.SKIPPED))
+            # 但「不消耗 retries」若无独立计数就会无限空转、每轮一条 TG：
+            # 因此登录失效单独累计 login_fails，达到 2 次才转 SKIPPED 等人工。
+            recoverable = login_expired and not unrecoverable
+            if ok:
+                new_state = JobState.PUBLISHED
+            elif recoverable:
+                row = self.db.conn.execute(
+                    "SELECT retries, error FROM publish_jobs "
+                    "WHERE task_id=? AND platform=? AND state=?",
+                    (task_id, platform, PUBLISHING)).fetchone()
+                prev_err = str((row["error"] if row else "") or "")
+                # 累计 marker：每次登录失效追加一个 [login_expired]，
+                # 已有 1 个说明本轮是连续第 2 次 → 转 SKIPPED 等人工扫码。
+                prev_fails = prev_err.count("[login_expired]")
+                if prev_fails >= 1:
+                    new_state = JobState.SKIPPED
+                    err = f"{prev_err} 连续登录失效，已跳过等人工扫码：{err}"[:500]
+                else:
+                    new_state = JobState.PENDING
+                    err = f"[login_expired] {err}"[:500]
+            elif login_expired:
+                new_state = JobState.SKIPPED
+            else:
+                row = self.db.conn.execute(
+                    "SELECT retries FROM publish_jobs WHERE task_id=? AND platform=? AND state=?",
+                    (task_id, platform, PUBLISHING)).fetchone()
+                will_exceed = (row["retries"] if row else 0) + 1 >= MAX_JOB_RETRIES
+                new_state = JobState.FAILED if will_exceed else JobState.PENDING
             cur = self.db.conn.execute(
                 "UPDATE publish_jobs SET state=?, url=?, error=?, "
                 "retries=CASE WHEN ? THEN retries ELSE retries+1 END, "
@@ -454,8 +516,21 @@ class RemoteApi:
                     self.s, f"🔑 [{task['shortcode']}] {display} 登录态失效（不可恢复），"
                             f"job 已跳过\n请到发布端运行 python -m bot.main --login {platform} 重新扫码")
         else:
-            log.warning("[%s] %s 发布失败：%s", task["shortcode"], display, err[:150])
-            telegram.notify_info(self.s, f"⚠️ [{task['shortcode']}] {display} 发布失败，将自动重试\n错误：{err[:200]}")
+            if new_state == JobState.FAILED:
+                log.error("[%s] %s 重试已达上限，job 标记 FAILED：%s",
+                          task["shortcode"], display, err[:150])
+                telegram.notify_info(
+                    self.s, f"❌ [{task['shortcode']}] {display} 连续失败 {MAX_JOB_RETRIES} 次，"
+                            f"job 已标记 FAILED，等人工处理后重置\n错误：{err[:250]}")
+            elif new_state == JobState.SKIPPED:
+                log.warning("[%s] %s 登录态连续失效且不可恢复，job 已 SKIPPED",
+                            task["shortcode"], display)
+                telegram.notify_info(
+                    self.s, f"🔑 [{task['shortcode']}] {display} 登录态连续失效，job 已跳过\n"
+                            f"请到发布端运行 python -m bot.main --login-qr {platform} 重新扫码后重置")
+            else:
+                log.warning("[%s] %s 发布失败：%s", task["shortcode"], display, err[:150])
+                telegram.notify_info(self.s, f"⚠️ [{task['shortcode']}] {display} 发布失败，将自动重试\n错误：{err[:200]}")
 
         # 全部 job 终态 → 任务 PUBLISHED
         with self.db._lock:
@@ -497,6 +572,26 @@ class RemoteApi:
                 self._send(code, payload)
 
             def do_GET(self):
+                try:
+                    self._do_get()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                except Exception as e:
+                    log.exception("GET 处理异常 %s", self.path[:120])
+                    try:
+                        self._send_json(400, {"error": f"bad request: {str(e)[:150]}"})
+                    except Exception:
+                        pass
+
+            @staticmethod
+            def _qint(qs: dict, key: str, default: int) -> int:
+                """畸形查询参数不该让 handler 抛 ValueError 断连（worker 侧看到连接重置）。"""
+                try:
+                    return int(qs.get(key, [str(default)])[0] or default)
+                except (TypeError, ValueError):
+                    return default
+
+            def _do_get(self):
                 parsed = urlparse(self.path)
                 qs = parse_qs(parsed.query)
                 if parsed.path == "/api/health":
@@ -514,19 +609,19 @@ class RemoteApi:
                     return
                 if parsed.path == "/api/published":
                     plat = qs.get("platform", ["douyin"])[0]
-                    days = int((qs.get("days", ["7"])[0]) or 7)
+                    days = self._qint(qs, "days", 7)
                     self._send_json(200, api.published_payload(plat, days))
                     return
                 if parsed.path == "/api/missing-urls":
                     plat = qs.get("platform", ["kuaishou"])[0]
-                    days = int((qs.get("days", ["2"])[0]) or 2)
-                    hours = int((qs.get("hours", ["0"])[0]) or 0)
+                    days = self._qint(qs, "days", 2)
+                    hours = self._qint(qs, "hours", 0)
                     self._send_json(200, api.missing_url_payload(plat, days, hours))
                     return
                 if parsed.path == "/api/login_request":
                     # 发布端轮询取走登录指令（GET = 取走并清除；?peek=1 只看不取）
                     self._send_json(200, api.take_login_request(
-                        peek=bool(int(qs.get("peek", ["0"])[0] or 0))))
+                        peek=bool(self._qint(qs, "peek", 0))))
                     return
                 if parsed.path == "/api/file":
                     self._serve_file(qs.get("path", [""])[0])
@@ -544,7 +639,13 @@ class RemoteApi:
                 if not p.is_file():
                     self._send_json(404, {"error": "file not found"})
                     return
-                self._send(200, p.read_bytes(), content_type="application/octet-stream")
+                # 分块写：成品视频可能上百 MB，read_bytes 会整片进内存
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(p.stat().st_size))
+                self.end_headers()
+                with p.open("rb") as fh:
+                    shutil.copyfileobj(fh, self.wfile, length=1 << 20)
 
             def do_POST(self):
                 parsed = urlparse(self.path)
@@ -552,7 +653,9 @@ class RemoteApi:
                     self._send_json(401, {"error": "unauthorized"})
                     return
                 try:
-                    length = min(int(self.headers.get("Content-Length") or 0), 1 << 20)
+                    # max(0, ...)：Content-Length 为负时 read(-1) 会一直读到 EOF，
+                    # 把 handler 线程挂死。上限 1MB 防止超大 body 占内存。
+                    length = max(0, min(int(self.headers.get("Content-Length") or 0), 1 << 20))
                     data = json.loads(self.rfile.read(length) or b"{}")
                 except Exception:
                     self._send_json(400, {"error": "invalid json"})
@@ -628,11 +731,27 @@ class RemoteApi:
                 self._send_json(404, {"error": "not found"})
 
         host = bind_host.strip()
-        # 绑定安全校验：只允许 Tailscale CGNAT（100.64.0.0/10）、其他私有网段和回环
-        # 注意：100.64/10 是运营商级 NAT 保留段（Tailscale 用），Python 的 is_private=False
-        ip = ipaddress.ip_address(host)
-        ts_net = ipaddress.ip_network("100.64.0.0/10")
-        if not (ip in ts_net or ip.is_private or ip.is_loopback):
+        # 绑定安全校验：只允许回环与明确的私有/内网段。
+        # 2026-11-04 修正：此前用 `ip.is_private` 白名单，但 0.0.0.0 / :: （未指定
+        # 地址）在 Python 3.12 里 is_private 也是 True，最常见的误配会直接监听
+        # 全网卡、公网可达，只剩 Bearer token 一层防护。改为显式网段白名单。
+        ALLOWED_NETS = (
+            ipaddress.ip_network("127.0.0.0/8"),      # 回环（SSH 隧道落地）
+            ipaddress.ip_network("100.64.0.0/10"),    # Tailscale CGNAT
+            ipaddress.ip_network("10.0.0.0/8"),
+            ipaddress.ip_network("172.16.0.0/12"),
+            ipaddress.ip_network("192.168.0.0/16"),
+        )
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError as e:
+            raise RemoteApiError(
+                f"REMOTE_API_BIND 不是合法 IP：{host!r}（应填 127.0.0.1 或 Tailscale IP）") from e
+        if ip.is_unspecified or ip.is_link_local or ip.is_multicast:
+            raise RemoteApiError(
+                f"拒绝绑定 {host}：0.0.0.0/::/链路本地地址会暴露到公网，"
+                f"请填 127.0.0.1（SSH 隧道）或 Tailscale IP（100.x）")
+        if ip.version != 6 and not any(ip in net for net in ALLOWED_NETS):
             raise RemoteApiError(
                 f"拒绝绑定非私有地址 {host}：API 只能绑 Tailscale IP（100.x/CGNAT）或 127.0.0.1")
 

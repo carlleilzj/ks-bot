@@ -27,13 +27,15 @@ from pathlib import Path
 
 import httpx
 
-from .config import MEDIA_DIR, Settings, load_settings
-from .notify import telegram
 from .audit_check import _parse_dt
+from .config import DATA_DIR, MEDIA_DIR, Settings, load_settings
+from .notify import telegram
 
 log = logging.getLogger("publish_worker")
 
 REMOTE_DIR = MEDIA_DIR / "remote"  # 家庭端下载缓存
+# 发布成功但回报失败的本地补报队列（防「已发出却回报失败 → 重复发布」）
+PENDING_REPORTS_PATH = DATA_DIR / "pending_reports.jsonl"
 
 
 class WorkerError(Exception):
@@ -79,6 +81,76 @@ def report(base: str, s: Settings, task_id: int, platform: str, ok: bool,
                    json={"task_id": task_id, "platform": platform, "ok": ok,
                          "url": url, "error": error, "login_expired": login_expired})
         _check(r, f"回报 {task_id}/{platform}")
+
+
+def _report_success_with_retry(base: str, s: Settings, task: dict, platform: str,
+                               url: str) -> bool:
+    """回报「发布成功」，带退避重试 + 本地补报队列。
+
+    视频已经真实发出去了，这条回报决定协调端把 job 记成 PUBLISHED 还是放回
+    PENDING（→ 重复发布）。所以绝不允许因为隧道抖动就降级成失败：
+    重试 3 次，仍失败就写本地 outbox，由下一轮启动时补报。
+    """
+    task_id = task["task_id"]
+    for attempt in range(1, 4):
+        try:
+            report(base, s, task_id, platform, ok=True, url=url)
+            return True
+        except Exception as e:
+            log.warning("[%s] %s 成功回报失败（第 %d/3 次）：%s",
+                        task.get("shortcode"), platform, attempt, str(e)[:120])
+            time.sleep(5 * attempt)
+    _queue_pending_report(task_id, platform, url)
+    log.error("[%s] %s 成功回报重试耗尽，已写入本地补报队列 %s",
+              task.get("shortcode"), platform, PENDING_REPORTS_PATH)
+    return False
+
+
+def _queue_pending_report(task_id: int, platform: str, url: str) -> None:
+    """把未能上报的成功结果落盘，等待下一轮补报（幂等追加）。"""
+    try:
+        PENDING_REPORTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with PENDING_REPORTS_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"task_id": task_id, "platform": platform,
+                                 "url": url, "at": time.time()}, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log.error("写补报队列失败（该条可能重复发布）：%s", e)
+
+
+def flush_pending_reports(base: str, s: Settings) -> int:
+    """补报上轮未能上报的成功结果。返回成功条数。"""
+    if not PENDING_REPORTS_PATH.exists():
+        return 0
+    kept: list[str] = []
+    done = 0
+    try:
+        lines = PENDING_REPORTS_PATH.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        try:
+            report(base, s, int(item["task_id"]), str(item["platform"]),
+                   ok=True, url=str(item.get("url") or ""))
+            done += 1
+        except Exception:
+            kept.append(line)
+    try:
+        if kept:
+            PENDING_REPORTS_PATH.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        else:
+            PENDING_REPORTS_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+    if done:
+        log.info("补报上一轮未上报的发布成功结果：%d 条", done)
+    return done
 
 
 
@@ -310,6 +382,9 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         if platform.startswith("kuaishou"):
             if plat_cfg:
                 extra["cover_title"] = plat_cfg.cover_title
+                # 热点/地点/作者声明（2026-11-04 接通：此前 config 写了但代码不读）
+                if plat_cfg.anchors:
+                    extra["anchors"] = dict(plat_cfg.anchors)
             fc = copy.get("first_comment")
             if not fc and s.ai_api_key:
                 # 现场容错兜底：防止历史/未生成首评的任务漏发置顶首评
@@ -343,22 +418,33 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
             if decl:
                 extra["declaration"] = decl
         log.info("[%s] %s 开始发布：%s", task["shortcode"], pub.display_name, copy["title"][:40])
-        url = pub.publish(
-            video=video,
-            title=copy["title"],
-            description=copy["description"],
-            tags=copy["tags"],
-            category=copy["category"],
-            cover=cover,
-            headless=s.publish.headless,
-            state_path=pub.state_path,
-            **extra,
-        )
-        report(base, s, task_id, platform, ok=True, url=url or "")
+        try:
+            url = pub.publish(
+                video=video,
+                title=copy["title"],
+                description=copy["description"],
+                tags=copy["tags"],
+                category=copy["category"],
+                cover=cover,
+                headless=s.publish.headless,
+                state_path=pub.state_path,
+                **extra,
+            )
+        except Exception:
+            # 发布本身失败：交给外层统一回报失败（含登录态独立分支）
+            raise
+        # ---- 以下只在「发布已经成功」后执行，任何异常都不能走到 ok=False ----
+        # 曾经的写法把 report(ok=True) 和 publish() 放在同一个 try 里：隧道抖动时
+        # report 抛 WorkerError → 被 except 接住 → 回报失败 → job 回到 PENDING
+        # → 下一条轮次把同一视频再发一次（重复发布）。
+        _report_success_with_retry(base, s, task, platform, url or "")
         log.info("[%s] %s 发布成功：%s", task["shortcode"], pub.display_name, url or "-")
         # 星火任务名回报给协调端落库（收益归因：收益按任务维度结算）
         if spark_sink:
-            report_spark_task(base, s, task_id, platform, spark_sink[0])
+            try:
+                report_spark_task(base, s, task_id, platform, spark_sink[0])
+            except Exception as e:
+                log.warning("[%s] 星火任务名回报失败（不影响发布）：%s", task["shortcode"], str(e)[:120])
         if platform == "douyin":
             schedule_douyin_audit(5 * 60, reason=f"发布后 5 分钟初审复检 [{task['shortcode']}]")
             schedule_douyin_audit(15 * 60, reason=f"发布后 15 分钟二审复检 [{task['shortcode']}]")
@@ -430,10 +516,12 @@ def maybe_refresh_stats(s: Settings, base: str = "") -> None:
         return
 
     from dataclasses import asdict
+
+    from playwright.sync_api import sync_playwright
+
     from .monitor import stats as stats_mod
     from .publish import all_publishers, get_publisher
-    from .publish.base import launch_chromium, new_context, goto_with_retry
-    from playwright.sync_api import sync_playwright
+    from .publish.base import goto_with_retry, launch_chromium, new_context
 
     targets = []
     # 快手矩阵号（kuaishou / kuaishou2 / …）各有登录态，逐号抓
@@ -557,6 +645,18 @@ def run_once(base: str, s: Settings) -> int:
     """一轮：拉清单 → 逐个可发布平台处理 → 审核巡检。返回处理数。"""
     from .publish import get_publisher
 
+    # 卡死 job 回收要每轮做（幂等、开销小）：只在启动时做会漏掉「部署重启时
+    # 正在发布、updated_at 还很新」的那条，它会永久停在 PUBLISHING。
+    try:
+        with httpx.Client(timeout=15) as c:
+            r = c.post(f"{base}/api/release_stale", headers=_headers(s),
+                       json={"older_than_minutes": 15})
+        released = (r.json() or {}).get("released", 0)
+        if released:
+            log.warning("回收 %d 条卡死的发布中 job（已放回待发布队列）", released)
+    except Exception as e:
+        log.debug("回收卡死 job 失败（不影响本轮）：%s", str(e)[:100])
+
     maybe_process_login_requests(base, s)
     tasks = fetch_pending(base, s)
     n = 0
@@ -664,16 +764,19 @@ def maybe_backfill_urls(base: str, s: Settings) -> None:
 
 
 _last_hot_topics_day: str = ""
+_last_hot_topics_fail_at: float = 0.0
+HOT_TOPICS_RETRY_SEC = 3600  # 失败后退避 1 小时，避免每 2 分钟锤一次快手
 
 
 def maybe_refresh_hot_topics(s: Settings, base: str = "") -> None:
     """每天早上 8:00（或启动冷启动时）从快手抓取热门话题并推送到协调端。"""
-    global _last_hot_topics_day
+    global _last_hot_topics_day, _last_hot_topics_fail_at
     if not base:
         base = s.remote_api_url.rstrip("/") if s.remote_api_url else ""
     if not base:
         return
 
+    import time as _time
     from datetime import datetime
 
     now = datetime.now()
@@ -683,7 +786,11 @@ def maybe_refresh_hot_topics(s: Settings, base: str = "") -> None:
     if _last_hot_topics_day == today_str:
         return
 
-    # 冷启动（_last_hot_topics_day 为空）先拉一次备用，或者当前小时已达 8:00
+    # 失败退避：抓取/推送失败后 1 小时内不再重试（成功才重置）
+    if _time.time() - _last_hot_topics_fail_at < HOT_TOPICS_RETRY_SEC:
+        return
+
+    # 冷启动先拉一次备用，或者当前小时已达 8:00
     is_cold_start = _last_hot_topics_day == ""
     if not (is_cold_start or now.hour >= 8):
         return
@@ -696,13 +803,17 @@ def maybe_refresh_hot_topics(s: Settings, base: str = "") -> None:
             res = push_hot_topics(base, s, "kuaishou", topics)
             if res and res.get("ok"):
                 _last_hot_topics_day = today_str
+                _last_hot_topics_fail_at = 0.0
                 log.info("快手热门话题已抓取并同步至协调端: %d 条", len(topics))
             else:
-                log.warning("快手热门话题推送失败: %s", res)
+                _last_hot_topics_fail_at = _time.time()
+                log.warning("快手热门话题推送失败: %s（1 小时内不再重试）", res)
         else:
-            log.warning("快手热门话题未抓取到任何条目")
+            _last_hot_topics_fail_at = _time.time()
+            log.warning("快手热门话题未抓取到任何条目（1 小时内不再重试）")
     except Exception as e:
-        log.warning("抓取/推送快手热门话题异常: %s", e)
+        _last_hot_topics_fail_at = _time.time()
+        log.warning("抓取/推送快手热门话题异常: %s（1 小时内不再重试）", e)
 
 
 def maybe_refresh_spark_income(s: Settings) -> None:
@@ -822,6 +933,13 @@ def main() -> None:
 
     while True:
         try:
+            # 每轮都做：补报上轮未上报的成功结果、释放卡死的 PUBLISHING job。
+            # 曾经只在启动时清一次卡死 job：部署重启时正在发的那条 updated_at
+            # 还很新，30 分钟阈值内不会被释放，之后再也没有机会 → 永久卡死。
+            try:
+                flush_pending_reports(base, s)
+            except Exception:
+                log.debug("补报队列处理失败（下轮再试）", exc_info=True)
             n = run_once(base, s)
             consecutive_failures = 0
             if n:

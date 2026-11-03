@@ -21,8 +21,10 @@ from .downloader import extract_meta, parse_url
 
 log = logging.getLogger(__name__)
 
-# URL 正则：匹配消息里的 http(s) 链接
-_URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
+# URL 正则：匹配消息里的 http(s) 链接。
+# 排除中文标点：中文用户常写「看这个 https://.../reel/XXX，很好笑」，
+# 若把「，很好笑」一起吃进去，shortcode 会带非法字符、白耗 8 次重试。
+_URL_RE = re.compile(r"https?://[^\s<>'\"，。！？、；：）】」》”’,!?;:)]+", re.IGNORECASE)
 
 # getUpdates long-poll 超时（秒）
 _POLL_TIMEOUT = 30

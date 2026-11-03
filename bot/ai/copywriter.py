@@ -121,17 +121,23 @@ class CopywriterError(RuntimeError):
 
 def _system_prompt(profile: PlatformProfile) -> str:
     category_rule = (
-        '"category": "必须从给定的可选分区列表中选择最匹配的一个（如萌宠/搞笑/生活/情感/二次元）"'
+        '"category": "分区名"'
         if profile.supports_category else
-        '"category": ""（该平台无分区，固定输出空字符串）'
+        '"category": ""'
     )
     category_req = (
-        "- category 必须严格等于分区列表中的某一项"
+        "- category 必须严格等于分区列表中的某一项（不要写说明文字）"
         if profile.supports_category else
         "- category 固定输出空字符串"
     )
 
-    banned_str = "、".join(f"「{p}」" for p in BANNED_PATTERNS[:10])
+    banned_str = "、".join(f"「{p}」" for p in BANNED_PATTERNS)
+    # 标题长度提示按平台实际上限计算，但不能超过「12~24 字」这个已验证的基线区间：
+    # 小红书 20 字、视频号 16 字，写死 24 会和硬上限打架（模型被两套约束拉扯）。
+    _upper = min(24, max(8, profile.max_title_len))
+    _lower = min(12, _upper)
+    title_len_hint = (f"{_lower}~{_upper} 个字，最多两小句" if _upper > _lower
+                      else f"不超过 {_upper} 个字，一句话说完")
     style_block = profile.title_style or (
         "2. 先写笑点，不写旁白。一句里要有「谁 + 反差/误会/吃瘪」，把最炸的结果咽住半句当钩子。\n"
         "   只学口气，禁止照抄，必须换成这条画面里真实发生的事：\n"
@@ -217,7 +223,7 @@ def _system_prompt(profile: PlatformProfile) -> str:
 1. **不要专栏前缀**，也不要【】。标题就是一句能让人想点开的话。
 {style_block}
 3. 要求：
-   - **短**：12~24 个字，最多两小句。像一句吐槽，不是剧情简介；
+   - **短**：{title_len_hint}。像一句吐槽，不是剧情简介；
    - **诙谐**：用拟人、反差、误会制造笑点，不要平铺「谁做了什么然后怎样」；
    - **有钩子**：看完还想知道后面，不要把结局和评价都写完；
    - **别用情绪垫句**。下面这些已经每条都在用，出现即失败：
@@ -263,10 +269,36 @@ def _extract_json(text: str) -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if not m:
-            raise ValueError(f"输出中找不到 JSON：{text[:200]}")
-        return json.loads(m.group(0))
+        # 贪婪匹配 {} 会把「两个对象」从头拼到尾必然失败；
+        # 改为从每个 { 位置起做括号配平扫描，取第一个能解析成功的对象。
+        start = text.find("{")
+        while start != -1:
+            depth = 0
+            for i in range(start, len(text)):
+                ch = text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start:i + 1])
+                        except json.JSONDecodeError:
+                            break
+            start = text.find("{", start + 1)
+        raise ValueError(f"输出中找不到合法 JSON：{text[:200]}")
+
+
+def _fit_title_natural(title: str, max_len: int) -> str:
+    """超长时优先在标点处截断，避免中文被硬切在句子中间。"""
+    title = title.strip()
+    if len(title) <= max_len:
+        return title
+    head = title[:max_len]
+    for i in range(len(head) - 1, max(6, max_len // 2) - 1, -1):
+        if head[i] in "，。！？、；,.!?;":
+            return head[:i].rstrip()
+    return head
 
 
 def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dict:
@@ -279,7 +311,7 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     title = _strip_legacy_prefix(title)
     if not title:
         raise ValueError("title 为空")
-    title = title[:profile.max_title_len]
+    title = _fit_title_natural(title, profile.max_title_len)
 
     description = str(obj.get("description", "")).strip()[:400]
     # 简介不要再抄一遍标题（抖音标题框 + 简介框会叠成重复句子）
@@ -318,7 +350,20 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
         category = ""
 
     first_comment = str(obj.get("first_comment", "")).strip().strip('"\'“”')
-    first_comment = re.sub(r"^[#【\[\(（]+|[#】\]\)）]+$", "", first_comment).strip()
+    # 只剥首尾包裹的【】（）#，不做逐字符集合剔除 ——
+    # 逐字符剔除会把「（第一人称）」吃成「（第一人称」，留下半截括号。
+    for _ in range(2):
+        prev = first_comment
+        first_comment = first_comment.strip().strip("#").strip()
+        for left, right in (("【", "】"), ("（", "）"), ("(", ")"), ("[", "]")):
+            if first_comment.startswith(left) and first_comment.endswith(right):
+                first_comment = first_comment[1:-1].strip()
+        # 「【标签】正文」这种前缀标签一并去掉（模型偶尔会加）
+        m = re.match(r"^【[^】]{1,10}】\s*(.+)$", first_comment)
+        if m:
+            first_comment = m.group(1).strip()
+        if first_comment == prev:
+            break
     if len(first_comment) > 50:
         first_comment = first_comment[:50]
 
@@ -365,6 +410,22 @@ def merge_tags(model_tags: list[str], max_tags: int, title: str = "",
             break
 
     out = ([base] if base else []) + picked
+    out_families = {tag_family(t) for t in out if tag_family(t)}
+    for f in pool:
+        if len(out) >= max_tags:
+            break
+        if f in out:
+            continue
+        fam = tag_family(f)
+        # 补齐也要家族去重：池里的「搞笑动画」不能和 AI 给的「沙雕视频」
+        # 同时出现（同属搞笑家族），否则又把槽位浪费在近义词上。
+        if fam and fam in out_families:
+            continue
+        out.append(f)
+        if fam:
+            out_families.add(fam)
+    # 极端情况（池子全被家族去重挡掉）兜底补齐，宁可牺牲一点多样性
+    # 也不能少于 max_tags：话题数量不足会被平台按少话题分发。
     for f in pool:
         if len(out) >= max_tags:
             break
@@ -519,7 +580,17 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     ]
 
     last_err = ""
-    last_result: dict | None = None
+    last_result: dict | None = None   # 只保存「未命中幻觉」的结果，供最终兜底
+    last_cliche_result: dict | None = None  # 命中套话（可用但不出彩）的最近一版
+
+    def _degrade_once(level: int) -> list[dict]:
+        """按降级级别重建 messages：0=完整，1=去画面描述，2=再略外文简介。"""
+        cap = cap_full if level < 2 else "（外文简介已略）"
+        return [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": _build_user(level < 1, cap)},
+        ]
+
     for attempt in range(1, 4):
         try:
             resp = client.chat.completions.create(
@@ -530,30 +601,29 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
             if not getattr(resp, "choices", None):
                 last_err = "接口返回空 choices（上游安全过滤或限流）"
                 log.warning("[%s] 第 %d 次：%s", profile.name, attempt, last_err)
-                degrade += 1
-                cap = cap_full if degrade < 2 else "（外文简介已略）"
-                messages = [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": _build_user(False, cap)},
-                ]
+                degrade = min(degrade + 1, 2)
+                messages = _degrade_once(degrade)
                 if degrade >= 2:
                     log.warning("[%s] 已降级：去画面描述+略外文简介重试", profile.name)
                 time.sleep(2)
                 continue
             content = resp.choices[0].message.content or ""
             result = _validate(_extract_json(content), categories, profile)
-            last_result = result
 
             banned = _check_hallucination(result["title"], result["description"])
             if banned:
+                # 幻觉（编造做饭/带娃等画面外剧情）绝不能兜底复用，
+                # 那是比套话严重一个量级的问题：文案与画面完全不符。
                 last_err = "；".join(banned)
                 log.warning("[%s] 文案命中禁用词（第 %d 次）：%s", profile.name, attempt, last_err)
                 messages.append({"role": "user", "content": f"上次生成违规：{last_err}。请绝对不要出现任何做饭、带娃或俗套套话，只针对原文案角色与事件重新输出。"})
                 continue
+            last_result = result
 
             cliche = _check_cliche(result["title"])
             if cliche:
                 last_err = "、".join(cliche)
+                last_cliche_result = result
                 log.warning("[%s] 标题命中套话（第 %d 次）：%s | %r",
                             profile.name, attempt, last_err, result["title"])
                 messages.append({"role": "user", "content": (
@@ -570,17 +640,23 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
         except (ValueError, json.JSONDecodeError) as e:
             last_err = str(e)
             log.warning("[%s] 文案输出解析失败（第 %d 次）：%s", profile.name, attempt, last_err)
+            # 解析失败也可能源自上游安全过滤（返回 200 但内容是拒答文本）：
+            # 同样走降级阶梯，否则等于把同一段敏感输入再打一遍，必然再挂。
+            degrade = min(degrade + 1, 2)
+            messages = _degrade_once(degrade)
             messages.append({"role": "user", "content": f"输出格式错误：{last_err}，请只输出纯 JSON 对象。"})
+            time.sleep(2)
         except Exception as e:
             last_err = f"调用接口失败：{e}"
             log.warning("[%s] 文案接口异常（第 %d 次）：%s", profile.name, attempt, str(e)[:150])
             time.sleep(2)
 
-    # 兜底：优先复用最后一次成功解析的结果（可能是命中套话的那版），
+    # 兜底：优先复用最后一次「未命中幻觉」的结果（可能只是标题套话没通过），
     # 比抛异常阻断整条流水线好 —— 套话顶多是文案不够出彩，
     # 而 CopywriterError 会让任务卡在 TRANSCRIBED 永远发不出去。
-    if last_result:
-        log.warning("[%s] 3 次均未通过校验（%s），复用最后一次结果：%r",
-                    profile.name, last_err, last_result["title"])
-        return last_result
+    recover = last_result or last_cliche_result
+    if recover:
+        log.warning("[%s] 3 次均未通过校验（%s），复用最后一次非幻觉结果：%r",
+                    profile.name, last_err, recover["title"])
+        return recover
     raise CopywriterError(f"文案生成失败（3 次重试后）：{last_err}")

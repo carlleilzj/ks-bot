@@ -14,22 +14,21 @@ from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
-from ..config import DATA_DIR, LOGS_DIR, KS_STATE_PATH
+from ..config import DATA_DIR, KS_STATE_PATH, LOGS_DIR
 from .base import (
     LoginExpired,
     PublishError,
     _remove_joyride,
     dismiss_dialogs,
     fill_editor,
+    goto_with_retry,
     launch_chromium,
     new_context,
     persist_state_if_changed,
     rand_sleep,
+    reload_with_retry,
     settle,
     shot,
-    wait_upload_done,
-    goto_with_retry,
-    reload_with_retry,
 )
 
 log = logging.getLogger(__name__)
@@ -69,7 +68,9 @@ SELECTORS = {
     "publish_btn_text": "发布",
     "upload_done_texts": ["上传完成", "转码完成"],
     "upload_fail_texts": ["上传失败", "上传出错"],
-    "success_texts": ["发布成功", "提交成功", "审核中"],
+    # 只放强成功信号。「审核中」已移除：发布页本身就可能出现该字样，
+    # 一度导致「还停在表单页」被误判成已发布（2026-11-04 修正）。
+    "success_texts": ["发布成功", "提交成功"],
 }
 
 # 快手发布页描述框（动态渲染，多个候选按序尝试）
@@ -644,6 +645,7 @@ def publish(
     cover_title: bool = True,
     first_comment: str = "",
     pin_comment: bool = True,
+    anchors: dict | None = None,
 ) -> str | None:
     """上传并发布一条视频，成功返回快手作品链接（获取不到时 None）。
 
@@ -722,6 +724,23 @@ def publish(
                         "或把 config.yaml 的 spark_task 设为 false 以跳过")
             if attached and spark_sink is not None:
                 spark_sink.append(attached)
+
+            # 5.6 其余挂载：热点 / 地点 / 作者声明（config.yaml platforms.*.anchors）
+            #     2026-11-04 修正：kuaishou_anchor 里这套实现早就写好了，但一直没被
+            #     任何地方 import —— 配置里的「热点: 治愈 / 地点: 郴州 / 声明: 内容由AI生成」
+            #     实际一条都没挂上。现在接通，全部软降级（挂不上只 warning）。
+            anchor_done: list[str] = []
+            if anchors:
+                try:
+                    from .kuaishou_anchor import apply_anchors
+                    anchor_done = apply_anchors(page, anchors)
+                    if anchor_done:
+                        log.info("已挂载：%s", "、".join(anchor_done))
+                    else:
+                        log.warning("anchors 配置未生效（%s），按无挂载发布", list(anchors))
+                        shot(page, "ks_anchors_soft_fail")
+                except Exception as e:
+                    log.warning("anchors 挂载异常（不影响发布）：%s", str(e)[:150])
 
             # 5.9 提交前最后防线：断言描述内容非空（防静默发出空标题废片）
             _assert_desc_not_empty(page, desc_full)
@@ -1375,7 +1394,7 @@ def rescue_dark_cover(cover: Path | None, video: Path) -> Path | None:
     依赖 ffmpeg 二进制（发布端本就装有 /usr/bin/ffmpeg）。
     """
     try:
-        from ..media.ffmpeg import mean_luma, _ffmpeg, _run  # noqa: SLF001
+        from ..media.ffmpeg import _ffmpeg, _run, mean_luma  # noqa: SLF001
     except Exception:
         return cover
     try:
@@ -1616,42 +1635,91 @@ def _click_publish(page: Page, title: str = "") -> None:
             break
 
     # 注意：pc/submit 返回 200 不代表发布成功——账号被风控时接口照常 200 但作品被拦截。
-    # 可靠标志：URL 跳转到内容管理页（?status=2 审核中）+ 页面出现「审核中」。
+    # 可靠标志：URL 跳转到内容管理页（?status=2 审核中）。
+    #
+    # 2026-11-04 修正两处误判：
+    #  1) 「违规」不能全页模糊匹配 —— 创作者中心每页都有「请勿发布违规内容」
+    #     「违规记录」等常驻文案，一旦命中就在视频其实已发出后判失败 → 重试 → 重复发布。
+    #     改为只看可见的 toast/弹窗容器，且只认精确的风控短语。
+    #  2) 「审核中」不能算成功 —— 发布页本身就可能出现该字样，会把「还停在表单页」
+    #     误判成已发布。成功只认「已跳转管理页」或强成功 toast。
+    BLOCK_TOASTS = ("操作过于频繁", "发布失败，请稍后再试", "发布失败")
     deadline = time.time() + 60
-    jumped = False
     while time.time() < deadline:
         page.wait_for_timeout(2000)
-        # 风控/违规拦截提示（仅当已跳转管理页或弹窗出现时检查；「未通过」可能是筛选 tab 文字）
-        for text in ("发布失败", "违规", "操作过于频繁", "请稍后再试"):
-            if page.get_by_text(text, exact=False).count():
-                shot(page, "ks_publish_blocked")
-                raise KuaishouError(
-                    f"快手发布被拦截（页面提示「{text}」）。"
-                    f"发布浏览器直连国内网络（无代理）；若创作者中心显示账号健康，"
-                    f"可能是 IP 风控或页面改版，查看截图确认"
-                )
-        for text in SELECTORS["success_texts"]:
-            if page.get_by_text(text, exact=False).count():
-                log.info("检测到快手发布成功文字：%s", text)
-                return
         if "/article/manage" in page.url:
             log.info("已跳转至作品管理页：%s", page.url)
-            jumped = True
             return
+        toast_text = _visible_toast_text(page)
+        if toast_text:
+            for text in BLOCK_TOASTS:
+                if text in toast_text:
+                    shot(page, "ks_publish_blocked")
+                    raise KuaishouError(
+                        f"快手发布被拦截（弹窗提示「{text}」）。"
+                        f"发布浏览器直连国内网络（无代理）；若创作者中心显示账号健康，"
+                        f"可能是 IP 风控或页面改版，查看截图确认"
+                    )
+            for text in SELECTORS["success_texts"]:
+                if text in toast_text:
+                    log.info("检测到快手发布成功提示：%s", text)
+                    return
     # 未检测到跳转：打开内容管理页核实最新作品是否出现（必须核实标题）
-    if not jumped:
-        try:
-            page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(4000)
-            clean_title = re.sub(r"[【】《》#\s]", "", title)[:10]
-            body = page.evaluate("() => document.body.innerText")
-            if clean_title and clean_title in body:
-                log.info("内容管理页已核实出现新作品「%s」（发布成功）", clean_title)
-                return
-        except Exception:
-            pass
+    try:
+        page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(4000)
+        if _title_in_manage_list(page, title):
+            log.info("内容管理页已核实出现新作品「%s」（发布成功）", title[:20])
+            return
+    except Exception:
+        pass
     shot(page, "ks_publish_result_unknown")
     raise KuaishouError("点击发布后未检测到成功标志（管理页未见新作品），请查看 logs/ 截图确认")
+
+
+_TOAST_SELECTORS = (
+    ".ant-message-notice-content", ".cp-message", ".el-message", ".el-message-box__message",
+    "[class*='toast']", "[class*='Toast']", "[role='alert']", ".cp-dialog__body",
+)
+
+
+def _visible_toast_text(page: Page) -> str:
+    """只取可见的 toast/弹窗文案，避免把页面常驻说明当成发布结果。"""
+    parts: list[str] = []
+    for sel in _TOAST_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            for i in range(min(loc.count(), 5)):
+                el = loc.nth(i)
+                if el.is_visible():
+                    parts.append(el.inner_text() or "")
+        except Exception:
+            continue
+    return "\n".join(p for p in parts if p)
+
+
+def _title_in_manage_list(page: Page, title: str) -> bool:
+    """在作品列表卡片内核对标题，绝不拿整页 body 做 `in` 判断。
+
+    同模板标题的前缀常常相同，整页模糊匹配会被历史作品命中 → 把失败记成成功、静默漏发。
+    """
+    clean = re.sub(r"[【】《》#\s\-_，。！？、“”\"']", "", title)
+    if len(clean) < 6:
+        return False
+    try:
+        body = page.evaluate("() => document.body.innerText")
+    except Exception:
+        return False
+    target = clean[:10]
+    # 逐个卡片块核对（快手管理页按「时长行 → 标题 → 日期」分块）
+    for blk in re.split(r"(?m)^(?=\d{1,2}:\d{2}(?::\d{2})?\s*$)", body):
+        lines = [x.strip() for x in blk.splitlines() if x.strip()]
+        if len(lines) < 3:
+            continue
+        card_title = re.sub(r"[【】《》#\s\-_，。！？、“”\"']", "", lines[1])
+        if target and card_title.startswith(target[:8]):
+            return True
+    return False
 
 
 def _fetch_ks_url(context, title: str = "", max_attempts: int = 10) -> str | None:
@@ -1840,21 +1908,38 @@ def post_first_comment(
     if not first_comment:
         return False
 
+    # 标题核对必须在打开页面之前就判定：标题太短（或清洗后为空）时无法可靠
+    # 区分作品，宁可不发首评，也绝不能落到「当前默认选中的上一条作品」下面。
+    clean_target = re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", title)[:8].lower()
+    if len(clean_target) < 4:
+        log.warning("首评目标标题过短或为空（%r），放弃发表首评", title[:20])
+        return False
+
     log.info("准备发表快手作者首评: %s", first_comment)
     try:
         page.goto(COMMENT_URL, wait_until="domcontentloaded", timeout=int(timeout_sec * 1000))
         page.wait_for_timeout(3000)
 
         # 1. 核对当前页面是否已选中该作品，未选中则通过「选择视频」抽屉精准定位（严格防错位）
-        clean_target = re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", title)[:8].lower()
+        def _norm(s: str) -> str:
+            return re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", s or "").lower()
+
+        def _same_work(shown: str) -> bool:
+            """两侧都必须非空且足够长才比较 —— 空串 in 任意串 恒为真，
+            页面标题还没渲染时会把「当前默认选中的上一条作品」误判成目标。"""
+            cur = _norm(shown)
+            if len(cur) < 4:
+                return False
+            return clean_target in cur or cur[:8] in clean_target
+
         if clean_target:
             matched = False
             for attempt in range(4):
                 try:
-                    cur_title_el = page.locator(".video-info__content__title, [class*='video-info'] [class*='title']").first
+                    cur_title_el = page.locator(
+                        ".video-info__content__title, [class*='video-info'] [class*='title']").first
                     cur_title = cur_title_el.inner_text() if cur_title_el.count() else ""
-                    clean_cur = re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", cur_title).lower()
-                    if clean_target in clean_cur or clean_cur[:8] in clean_target:
+                    if _same_work(cur_title):
                         matched = True
                         break
                 except Exception:
@@ -1866,13 +1951,21 @@ def post_first_comment(
                     try:
                         select_btn.click()
                         page.wait_for_timeout(1500)
-                        items = page.locator(".drawer .video-info, [class*='drawer'] .video-info").all()
+                        items = page.locator(
+                            ".drawer .video-info, [class*='drawer'] .video-info").all()
                         for it in items:
-                            it_text = re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", it.inner_text()).lower()
-                            if clean_target in it_text or it_text[:8] in clean_target:
+                            if _same_work(it.inner_text()):
                                 it.click()
                                 page.wait_for_timeout(2000)
-                                matched = True
+                                # 点选后必须回读主卡片二次确认，不能「看着像」就当已切换
+                                try:
+                                    after_el = page.locator(
+                                        ".video-info__content__title, "
+                                        "[class*='video-info'] [class*='title']").first
+                                    after = after_el.inner_text() if after_el.count() else ""
+                                    matched = _same_work(after)
+                                except Exception:
+                                    matched = False
                                 break
                     except Exception as e:
                         log.debug("抽屉选择视频异常: %s", e)
@@ -1921,17 +2014,19 @@ def post_first_comment(
                     btn.click(force=True)
 
             page.wait_for_timeout(1500)
-            # 校验是否发送成功：输入框清空，或列表中出现首评文字
-            box_text = box.inner_text().strip() if box.count() else ""
-            comment_rendered = bool(page.locator(".comment-item, [class*='comment-item']").filter(has_text=first_comment[:8]).count())
-            if not box_text or comment_rendered:
+            # 发送成功只认「评论区出现该条评论」：div 输入框的 inner_text 在
+            # contenteditable 上不可靠，若只看它为空会误判，随后重复点击发送。
+            comment_rendered = bool(
+                page.locator(".comment-item, [class*='comment-item']")
+                .filter(has_text=first_comment[:8]).count())
+            if comment_rendered:
                 sent_ok = True
                 break
-            log.warning("作者首评发送后输入框未清空，重试点击发送 (第 %d 次)...", send_attempt)
+            log.warning("作者首评未出现在评论区，重试点击发送 (第 %d 次)...", send_attempt)
 
         shot(page, "ks_comment_sent")
         if not sent_ok:
-            log.warning("作者首评点击后未成功清空输入框，放弃置顶")
+            log.warning("作者首评发送后未在评论区出现，放弃置顶")
             return False
 
         log.info("作者首评已发送: %s", first_comment)
@@ -1940,10 +2035,15 @@ def post_first_comment(
         if pin:
             try:
                 page.wait_for_timeout(1000)
-                # 定位该评论行内的「置顶」按钮
-                target_item = page.locator(".comment-item, [class*='comment-item']").filter(has_text=first_comment[:8]).first
-                pin_btn = (target_item.locator("text=置顶").first if target_item.count()
-                           else page.locator("text=置顶").first)
+                # 严格锁定到「本条款首评」所在行；找不到就放弃置顶。
+                # 曾经回退到 page.locator("text=置顶").first —— 那是页面上
+                # 任意一条评论的置顶按钮，会把别的评论顶上去。
+                target_item = page.locator(".comment-item, [class*='comment-item']").filter(
+                    has_text=first_comment[:8]).first
+                if not target_item.count():
+                    log.warning("未定位到刚发表的首评行，放弃置顶（避免置错评论）")
+                    return True
+                pin_btn = target_item.locator("text=置顶").first
                 if pin_btn.count() and pin_btn.is_visible():
                     pin_btn.click()
                     page.wait_for_timeout(1000)

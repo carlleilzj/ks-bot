@@ -429,12 +429,21 @@ class Database:
         return dict(row) if row else None
 
     def pending(self, limit: int = 50) -> list[dict]:
+        """返回本轮要推进的任务。
+
+        排序时把**未进入发布阶段**的任务排在前面：分体部署下 READY 任务会长期
+        停在这个窗口里等远端发布端认领，若按时间排序，积压的 READY 会把
+        LIMIT 名额占满，新投进来的 DETECTED 任务永远轮不上（实测灌 60 条
+        READY 后新链接完全不处理，且无任何告警）。
+        """
         placeholders = ",".join("?" * len(PENDING_STATES))
         with self._lock:
             rows = self.conn.execute(
                 f"""SELECT * FROM tasks WHERE state IN ({placeholders})
-                    ORDER BY COALESCE(ig_published_at, created_at) ASC, id ASC LIMIT ?""",
-                (*PENDING_STATES, limit),
+                    ORDER BY CASE WHEN state IN (?, ?) THEN 1 ELSE 0 END ASC,
+                             COALESCE(ig_published_at, created_at) ASC, id ASC
+                    LIMIT ?""",
+                (*PENDING_STATES, State.READY, State.PUBLISHED, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -458,6 +467,28 @@ class Database:
                    WHERE state IN (?, ?) AND EXISTS (
                        SELECT 1 FROM publish_jobs j WHERE j.task_id = tasks.id AND j.state = 'PENDING')""",
                 (State.SUBTITLED, now_iso(), State.PUBLISHED, State.NOTIFIED),
+            )
+            self.conn.commit()
+        return cur.rowcount
+
+    def finalize_orphan_ready(self) -> int:
+        """自愈：READY 但没有任何待发平台 job 的任务 → PUBLISHED。
+
+        场景：发布端逐平台回报时，最后一个平台 SUCCESS 与 PUBLISHED 落库之间
+        进程重启/被 kill，任务永远停在 READY。这类任务既不会被发布（无 job），
+        也不会进 NOTIFIED（等不到 PUBLISHED），在 pending() 里白白占名额，
+        还会让 READY 变成只增不减的堆积。只处理「有 job 且全部终态」的情况，
+        建 job 失败的任务（job 数 0）不动，留给人工。
+        """
+        with self._lock:
+            cur = self.conn.execute(
+                f"""UPDATE tasks SET state=?, updated_at=?
+                    WHERE state=? AND EXISTS (
+                        SELECT 1 FROM publish_jobs j WHERE j.task_id = tasks.id)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM publish_jobs j
+                        WHERE j.task_id = tasks.id AND j.state NOT IN ({",".join("?" * len(JOB_FINAL_STATES))}))""",
+                (State.PUBLISHED, now_iso(), State.READY, *JOB_FINAL_STATES),
             )
             self.conn.commit()
         return cur.rowcount
