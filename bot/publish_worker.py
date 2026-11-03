@@ -387,10 +387,14 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
                     extra["anchors"] = dict(plat_cfg.anchors)
             fc = copy.get("first_comment")
             if not fc and s.ai_api_key:
-                # 现场容错兜底：防止历史/未生成首评的任务漏发置顶首评
+                # 现场容错兜底：防止历史/未生成首评的任务漏发置顶首评。
+                # 用 generate_first_comment（作者视角写神评），
+                # 不能用 generate_comment_reply（那是「回复粉丝留言」的语义，
+                # 把标题塞进去会得到「你懂啥…」这类对抗性口吻）。
                 try:
-                    from .publish.kuaishou_reply import generate_comment_reply
-                    fc = generate_comment_reply(copy.get("title") or "", author_name="")
+                    from .publish.kuaishou_reply import generate_first_comment
+                    fc = generate_first_comment(copy.get("title") or "",
+                                                copy.get("description") or "")
                     log.info("[%s] 任务缺少首评，现场兜底生成: %s", task.get("shortcode"), fc)
                 except Exception as e:
                     log.debug("现场生成首评兜底失败：%s", e)

@@ -18,12 +18,12 @@ import logging
 import random
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
-from ..config import DATA_DIR, KS_STATE_PATH, LOGS_DIR, load_settings
+from ..config import DATA_DIR, KS_STATE_PATH, load_settings
 from .base import launch_chromium, new_context, shot
 from .kuaishou import COMMENT_URL, _is_logged_in
 
@@ -175,6 +175,74 @@ def generate_comment_reply(fan_comment: str, author_name: str = "") -> str:
     return random.choice(_FALLBACK_REPLIES)
 
 
+# 首评兜底：模型失败时的「神补刀」短句（不能再是「感谢支持」那种客服话术，
+# 那会以置顶神评的身份出现在每条视频下面）
+_FALLBACK_FIRST_COMMENTS = [
+    "就这操作，换我上去早就原地放弃了",
+    "笑死，主角自己都没搞懂刚才发生了什么",
+    "这结局我是真没猜到，谁懂啊",
+    "认真的吗？看第二遍还是想笑",
+    "评论区有没有懂行的，解释一下这算正常操作吗",
+]
+
+
+def generate_first_comment(title: str, description: str = "") -> str:
+    """基于视频标题/简介生成「作者置顶首评」（神评），而不是粉丝回复。
+
+    ⚠️ 不要再用 generate_comment_reply(title) 代替：
+    那个函数的语义是「回复粉丝留言」，把视频标题塞进「粉丝留言：」的位置，
+    虽然偶尔能出彩，但会生成「你懂啥…」这种对抗性口吻，挂在自家视频下很别扭。
+    """
+    title = (title or "").strip()
+    description = (description or "").strip()
+    if not title:
+        return random.choice(_FALLBACK_FIRST_COMMENTS)
+
+    settings = load_settings()
+    if not settings.ai_api_key:
+        return random.choice(_FALLBACK_FIRST_COMMENTS)
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=settings.ai_base_url, api_key=settings.ai_api_key, timeout=20.0)
+
+        user = f"视频标题：{title}"
+        if description:
+            user += f"\n视频简介：{description[:120]}"
+
+        resp = client.chat.completions.create(
+            model=settings.ai_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你是这条短视频的作者。请写一条你自己发在评论区、并置顶的「神评」。\n"
+                        "这条评论的作用是给观众提供吐槽模板，引导他们跟着聊起来。\n"
+                        "规则：\n"
+                        "1. 10~25 字，一句到两句，口语化；\n"
+                        "2. 用第一人称神补刀、自嘲，或以画面里角色的口吻说一句话；\n"
+                        "3. 不要复述剧情，不要写「感谢观看/喜欢就关注」这类客服话术；\n"
+                        "4. 不要加引号、表情代码、话题标签或任何解释；\n"
+                        "5. 只返回这一句评论本身。"
+                    ),
+                },
+                {"role": "user", "content": user},
+            ],
+            temperature=0.9,
+            max_tokens=60,
+        )
+
+        text = resp.choices[0].message.content or ""
+        text = re.sub(r'["“”\'‘’]', "", text).strip()
+        text = re.sub(r"^[#【\[\(（]+|[#】\]\)）]+$", "", text).strip()
+        if text:
+            return text[:40]
+    except Exception as e:
+        log.warning("LLM 生成首评失败，使用预设短句：%s", e)
+
+    return random.choice(_FALLBACK_FIRST_COMMENTS)
+
+
 # ---------------------------------------------------------------------------
 # 3. 页面 DOM 回复执行
 # ---------------------------------------------------------------------------
@@ -239,7 +307,7 @@ def reply_single_comment_on_page(
             return { ok: true, reason: "dry_run: 目标评论行已定位成功" };
         }
 
-        // 记录点击前已存在的输入框（排除顶部常驻作者输入框）
+        // 记录点击前已存在的输入框（排除顶部常驻作者首评框）
         const inputsBefore = new Set([
             ...document.querySelectorAll('textarea,[contenteditable="true"]')
         ]);
@@ -252,7 +320,17 @@ def reply_single_comment_on_page(
         });
         replyBtn.click();
 
-        return { ok: true, needFill: true };
+        // 把「点击前已存在」的输入框转成可比较的索引，
+        // 供下一步在 fill 时排除（Set 无法跨 evaluate 传递，只能传 id/index）
+        const beforeIds = [];
+        inputsBefore.forEach((el) => {
+            if (!el.dataset.ksReplyMark) {
+                el.dataset.ksReplyMark = String(Math.random()).slice(2) + Date.now();
+            }
+            beforeIds.push(el.dataset.ksReplyMark);
+        });
+
+        return { ok: true, needFill: true, beforeIds };
     }"""
 
     try:
@@ -265,7 +343,8 @@ def reply_single_comment_on_page(
 
         # 非 dry-run：等待新弹出的回复输入框并填写
         page.wait_for_timeout(800)
-        fill_res = page.evaluate("""(replyText) => {
+        before_ids = (res.get("beforeIds") or [])
+        fill_res = page.evaluate("""([replyText, beforeIds]) => {
             const norm = (s) => (s || "").replace(/\\s+/g, " ").trim();
             const visible = (el) => {
                 const r = el.getBoundingClientRect();
@@ -280,10 +359,22 @@ def reply_single_comment_on_page(
                 return (inner.length ? inner : all)[0];
             };
 
-            const inputs = [...document.querySelectorAll('textarea, [contenteditable="true"]')].filter(visible);
-            if (!inputs.length) return { ok: false, reason: "点击回复后未出现输入框" };
-            // 取最新弹出的（通常是最后一个）
-            const inputEl = inputs[inputs.length - 1];
+            const all = [...document.querySelectorAll('textarea, [contenteditable="true"]')].filter(visible);
+            // 关键：排除点击「回复」前就存在的输入框（顶部常驻的作者首评框）。
+            // 曾经只用 inputs[inputs.length-1]，一旦顶部框是最后一个可见元素，
+            // 就会把「回复粉丝」写成一条普通评论，且与置顶首评叠在一起。
+            const before = new Set(beforeIds || []);
+            const fresh = all.filter((el) => !before.has(el.dataset.ksReplyMark || ""));
+            if (!fresh.length) {
+                // 兜底：某些改版会复用同一输入框，此时退化为「取最后一个」但要求
+                // 它不在 before 标记里；仍无命中则判失败，宁可不发也不发错位置。
+                const untagged = all.filter((el) => !before.has(el.dataset.ksReplyMark || ""));
+                if (!untagged.length) {
+                    return { ok: false, reason: "未找到新弹出的回复输入框（疑似只剩顶部常驻框）" };
+                }
+                fresh.push(untagged[untagged.length - 1]);
+            }
+            const inputEl = fresh[fresh.length - 1];
             inputEl.focus();
 
             if (inputEl.tagName === "TEXTAREA") {
@@ -293,19 +384,19 @@ def reply_single_comment_on_page(
                 document.execCommand("insertText", false, String(replyText));
             }
 
-            // 查找最近的发送按钮
+            // 查找发送按钮：优先在该输入框的最近公共祖先内找，
+            // 避免跨到顶部常驻框的发送键。
             let sendBtn = null;
             let parent = inputEl.parentElement;
             for (let up = 0; up < 5 && parent && !sendBtn; up++) {
                 sendBtn = deepestByText(parent, "发送");
                 parent = parent.parentElement;
             }
-            if (!sendBtn) sendBtn = deepestByText(document.body, "发送");
-            if (!sendBtn) return { ok: false, reason: "未找到发送按钮" };
+            if (!sendBtn) return { ok: false, reason: "未在回复输入框附近找到发送按钮" };
 
             sendBtn.click();
             return { ok: true };
-        }""", reply_text)
+        }""", [reply_text, before_ids])
 
         if not fill_res or not fill_res.get("ok"):
             return False, fill_res.get("reason", "输入或发送失败")

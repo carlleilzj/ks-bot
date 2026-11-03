@@ -167,8 +167,11 @@ def _system_prompt(profile: PlatformProfile) -> str:
             comment_rule = (
                 "【作者置顶首评（first_comment）—— 激发评论区互动】\n"
                 "生成 1 条作者置顶首评（10~25 字，不带【】、不带 #，作为视频发布后的第一条评论置顶）：\n"
-                "- 角色定位：以真实体验者或自嘲/提问口吻抢占首评沙发，给普通观众提供评论和互动模板。\n"
-                "- 示例：\"谁懂啊，扑上去那一瞬间真的治愈了整周的班味\"、\"手残党亲测，第三步稍微慢一点就能成\"、\"这个色系真的太戳我了，你们平时喜欢深色还是浅色？\"\n\n"
+                "- 角色定位：以真实体验者或自嘲口吻抢占首评沙发，给普通观众提供评论模板。\n"
+                "- 示例：\"谁懂啊，扑上去那一瞬间真的治愈了整周的班味\"、\"手残党亲测，第三步稍微慢一点就能成\"、\"这色系穿上显白到发光，我先囤为敬\"\n"
+                "- **严禁把首评写成提问求互动**：不要用「你们…吗？」「如果是你…？」「有姐妹…吗？」\n"
+                "  这类句式收尾。实测这种句式占了 60%，观众一眼就看出是机器模板，反而没人愿意接话。\n"
+                "  要像真人随手丢下的一句话，可以带梗、带自嘲、带画面里的角色口吻。\n\n"
             )
         else:
             example_roles = (
@@ -181,7 +184,10 @@ def _system_prompt(profile: PlatformProfile) -> str:
                 "【作者置顶首评（first_comment）—— 激发评论区互动】\n"
                 "生成 1 条作者置顶首评（10~25 字，不带【】、不带 #，作为视频发布后的第一条评论置顶）：\n"
                 "- 角色定位：以作者第一人称神补刀、神吐槽或主角自嘲口吻抢占沙发，给观众提供吐槽与争论模板。\n"
-                "- 示例：\"神龙：我几千年的修为，你拿来烤淀粉肠？\"、\"我要是那只仓鼠，当场就躺平罢工了\"、\"这换我上去，估计帅不过第一秒\"\n\n"
+                "- 示例：\"神龙：我几千年的修为，你拿来烤淀粉肠？\"、\"我要是那只仓鼠，当场就躺平罢工了\"、\"这换我上去，估计帅不过第一秒\"\n"
+                "- **严禁把首评写成提问求互动**：不要用「你们…吗？」「如果是你…？」「有姐妹…吗？」\n"
+                "  这类句式收尾。实测这种句式占了 60%，观众一眼就看出是机器模板，反而没人愿意接话。\n"
+                "  要像真人随手丢下的一句话，可以带梗、带自嘲、带画面里的角色口吻。\n\n"
             )
         tag_rule = (
             "【话题（tags）—— 严格生成 4 个话题，各自承担明确分工】\n"
@@ -487,6 +493,43 @@ def _check_cliche(title: str) -> list[str]:
     return hits
 
 
+# 首评提问式收尾：实测 20 条里有 12 条（60%）在结尾向观众发问
+# （「你们…吗？」「如果是你…？」「有姐妹…吗？」），观众一眼看出是机器模板。
+#
+# 判定思路不能只堆「吗」字正则（会漏掉「能宅几天？」「赖多久？」这类），
+# 而是按语义分类：
+#   - 以「角色名：」开头的角色台词 → 允许问句（这是好用的神评写法）
+#   - 其余以问号结尾、且句中在对观众发问（你们/姐妹/大家/谁/如果）→ 拦截
+_AUDIENCE_ADDRESS = ("你们", "姐妹", "大家", "各位", "有人")
+_ROLE_DIALOGUE = re.compile(r"^[^，。！？,]{1,10}[：:]")
+# 喊话式互动（「你们评评理」「兄弟们先别笑」）是好用的神评写法，不属于模板提问
+_RHETORICAL_CALL = ("评评理", "敢信", "信不信", "服不服", "算不算", "冤不冤", "对不对",
+                    "兄弟们", "先别笑", "举个手", "帮我看", "帮看看", "怪我")
+
+
+def _check_first_comment(comment: str) -> list[str]:
+    """首评质量校验：拦截「向观众发问」的模板收尾（空表=通过）。
+
+    只拦「你们…吗？」「如果是你…？」「有姐妹…吗？」这类把互动责任推给观众的
+    模板句；角色台词、喊话求评理、自嘲式反问都属于好神评，放行。
+    """
+    text = (comment or "").strip()
+    if not text:
+        return []
+    if not text.endswith(("？", "?")):
+        return []
+    # 角色台词允许问句（神龙：你拿来烤淀粉肠？ 这类正是我们要的）
+    if _ROLE_DIALOGUE.match(text):
+        return []
+    # 喊话/自嘲式反问是有效互动，不算模板提问
+    if any(w in text for w in _RHETORICAL_CALL):
+        return []
+    # 真正的模板：把问题推给观众（你们/姐妹/大家 + 疑问收尾）
+    if "如果是你" in text or any(w in text for w in _AUDIENCE_ADDRESS):
+        return [f"提问式收尾「{text[-14:]}」"]
+    return []
+
+
 def generate_copy(transcript: str, caption: str, categories: list[str], s: Settings,
                   platform: str = "kuaishou", content: dict | None = None) -> dict:
     """生成具备统一 IP 标识并与视频画面高度相关的文案。
@@ -634,8 +677,24 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
                 )})
                 continue
 
-            log.info("[%s] IP文案生成完成：标题=%r 标签=%s 分区=%s",
-                     profile.name, result["title"], result["tags"], result["category"] or "（无）")
+            # 首评质量：拦截「…吗？」这类提问式模板收尾（实测占 60%）。
+            # 只重写首评，不推翻已合格的标题/标签，避免整条重来时标题又变差。
+            bad_comment = _check_first_comment(result.get("first_comment") or "")
+            if bad_comment:
+                log.warning("[%s] 首评命中提问式模板（第 %d 次）：%s | %r",
+                            profile.name, attempt, "、".join(bad_comment),
+                            (result.get("first_comment") or "")[:40])
+                messages.append({"role": "user", "content": (
+                    f"上次首评写成了提问式模板：{(result.get('first_comment') or '')[:40]}。"
+                    f"不要用「你们…吗？」「如果是你…？」「有姐妹…吗？」这类句式。"
+                    f"重写一条 10~25 字的作者神评：可以是神补刀、自嘲，或以画面里角色的口吻说话，"
+                    f"标题和标签保持上次那版不要改。"
+                )})
+                continue
+
+            log.info("[%s] IP文案生成完成：标题=%r 标签=%s 分区=%s 首评=%r",
+                     profile.name, result["title"], result["tags"],
+                     result["category"] or "（无）", (result.get("first_comment") or "")[:24])
             return result
         except (ValueError, json.JSONDecodeError) as e:
             last_err = str(e)
