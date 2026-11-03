@@ -616,9 +616,11 @@ def maybe_backfill_urls(base: str, s: Settings) -> None:
     _last_backfill_at = now
 
     try:
-        # 只扫最近 3 小时内发布的作品：仅兜底「刚发出去、现场没来得及抓到链接」的新片，
-        # 不动历史存量（历史作品链接不再回补）。
-        items = fetch_missing_urls(base, s, "kuaishou", hours=3)
+        # 只扫最近 4 小时内发布的作品：同时覆盖快手 A 号与 B 号（kuaishou / kuaishou2），
+        # 仅兜底「刚发出去、现场没来得及抓到链接」的新片，不动历史存量。
+        items = []
+        for plat_name in ("kuaishou", "kuaishou2"):
+            items.extend(fetch_missing_urls(base, s, plat_name, hours=4))
     except Exception as e:
         log.debug("补链接：拉取待补清单失败：%s", str(e)[:120])
         return
