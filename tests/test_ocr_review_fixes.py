@@ -30,13 +30,29 @@ from bot.source.telegram_listener import _URL_RE, _URL_TRAILING_PUNCT
      "https://www.facebook.com/watch/?v=123456"),
     ("https://www.tiktok.com/@u/video/123?is_from_webapp=1",
      "https://www.tiktok.com/@u/video/123?is_from_webapp=1"),
+    # 半角标点紧跟正文时不能被吃进 URL（回归：保留 ? 之后一度连 , ! 也放行了）
+    ("https://youtu.be/ABC,好笑", "https://youtu.be/ABC"),
+    ("https://youtu.be/ABC!太好笑了", "https://youtu.be/ABC"),
+    # 多参数链接要完整保留
+    ("https://www.facebook.com/watch/?v=123&x=1",
+     "https://www.facebook.com/watch/?v=123&x=1"),
 ])
 def test_url_keeps_query_params(text, expect):
-    """?v= 这类查询参数必须保留，否则 yt-dlp 必然解析失败。"""
+    """?v= 这类查询参数必须保留；逗号/感叹号紧跟正文时要截断。"""
     m = _URL_RE.search(text)
     assert m is not None
     got = m.group(0).rstrip(_URL_TRAILING_PUNCT)
     assert got == expect
+
+
+def test_parse_target_platforms_removes_url():
+    """去掉 URL 之后，不能再把域名当「未识别的平台名」报给用户（回归：sub 未真正删除）。"""
+    from bot.source.telegram_listener import _parse_target_platforms
+
+    targets, unknown = _parse_target_platforms(
+        "https://www.instagram.com/reel/ABC/ @快手")
+    assert unknown == [], f"URL 残留导致误报未知平台：{unknown}"
+    assert targets == ["kuaishou"]
 
 
 def test_url_stops_at_chinese_punctuation():
@@ -267,3 +283,78 @@ def test_generated_first_comment_rejects_question_style(monkeypatch):
 
     out = kr.generate_first_comment("某个视频标题")
     assert out in kr._FALLBACK_FIRST_COMMENTS
+
+
+# ---------- IG 失败体识别 ----------
+
+@pytest.mark.parametrize("payload,expect_status", [
+    ({"status": "fail", "message": "login_required"}, 401),
+    ({"status": "fail", "message": "checkpoint_required"}, 401),
+    ({"status": "fail", "message": "Media not found"}, 404),
+    ({"status": "fail", "message": "something odd"}, 0),
+    ({"items": []}, 200),
+])
+def test_ig_failure_body_maps_to_status(monkeypatch, payload, expect_status):
+    """HTTP 200 + 失败体必须能被区分：登录坏 → 401（触发冷却），删帖 → 404。
+
+    返回 0 会让调用方走「帖子不可访问」分支、永不冷却账号 —— 等于没修。
+    """
+    import httpx
+
+    import bot.source.ig_api as ig
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return payload
+
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    item, status = ig._try_fetch(123, {"sessionid": "s"}, "app", "i.instagram.com")
+    assert status == expect_status, f"{payload} -> {status}"
+    if expect_status == 200:
+        assert item is None   # items 为空
+
+
+def test_ig_html_instead_of_json_returns_401(monkeypatch):
+    """被重定向到登录页返回 HTML 时，r.json() 失败 → 必须返回 401。"""
+    import httpx
+
+    import bot.source.ig_api as ig
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("not json")
+
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "Client", _Client)
+    item, status = ig._try_fetch(123, {"sessionid": "s"}, "app", "i.instagram.com")
+    assert item is None
+    assert status == 401

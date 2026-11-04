@@ -128,19 +128,25 @@ def _try_fetch(pk: int, cookies: dict, app_id: str, host: str) -> tuple[dict | N
     try:
         d = r.json()
     except Exception:
-        # 被重定向到登录/挑战页时返回的是 HTML，r.json() 必然失败。
-        # 200 在这里毫无信息量，反而把「登录态坏了」伪装成「帖子没了」→ 返回 0 让上层区分。
+        # 被重定向到登录/挑战页时返回的是 HTML（r.json() 失败）。
+        # 必须返回 401 而不是 0：调用方只把 401/403/429 当会话失效，
+        # 返回 0 会落进「帖子不可访问」分支，坏账号照样不被冷却 —— 等于没修。
         log.debug("media info %s 返回非 JSON（疑似被重定向到登录/挑战页）", host)
-        return None, 0
+        return None, 401
 
     # IG 的另一种「会话失效」形态：HTTP 200 + 失败体
     # （{"message": "login_required"/"checkpoint_required", "status": "fail"}）。
-    # 只看状态码会漏判，坏账号照样不会被冷却。
+    # 只看状态码会漏判，坏账号照样不会被冷却。但要区分「帖子没了」和「登录坏了」，
+    # 否则删帖也会冤枉账号进冷却。
     if str(d.get("status") or "").lower() == "fail" or d.get("require_login"):
         msg = str(d.get("message") or "").lower()
         log.debug("media info %s 返回失败体：%s", host, msg[:120])
-        if "login" in msg or "checkpoint" in msg or "challenge" in msg:
+        if "login" in msg or "checkpoint" in msg or "challenge" in msg or d.get("require_login"):
             return None, 401
+        if "not found" in msg or "unavailable" in msg or "deleted" in msg:
+            return None, 404
+        # 无法归类：不冷却账号（宁可漏判也不要误伤健康账号），
+        # 返回 0 走「帖子不可访问」分支。
         return None, 0
 
     items = d.get("items") or []
