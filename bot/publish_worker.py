@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -75,12 +76,12 @@ def claim(base: str, s: Settings, task_id: int, platform: str, force: bool = Fal
 
 
 def report(base: str, s: Settings, task_id: int, platform: str, ok: bool,
-           url: str = "", error: str = "", login_expired: bool = False) -> None:
+           url: str = "", error: str = "", login_expired: bool = False) -> dict:
     with httpx.Client(timeout=30) as c:
         r = c.post(f"{base}/api/report", headers=_headers(s),
                    json={"task_id": task_id, "platform": platform, "ok": ok,
                          "url": url, "error": error, "login_expired": login_expired})
-        _check(r, f"回报 {task_id}/{platform}")
+        return _check(r, f"回报 {task_id}/{platform}")
 
 
 def _report_success_with_retry(base: str, s: Settings, task: dict, platform: str,
@@ -117,6 +118,30 @@ def _queue_pending_report(task_id: int, platform: str, url: str) -> None:
         log.error("写补报队列失败（该条可能重复发布）：%s", e)
 
 
+def _pending_report_pairs() -> set[tuple[int, str]]:
+    """读 outbox，返回 {(task_id, platform)}，供 release_stale 排除。
+
+    这些 job 的视频已经发出去了，只是成功回报还没送到；把它们放回 PENDING
+    会让同一条视频被再发一次。
+    """
+    pairs: set[tuple[int, str]] = set()
+    if not PENDING_REPORTS_PATH.exists():
+        return pairs
+    try:
+        for line in PENDING_REPORTS_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+                pairs.add((int(item["task_id"]), str(item["platform"])))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return pairs
+
+
 def flush_pending_reports(base: str, s: Settings) -> int:
     """补报上轮未能上报的成功结果。返回成功条数。"""
     if not PENDING_REPORTS_PATH.exists():
@@ -134,20 +159,44 @@ def flush_pending_reports(base: str, s: Settings) -> int:
         try:
             item = json.loads(line)
         except Exception:
+            log.error("补报队列条目不是合法 JSON，已丢弃：%s", line[:120])
             continue
+        # 缺 task_id/platform 的条目永远报不上去：保留会让它每轮都试一次，
+        # 永远不消亡，还占一次 HTTP 往返。直接丢弃并留痕。
         try:
-            report(base, s, int(item["task_id"]), str(item["platform"]),
-                   ok=True, url=str(item.get("url") or ""))
+            tid = int(item["task_id"])
+            plat = str(item["platform"] or "").strip()
+        except (KeyError, TypeError, ValueError):
+            log.error("补报队列条目缺 task_id/platform，已丢弃：%s", line[:120])
+            continue
+        if not tid or not plat:
+            log.error("补报队列条目缺 task_id/platform，已丢弃：%s", line[:120])
+            continue
+
+        try:
+            body = report(base, s, tid, plat, ok=True, url=str(item.get("url") or ""))
+            # 协调端「找不到 PUBLISHING job」也返回 200，要区分：
+            #  · 已经记过（重复回报）→ 正常，可以丢弃条目
+            #  · 状态被 release_stale 退回 → job 会重发，必须留痕告警
+            if body and body.get("ok") is False:
+                log.error("补报被协调端拒绝（t%d/%s）：%s —— 该视频可能被重复发布",
+                          tid, plat, str(body.get("error"))[:120])
+                continue
             done += 1
         except Exception:
             kept.append(line)
+
     try:
         if kept:
-            PENDING_REPORTS_PATH.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            # 原子写：write_text 是先截断再写，进程在部署重启时被杀会把整个
+            # outbox 清空 —— 那些视频已发出却没了补报记录，正是要避免的重复发布。
+            tmp = PENDING_REPORTS_PATH.with_name(PENDING_REPORTS_PATH.name + ".tmp")
+            tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            os.replace(tmp, PENDING_REPORTS_PATH)
         else:
             PENDING_REPORTS_PATH.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as e:
+        log.error("回写补报队列失败（已发出的视频可能被重复发布）：%s", e)
     if done:
         log.info("补报上一轮未上报的发布成功结果：%d 条", done)
     return done
@@ -655,10 +704,15 @@ def run_once(base: str, s: Settings) -> int:
     # 阈值必须 > 单条正常发布的合法最长耗时，否则会把「还在跑」的 job 抢回队列，
     # 造成同一条视频重复发布。快手上传超时单独就 15 分钟（UPLOAD_TIMEOUT），
     # 加上转码等待/提交/首评，合法上限约 18~20 分钟 → 用 30 分钟留足余量。
+    #
+    # 已发出但成功回报还在 outbox 里的 job 必须排除：它们的视频已经上线，
+    # 放回 PENDING 会让同一条再发一次。
     try:
+        pending_pairs = _pending_report_pairs()
         with httpx.Client(timeout=15) as c:
             r = c.post(f"{base}/api/release_stale", headers=_headers(s),
-                       json={"older_than_minutes": 30})
+                       json={"older_than_minutes": 30,
+                             "exclude": sorted(f"{t}:{p}" for t, p in pending_pairs)})
         released = (r.json() or {}).get("released", 0)
         if released:
             log.warning("回收 %d 条卡死的发布中 job（已放回待发布队列）", released)
@@ -889,6 +943,17 @@ def main() -> None:
         telegram.notify_info(s, f"🟢 发布 worker 已启动\n远端：{base}\n间隔 {args.interval}s")
     except Exception:
         pass
+
+    # 启动时先把补报队列发出去，**再**释放卡死的 PUBLISHING job。
+    # 顺序不能反：worker 停机超过 30 分钟后重启，outbox 里那些「已发出但没报上去」
+    # 的 job 会被 release_stale 先放回 PENDING，随后 flush 再报 ok=True 时协调端
+    # 已经找不到 PUBLISHING job（返回 200 + ok:false），条目被当成功丢弃 → 重复发布。
+    try:
+        flushed = flush_pending_reports(base, s)
+        if flushed:
+            log.warning("启动补报：%d 条已发布但未上报的结果已补报", flushed)
+    except Exception as e:
+        log.debug("启动补报失败：%s", e)
 
     # 启动时释放卡死的 PUBLISHING job：上次 worker 若在发布中途被杀
     # （部署重启/崩溃），job 会永久停在 PUBLISHING，既不会被认领也不会回报。

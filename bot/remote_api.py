@@ -87,11 +87,13 @@ class RemoteApi:
         return False
 
     def pending_payload(self) -> dict:
-        """待发布清单：SUBTITLED/READY 且 final 文件在，任务的目标平台还剩 PENDING job。"""
+        """待发布清单：SUBTITLED/READY 且 final 文件在，任务的目标平台还剩 PENDING job。
+
+        必须在 SQL 层就把状态过滤掉（pending(states=...)）：
+        否则「先 LIMIT 100 再过滤」在积压够多时会返回空清单，发布端静默停摆。
+        """
         out = []
-        for task in self.db.pending(limit=100):
-            if task["state"] not in (State.SUBTITLED, State.READY):
-                continue
+        for task in self.db.pending(limit=100, states=[State.SUBTITLED, State.READY]):
             final = task.get("final_path")
             if not final or not Path(final).exists():
                 continue
@@ -378,7 +380,8 @@ class RemoteApi:
             return {"ok": False, "error": "任务不存在"}
         return {"ok": True, "task": self._task_payload(task)}
 
-    def release_stale_jobs(self, older_than_minutes: int = 30) -> int:
+    def release_stale_jobs(self, older_than_minutes: int = 30,
+                           exclude: set | None = None) -> int:
         """把卡死的 PUBLISHING job 放回 PENDING，返回释放条数。
 
         卡死成因：worker 在发布中途被杀（部署重启/崩溃/OOM），job 永久停在
@@ -387,20 +390,34 @@ class RemoteApi:
 
         阈值默认 30 分钟：正常发布耗时 1~3 分钟，超过 30 分钟必然是异常。
         发布端每次启动时调用一次即可（幂等）。
+
+        exclude: {(task_id, platform)}，这些 job 的视频**已经发出去了**、
+        只是成功回报还排在补报队列里。绝不能把它们放回 PENDING —— 那会导致
+        同一条视频被再发一次。
         """
         from datetime import datetime as _dt
         from datetime import timedelta as _td
         cutoff = (_dt.now() - _td(minutes=max(1, older_than_minutes))).isoformat(timespec="seconds")
         with self.db._lock:
-            cur = self.db.conn.execute(
-                "UPDATE publish_jobs SET state='PENDING', claimed_at=NULL, updated_at=? "
-                "WHERE state=? AND updated_at < ?",
-                (now_iso(), PUBLISHING, cutoff))
+            rows = self.db.conn.execute(
+                "SELECT id, task_id, platform FROM publish_jobs WHERE state=? AND updated_at < ?",
+                (PUBLISHING, cutoff)).fetchall()
+            skip_ids = [r["id"] for r in rows
+                        if exclude and (r["task_id"], r["platform"]) in exclude]
+            sql = ("UPDATE publish_jobs SET state='PENDING', claimed_at=NULL, updated_at=? "
+                   "WHERE state=? AND updated_at < ?")
+            params: list = [now_iso(), PUBLISHING, cutoff]
+            if skip_ids:
+                sql += f" AND id NOT IN ({','.join('?' * len(skip_ids))})"
+                params.extend(skip_ids)
+            cur = self.db.conn.execute(sql, params)
             self.db.conn.commit()
             n = cur.rowcount
         if n:
             log.warning("释放卡死的 PUBLISHING job %d 条（超过 %d 分钟未回报，已放回 PENDING）",
                         n, older_than_minutes)
+        if skip_ids:
+            log.info("跳过 %d 条已发出但待补报的 job（避免重复发布）", len(skip_ids))
         return n
 
     def _task_payload(self, task: dict) -> dict:
@@ -500,8 +517,15 @@ class RemoteApi:
             telegram.notify_info(self.s, f"✅ [{task['shortcode']}] {display} 发布成功（远程发布端回报）"
                                          + (f"\n链接：{url}" if url else ""))
         elif login_expired:
-            if recoverable:
-                # 队列保留：重登后自动继续，无需人工翻库
+            # 以最终状态为准（连续失效会转 SKIPPED），不能只看 login_expired 就报「已保留」，
+            # 否则 operator 被告知「重登后自动继续」，实际 job 已是终态、永远不会再发。
+            if new_state == JobState.SKIPPED:
+                log.warning("[%s] %s 登录态连续失效，job 已 SKIPPED", task["shortcode"], display)
+                telegram.notify_info(
+                    self.s, f"🔑 [{task['shortcode']}] {display} 登录态持续失效，job 已跳过\n"
+                            f"请到发布端重新扫码后重置该 job：\n"
+                            f"python -m bot.main --login-qr {platform}")
+            else:
                 log.warning("[%s] %s 登录态失效，job 退回 PENDING 等待重登",
                             task["shortcode"], display)
                 telegram.notify_info(
@@ -509,12 +533,6 @@ class RemoteApi:
                     f"🔑 [{task['shortcode']}] {display} 登录态失效\n"
                     f"job 已保留（未丢弃），重登后自动继续\n"
                     f"请到发布端运行 python -m bot.main --login-qr {platform} 重新扫码")
-            else:
-                log.warning("[%s] %s 登录态失效且不可恢复，job 已 SKIPPED",
-                            task["shortcode"], display)
-                telegram.notify_info(
-                    self.s, f"🔑 [{task['shortcode']}] {display} 登录态失效（不可恢复），"
-                            f"job 已跳过\n请到发布端运行 python -m bot.main --login {platform} 重新扫码")
         else:
             if new_state == JobState.FAILED:
                 log.error("[%s] %s 重试已达上限，job 标记 FAILED：%s",
@@ -522,24 +540,31 @@ class RemoteApi:
                 telegram.notify_info(
                     self.s, f"❌ [{task['shortcode']}] {display} 连续失败 {MAX_JOB_RETRIES} 次，"
                             f"job 已标记 FAILED，等人工处理后重置\n错误：{err[:250]}")
-            elif new_state == JobState.SKIPPED:
-                log.warning("[%s] %s 登录态连续失效且不可恢复，job 已 SKIPPED",
-                            task["shortcode"], display)
-                telegram.notify_info(
-                    self.s, f"🔑 [{task['shortcode']}] {display} 登录态连续失效，job 已跳过\n"
-                            f"请到发布端运行 python -m bot.main --login-qr {platform} 重新扫码后重置")
             else:
                 log.warning("[%s] %s 发布失败：%s", task["shortcode"], display, err[:150])
                 telegram.notify_info(self.s, f"⚠️ [{task['shortcode']}] {display} 发布失败，将自动重试\n错误：{err[:200]}")
 
-        # 全部 job 终态 → 任务 PUBLISHED
+        # 全部 job 终态 → 任务 PUBLISHED，但必须至少有一个真的发成功过。
+        # 2026-11-04：新增 FAILED 终态后，若所有平台都失败 5 次，remaining 也会是 0。
+        # 那时把任务标 PUBLISHED 会让 step_notify 推送「✅ 发布完成」而实际一条都没发出去，
+        # 与 finalize_orphan_ready 里的不变量（必须至少一个真 PUBLISHED）矛盾。
         with self.db._lock:
             cur2 = self.db.conn.execute(
                 "SELECT COUNT(*) c FROM publish_jobs WHERE task_id=? AND state NOT IN ('PUBLISHED','SKIPPED','FAILED')",
                 (task_id,))
             remaining = cur2.fetchone()[0]
-        if remaining == 0:
+            done = self.db.conn.execute(
+                "SELECT COUNT(*) c FROM publish_jobs WHERE task_id=? AND state='PUBLISHED'",
+                (task_id,)).fetchone()[0]
+        if remaining == 0 and done > 0:
             self.db.update(task_id, state=State.PUBLISHED, published_at=now_iso(), error=None)
+        elif remaining == 0:
+            # 全平台失败/跳过：留给人工判断，不要伪造「发布完成」
+            log.error("[%s] 所有平台均未发布成功（FAILED/SKIPPED），任务保持 %s 等人工处理",
+                      task["shortcode"], task["state"])
+            telegram.notify_info(
+                self.s, f"❌ [{task['shortcode']}] 所有平台均未发布成功，"
+                        f"任务未标记完成，请人工处理后重置")
         return {"ok": True}
 
     # ---------- HTTP 服务 ----------
@@ -669,12 +694,24 @@ class RemoteApi:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return
                 if parsed.path == "/api/release_stale":
-                    # 发布端启动时调用：把卡死的 PUBLISHING job 放回 PENDING。
+                    # 发布端每轮调用：把卡死的 PUBLISHING job 放回 PENDING。
                     # 卡死成因：worker 在发布中途被杀（部署/崩溃），job 永远
                     # 停在 PUBLISHING，既不会被 claim 也不会被 report。
+                    # exclude 里的 ("task_id:platform") 是已发出但待补报的 job，
+                    # 放回队列会导致重复发布。
                     try:
+                        raw_ex = data.get("exclude") or []
+                        skip: set[tuple[int, str]] = set()
+                        if isinstance(raw_ex, list):
+                            for it in raw_ex[:200]:
+                                try:
+                                    tid_s, plat_s = str(it).split(":", 1)
+                                    skip.add((int(tid_s), plat_s))
+                                except (ValueError, TypeError):
+                                    continue
                         n = api.release_stale_jobs(
-                            older_than_minutes=int(data.get("older_than_minutes") or 30))
+                            older_than_minutes=int(data.get("older_than_minutes") or 30),
+                            exclude=skip)
                         self._send_json(200, {"ok": True, "released": n})
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
@@ -741,6 +778,8 @@ class RemoteApi:
             ipaddress.ip_network("10.0.0.0/8"),
             ipaddress.ip_network("172.16.0.0/12"),
             ipaddress.ip_network("192.168.0.0/16"),
+            ipaddress.ip_network("::1/128"),          # IPv6 回环
+            ipaddress.ip_network("fd7a:115c:a1e0::/48"),  # Tailscale IPv6
         )
         try:
             ip = ipaddress.ip_address(host)
@@ -751,9 +790,12 @@ class RemoteApi:
             raise RemoteApiError(
                 f"拒绝绑定 {host}：0.0.0.0/::/链路本地地址会暴露到公网，"
                 f"请填 127.0.0.1（SSH 隧道）或 Tailscale IP（100.x）")
-        if ip.version != 6 and not any(ip in net for net in ALLOWED_NETS):
+        # IPv4 映射的 IPv6（::ffff:8.8.8.8）要按 v4 判定，否则会绕过白名单
+        check_ip = getattr(ip, "ipv4_mapped", None) or ip
+        if not any(check_ip in net for net in ALLOWED_NETS):
             raise RemoteApiError(
-                f"拒绝绑定非私有地址 {host}：API 只能绑 Tailscale IP（100.x/CGNAT）或 127.0.0.1")
+                f"拒绝绑定非私有地址 {host}：API 只能绑 Tailscale IP（100.x/CGNAT）"
+                f"或 127.0.0.1")
 
         server = ThreadingHTTPServer((host, port), Handler)
         self.server = server  # 暴露给测试/管理代码（读 server.server_address[1] 取实际端口）

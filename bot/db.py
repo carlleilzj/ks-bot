@@ -428,14 +428,28 @@ class Database:
             row = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return dict(row) if row else None
 
-    def pending(self, limit: int = 50) -> list[dict]:
+    def pending(self, limit: int = 50, states: list[str] | None = None) -> list[dict]:
         """返回本轮要推进的任务。
 
-        排序时把**未进入发布阶段**的任务排在前面：分体部署下 READY 任务会长期
-        停在这个窗口里等远端发布端认领，若按时间排序，积压的 READY 会把
-        LIMIT 名额占满，新投进来的 DETECTED 任务永远轮不上（实测灌 60 条
-        READY 后新链接完全不处理，且无任何告警）。
+        states 不为空时先按状态过滤再 LIMIT —— 远程端 /api/pending 只关心
+        SUBTITLED/READY，若先 LIMIT 100 再过滤，积压够多时窗口里全是处理中的
+        任务，发布端会拿不到任何可发布任务并静默停摆。
+
+        排序把**未进入发布阶段**的任务排在前面：分体部署下 READY 会长期停在
+        这个窗口里等远端认领，若按时间排序，积压的 READY 会把名额占满，
+        新投进来的 DETECTED 永远轮不上（实测灌 60 条 READY 后新链接完全不处理）。
         """
+        if states:
+            placeholders = ",".join("?" * len(states))
+            with self._lock:
+                rows = self.conn.execute(
+                    f"""SELECT * FROM tasks WHERE state IN ({placeholders})
+                        ORDER BY COALESCE(ig_published_at, created_at) ASC, id ASC
+                        LIMIT ?""",
+                    (*states, limit),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
         placeholders = ",".join("?" * len(PENDING_STATES))
         with self._lock:
             rows = self.conn.execute(

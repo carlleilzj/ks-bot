@@ -69,6 +69,11 @@ def _base_opts(url: str = "") -> tuple[dict, str]:
         log.warning("curl_cffi 未安装，已跳过浏览器指纹（impersonate）。"
                     "YouTube 可能触发风控，建议 pip install curl_cffi")
     opts["remote_components"] = ["ejs:github"]  # 顶层参数（YoutubeDL params），非 extractor_args
+    # 超时保护下沉到基础选项，让 extract_meta 与 download 两条路径都生效。
+    # yt-dlp 默认无 socket 超时：一条半死连接会让唯一的主循环线程永久挂住
+    # （下载/转码/发布/DB 推进全部停摆），比 TG 监听被阻塞更严重。
+    opts.setdefault("socket_timeout", 30)
+    opts.setdefault("retries", 2)
     opts["extractor_args"] = {
         "youtube": {
             # mweb：实测可绕过 SABR 流限制拿到完整音视频 URL（web_safari 会被 SABR 全灭）
@@ -156,10 +161,7 @@ def extract_meta(url: str) -> VideoMeta:
         "no_warnings": True,
         "skip_download": True,
         "extract_flat": False,
-        # 超时保护：yt-dlp 默认无 socket 超时，一条半死的链接能把唯一的
-        # TG 监听线程阻塞数分钟，期间所有投链与按钮回调全部排队。
-        "socket_timeout": 30,
-        "retries": 2,
+        # socket_timeout / retries 已在 _base_opts 统一设置（extract 与 download 共用）
         # 元数据阶段不选下载格式。mweb 在部分 Shorts 上没有可合并流，
         # 默认 bestvideo+bestaudio 会在拿到标题前就报 Requested format is not available。
         "format": None,

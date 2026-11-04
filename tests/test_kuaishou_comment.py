@@ -50,7 +50,7 @@ def test_post_first_comment_mock():
     mock_box = MagicMock()
     mock_box.count.return_value = 1
     mock_box.is_visible.return_value = True
-    mock_box.inner_text.return_value = ""
+    mock_box.inner_text.return_value = "测试首评内容"   # 发送后仍留文本 → 走重试前的判定
 
     mock_btn = MagicMock()
     mock_btn.count.return_value = 1
@@ -106,5 +106,53 @@ def test_post_first_comment_mock():
     mock_page.goto.assert_called_once()
     mock_box.click.assert_called_once()
     mock_page.keyboard.type.assert_called_with("测试首评内容", delay=30)
+    # 第一次点击发送后评论即渲染 → 只点一次，不会重复发表
     mock_btn.click.assert_called_once()
     mock_pin_btn.click.assert_called_once()
+
+
+def test_first_comment_not_resent_when_input_already_cleared():
+    """发送其实成功了、只是列表渲染慢：输入框已清空时不得再点发送（防重复首评）。"""
+    page = MagicMock()
+    box = MagicMock()
+    box.count.return_value = 1
+    box.is_visible.return_value = True
+    box.inner_text.return_value = ""     # 已清空
+
+    btn = MagicMock()
+    btn.count.return_value = 1
+    btn.is_visible.return_value = True
+    btn.get_attribute.return_value = "author-comment-input__row__btn"
+
+    title = MagicMock()
+    title.count.return_value = 1
+    title.inner_text.return_value = "测试标题足够长"
+    title.first = title
+
+    rendered = {"n": 0}
+
+    def locator_side_effect(sel):
+        if "title" in sel:
+            return title
+        if "author-comment-input__row__input" in sel:
+            return box
+        if "author-comment-input__row__btn" in sel:
+            return btn
+        if "comment-item" in sel:
+            m = MagicMock()
+            rendered["n"] += 1
+            # 第 1 次查询（发送后）还没渲染，第 2 次（重试前）渲染出来
+            m.filter.return_value.count.return_value = 1 if rendered["n"] >= 2 else 0
+            m.count.return_value = 1 if rendered["n"] >= 2 else 0
+            return m
+        mm = MagicMock()
+        mm.count.return_value = 0
+        return mm
+
+    page.locator.side_effect = locator_side_effect
+    box.first = box
+    btn.first = btn
+
+    res = post_first_comment(page, "测试首评内容", title="测试标题足够长", pin=False)
+    assert res is True
+    assert btn.click.call_count == 1, "输入框已清空时不应重复点击发送"

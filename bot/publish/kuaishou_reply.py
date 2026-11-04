@@ -236,6 +236,15 @@ def generate_first_comment(title: str, description: str = "") -> str:
         text = re.sub(r'["“”\'‘’]', "", text).strip()
         text = re.sub(r"^[#【\[\(（]+|[#】\]\)）]+$", "", text).strip()
         if text:
+            # 与 copywriter 共用同一道质量门：模型很容易写出「你们…吗？」这类
+            # 提问式模板，直接发出去就是我们要消灭的那种首评。
+            try:
+                from ..ai.copywriter import _check_first_comment
+                if _check_first_comment(text):
+                    log.warning("首评兜底命中提问式模板，改用预置短句：%s", text[:40])
+                    return random.choice(_FALLBACK_FIRST_COMMENTS)
+            except Exception:
+                pass
             return text[:40]
     except Exception as e:
         log.warning("LLM 生成首评失败，使用预设短句：%s", e)
@@ -364,15 +373,23 @@ def reply_single_comment_on_page(
             // 曾经只用 inputs[inputs.length-1]，一旦顶部框是最后一个可见元素，
             // 就会把「回复粉丝」写成一条普通评论，且与置顶首评叠在一起。
             const before = new Set(beforeIds || []);
-            const fresh = all.filter((el) => !before.has(el.dataset.ksReplyMark || ""));
+            let fresh = all.filter((el) => !before.has(el.dataset.ksReplyMark || ""));
             if (!fresh.length) {
-                // 兜底：某些改版会复用同一输入框，此时退化为「取最后一个」但要求
-                // 它不在 before 标记里；仍无命中则判失败，宁可不发也不发错位置。
-                const untagged = all.filter((el) => !before.has(el.dataset.ksReplyMark || ""));
-                if (!untagged.length) {
-                    return { ok: false, reason: "未找到新弹出的回复输入框（疑似只剩顶部常驻框）" };
+                // 改版可能复用同一个输入框（点「回复」后原地切换目标），此时
+                // 没有「新」输入框。退化为：排除顶部常驻框（placeholder 为
+                // 「有爱评论」的那个），取剩余里的最后一个；再不行才判失败，
+                // 宁可不发也不发到作者首评框里。
+                const isAuthorBox = (el) => {
+                    const ph = el.getAttribute("placeholder") || "";
+                    const cls = (el.className || "").toString();
+                    return ph.includes("有爱评论") || cls.includes("author-comment-input");
+                };
+                const candidates = all.filter((el) => !isAuthorBox(el));
+                if (candidates.length) {
+                    fresh = [candidates[candidates.length - 1]];
+                } else {
+                    return { ok: false, reason: "未找到回复输入框（只剩顶部作者框，拒绝误发）" };
                 }
-                fresh.push(untagged[untagged.length - 1]);
             }
             const inputEl = fresh[fresh.length - 1];
             inputEl.focus();

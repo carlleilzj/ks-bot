@@ -128,7 +128,21 @@ def _try_fetch(pk: int, cookies: dict, app_id: str, host: str) -> tuple[dict | N
     try:
         d = r.json()
     except Exception:
-        return None, r.status_code
+        # 被重定向到登录/挑战页时返回的是 HTML，r.json() 必然失败。
+        # 200 在这里毫无信息量，反而把「登录态坏了」伪装成「帖子没了」→ 返回 0 让上层区分。
+        log.debug("media info %s 返回非 JSON（疑似被重定向到登录/挑战页）", host)
+        return None, 0
+
+    # IG 的另一种「会话失效」形态：HTTP 200 + 失败体
+    # （{"message": "login_required"/"checkpoint_required", "status": "fail"}）。
+    # 只看状态码会漏判，坏账号照样不会被冷却。
+    if str(d.get("status") or "").lower() == "fail" or d.get("require_login"):
+        msg = str(d.get("message") or "").lower()
+        log.debug("media info %s 返回失败体：%s", host, msg[:120])
+        if "login" in msg or "checkpoint" in msg or "challenge" in msg:
+            return None, 401
+        return None, 0
+
     items = d.get("items") or []
     return (items[0] if items else None), r.status_code
 

@@ -661,12 +661,14 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
                 log.warning("[%s] 文案命中禁用词（第 %d 次）：%s", profile.name, attempt, last_err)
                 messages.append({"role": "user", "content": f"上次生成违规：{last_err}。请绝对不要出现任何做饭、带娃或俗套套话，只针对原文案角色与事件重新输出。"})
                 continue
-            last_result = result
 
             cliche = _check_cliche(result["title"])
             if cliche:
                 last_err = "、".join(cliche)
-                last_cliche_result = result
+                # 命中套话的版本只作最末兜底（比抛异常强），不能覆盖已收录的
+                # 「未命中套话」版本 —— 否则后面的更差版本会把好的顶掉。
+                if last_result is None:
+                    last_cliche_result = result
                 log.warning("[%s] 标题命中套话（第 %d 次）：%s | %r",
                             profile.name, attempt, last_err, result["title"])
                 messages.append({"role": "user", "content": (
@@ -676,6 +678,8 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
                     f"上次标题：{result['title']}"
                 )})
                 continue
+            # 只有「未命中套话」的版本才进入首选兜底
+            last_result = result
 
             # 首评质量：拦截「…吗？」这类提问式模板收尾（实测占 60%）。
             # 只重写首评，不推翻已合格的标题/标签，避免整条重来时标题又变差。
@@ -699,10 +703,17 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
         except (ValueError, json.JSONDecodeError) as e:
             last_err = str(e)
             log.warning("[%s] 文案输出解析失败（第 %d 次）：%s", profile.name, attempt, last_err)
-            # 解析失败也可能源自上游安全过滤（返回 200 但内容是拒答文本）：
-            # 同样走降级阶梯，否则等于把同一段敏感输入再打一遍，必然再挂。
-            degrade = min(degrade + 1, 2)
-            messages = _degrade_once(degrade)
+            # 区分两类解析失败：
+            #  · 内容里完全没有 `{`（上游把请求拦成拒答文本）→ 必须降级，否则等于
+            #    把同一段敏感输入再打一遍，必然再挂；
+            #  · 有 `{` 只是格式/截断问题（title 为空、多对象）→ 保留画面描述，
+            #    只追加格式纠正。否则后两次几乎失去画面依据，更容易产出台词/套话。
+            looks_refused = "{" not in (content or "")
+            if looks_refused:
+                degrade = min(degrade + 1, 2)
+                messages = _degrade_once(degrade)
+                log.warning("[%s] 输出无 JSON 结构（疑似被拒答），降级到 level %d",
+                            profile.name, degrade)
             messages.append({"role": "user", "content": f"输出格式错误：{last_err}，请只输出纯 JSON 对象。"})
             time.sleep(2)
         except Exception as e:

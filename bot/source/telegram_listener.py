@@ -22,9 +22,17 @@ from .downloader import extract_meta, parse_url
 log = logging.getLogger(__name__)
 
 # URL 正则：匹配消息里的 http(s) 链接。
-# 排除中文标点：中文用户常写「看这个 https://.../reel/XXX，很好笑」，
-# 若把「，很好笑」一起吃进去，shortcode 会带非法字符、白耗 8 次重试。
-_URL_RE = re.compile(r"https?://[^\s<>'\"，。！？、；：）】」》”’,!?;:)]+", re.IGNORECASE)
+# 中文用户常写「看这个 https://.../reel/XXX，很好笑」，若把「，很好笑」一起吃进去，
+# shortcode 会带非法字符、白耗 8 次重试 → 排除中文标点。
+#
+# 但不能把 ? : 这类「URL 内部合法字符」也排除：查询参数型链接会被截断
+# （youtube.com/watch?v=ABC → /watch，facebook.com/watch/?v=123 → /watch/），
+# yt-dlp 必然解析失败。改为在匹配后剥离链接末尾的英文标点。
+_URL_RE = re.compile(
+    r"https?://[^\s<>'\"，。！？、；）】」》”’]+",
+    re.IGNORECASE,
+)
+_URL_TRAILING_PUNCT = ",.!?;:)'\"”’"
 
 # getUpdates long-poll 超时（秒）
 _POLL_TIMEOUT = 30
@@ -227,8 +235,9 @@ class TelegramListener(threading.Thread):
             self._handle_login_cmd(t)
             return
 
-        # 提取 URL
-        urls = _URL_RE.findall(text)
+        # 提取 URL（末尾英文标点单独剥离，见 _URL_RE 注释）
+        urls = [u.rstrip(_URL_TRAILING_PUNCT) for u in _URL_RE.findall(text)]
+        urls = [u for u in urls if u]
         if not urls:
             # 非 URL 消息：只响应明确的指令
             t_low = t.lower()
@@ -495,8 +504,9 @@ def _parse_target_platforms(text: str) -> tuple[list[str] | None, list[str]]:
       - targets: 规范化后的平台 key 列表，None 表示未指定（全部平台）
       - unknown_tokens: 用户写了但没认出来的词（用于提示）
     """
-    # 去掉 URL，只看剩余文本
-    remaining = _URL_RE.sub("", text)
+    # 去掉 URL，只看剩余文本（URL 尾部标点一并剥掉，避免残留 ?v= 之类 token）
+    remaining = _URL_RE.sub(
+        lambda m: m.group(0).rstrip(_URL_TRAILING_PUNCT), text)
     # 按空格、逗号、@、冒号分割成 token
     raw_tokens = re.split(r"[\s,@:：]+", remaining)
     # 这些词不是平台名，忽略

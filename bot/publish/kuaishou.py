@@ -1646,6 +1646,7 @@ def _click_publish(page: Page, title: str = "") -> None:
     #     上传页自身文案里的成功字样不能当作提交成功。
     #  4) 标题回查在作品卡片内逐块核对，不再拿整页 body 做 in。
     BLOCK_TOASTS = ("操作过于频繁", "发布失败，请稍后再试", "发布失败")
+    saw_success = False   # 见过成功 toast 就记住，不因它消失而丢失信号
     deadline = time.time() + 60
     while time.time() < deadline:
         page.wait_for_timeout(2000)
@@ -1664,11 +1665,24 @@ def _click_publish(page: Page, title: str = "") -> None:
                         f"可能是 IP 风控或页面改版，查看截图确认"
                     )
             for text in SELECTORS["success_texts"]:
-                if text in toast_text and left_form:
-                    log.info("检测到快手发布成功提示且已离开发布页：%s", text)
-                    return
                 if text in toast_text:
+                    # toast 是瞬时的：可能出现在跳转之前就消失。
+                    # 记住「看见过」，等真离开发布页再认成功，避免同一轮里
+                    # 既错过 toast、又因页面未跳转而误判失败 → 重复发布。
+                    saw_success = True
+                    if left_form:
+                        log.info("检测到快手发布成功提示且已离开发布页：%s", text)
+                        return
                     log.debug("看到「%s」但仍停在发布页，继续等待跳转", text)
+    if saw_success:
+        # 见过成功提示，只是没赶上 URL 跳转：再给一次核实机会
+        try:
+            page.wait_for_timeout(3000)
+            if PUBLISH_URL not in page.url or _title_in_manage_list(page, title):
+                log.info("曾检测到发布成功提示，且已离开发布页/管理页可见新作品 → 判定发布成功")
+                return
+        except Exception:
+            pass
     # 未检测到跳转：打开内容管理页核实最新作品是否出现（必须核实标题）
     try:
         page.goto(MANAGE_URL, wait_until="domcontentloaded", timeout=30000)
@@ -1707,6 +1721,12 @@ def _title_in_manage_list(page: Page, title: str) -> bool:
     """在作品列表卡片内核对标题，绝不拿整页 body 做 `in` 判断。
 
     同模板标题的前缀常常相同，整页模糊匹配会被历史作品命中 → 把失败记成成功、静默漏发。
+
+    实现要点（2026-11-04 加固）：
+    - 不假设卡片是「时长行 → 标题 → 日期」三行：新发布作品可能显示「审核中/转码中」
+      而没有时长行，置顶徽标也会多出一行。改为在每块里扫所有行找匹配。
+    - 只认**第一块**（最新作品，快手按发布时间倒序）：历史作品/置顶卡片同名前缀
+      会让失败误判成成功。_fetch_ks_url 已按同样思路排除置顶。
     """
     clean = re.sub(r"[【】《》#\s\-_，。！？、“”\"']", "", title)
     if len(clean) < 6:
@@ -1716,14 +1736,16 @@ def _title_in_manage_list(page: Page, title: str) -> bool:
     except Exception:
         return False
     target = clean[:10]
-    # 逐个卡片块核对（快手管理页按「时长行 → 标题 → 日期」分块）
-    for blk in re.split(r"(?m)^(?=\d{1,2}:\d{2}(?::\d{2})?\s*$)", body):
-        lines = [x.strip() for x in blk.splitlines() if x.strip()]
-        if len(lines) < 3:
-            continue
-        card_title = re.sub(r"[【】《》#\s\-_，。！？、“”\"']", "", lines[1])
-        if target and card_title.startswith(target[:8]):
-            return True
+    blocks = [b for b in re.split(r"(?m)^(?=\d{1,2}:\d{2}(?::\d{2})?\s*$)", body)
+              if b.strip()]
+    if not blocks:
+        return False
+    # 只看最新的 2 块：新作品偶尔会排在「置顶作品」之后
+    for blk in blocks[:2]:
+        for line in blk.splitlines():
+            norm_line = re.sub(r"[【】《》#\s\-_，。！？、“”\"']", "", line.strip())
+            if norm_line.startswith(target[:8]):
+                return True
     return False
 
 
@@ -1931,11 +1953,16 @@ def post_first_comment(
 
         def _same_work(shown: str) -> bool:
             """两侧都必须非空且足够长才比较 —— 空串 in 任意串 恒为真，
-            页面标题还没渲染时会把「当前默认选中的上一条作品」误判成目标。"""
+            页面标题还没渲染时会把「当前默认选中的上一条作品」误判成目标。
+
+            只做**同向前缀**比对，不做双向包含：`cur[:8] in clean_target` 会让
+            「这操作太离谱了」在目标「这操作太离谱了吧」里命中，系列/模板标题
+            会把首评发到上一条作品 —— 正是本函数要防的事。
+            """
             cur = _norm(shown)
             if len(cur) < 4:
                 return False
-            return clean_target in cur or cur[:8] in clean_target
+            return cur.startswith(clean_target) or clean_target.startswith(cur[:8])
 
         if clean_target:
             matched = False
@@ -2004,7 +2031,31 @@ def post_first_comment(
         # 必须等待 Vue 输入状态响应式更新（去除 --disabled 类名），且绝对不能用 text=发送（会误选外层 968px 容器）
         sent_ok = False
         btn = page.locator(".author-comment-input__row__btn").first
+
+        def _comment_shown() -> bool:
+            return bool(
+                page.locator(".comment-item, [class*='comment-item']")
+                .filter(has_text=first_comment[:8]).count())
+
         for send_attempt in range(1, 4):
+            if send_attempt > 1:
+                # 重试前必须确认「上一次真的没发出去」：评论列表渲染可能比接口慢，
+                # 盲目再点一次发送会在视频下留下两条一模一样的置顶首评。
+                if _comment_shown():
+                    sent_ok = True
+                    break
+                box_text = ""
+                try:
+                    box_text = (box.inner_text() or "").strip()
+                except Exception:
+                    pass
+                if not box_text:
+                    # 输入框已被清空 ⇒ 上一次点击其实生效了，等渲染即可
+                    log.info("首评输入框已清空，等待评论渲染（不再重复点击发送）")
+                    page.wait_for_timeout(2500)
+                    sent_ok = _comment_shown()
+                    break
+
             page.wait_for_timeout(600)
             if btn.count() and btn.is_visible():
                 btn_cls = btn.get_attribute("class") or ""
@@ -2018,13 +2069,8 @@ def post_first_comment(
                     page.wait_for_timeout(300)
                     btn.click(force=True)
 
-            page.wait_for_timeout(1500)
-            # 发送成功只认「评论区出现该条评论」：div 输入框的 inner_text 在
-            # contenteditable 上不可靠，若只看它为空会误判，随后重复点击发送。
-            comment_rendered = bool(
-                page.locator(".comment-item, [class*='comment-item']")
-                .filter(has_text=first_comment[:8]).count())
-            if comment_rendered:
+            page.wait_for_timeout(2000)
+            if _comment_shown():
                 sent_ok = True
                 break
             log.warning("作者首评未出现在评论区，重试点击发送 (第 %d 次)...", send_attempt)
