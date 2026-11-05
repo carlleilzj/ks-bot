@@ -642,10 +642,11 @@ def publish(
     attach_service: str = "",
     attach_prefer: str = "",
     attach_fallback: str = "",
-    cover_title: bool = True,
+    cover_title: bool = False,   # 2026-11-05 全局取消封面大字（默认不叠）
     first_comment: str = "",
     pin_comment: bool = True,
     anchors: dict | None = None,
+    settings=None,               # 封面 vision 择优用（None 则退化为比亮度）
 ) -> str | None:
     """上传并发布一条视频，成功返回快手作品链接（获取不到时 None）。
 
@@ -702,7 +703,7 @@ def publish(
                 Path(cover) if cover else None, Path(video))
             chosen = _pick_best_cover(
                 page, rescue_cover,
-                title=title if cover_title else "")
+                title=title if cover_title else "", s=settings)
             log.info("封面最终来源：%s", chosen)
 
             # 5.5 挂「作者服务」推广（2026-11-02：星火已下架，改挂关联推广任务）
@@ -1558,20 +1559,24 @@ def _apply_recommend_cover(page: Page, index: int) -> bool:
 
 
 def _pick_best_cover(
-    page: Page, self_cover: Path | None, title: str = "",
+    page: Page, self_cover: Path | None, title: str = "", s=None,
 ) -> str:
-    """封面择优：自选封面 vs 平台推荐封面，取更亮的那个。
+    """封面择优：自选封面 vs 平台推荐封面，用 vision 打分决定用哪个。
 
     背景（2026-11-05）：快手发布页在视频转码后会给出 3 张「智能推荐封面」，
-    它们取自视频高光帧，通常比我们按亮度/评分选出的帧更贴合平台推荐流。
-    但并非总是更好（可能带黑边、主体不清），所以做**对比择优**而不是无脑替换。
+    取自视频高光帧。但并非总是更好（可能带黑边、主体不清），所以做对比择优。
+
+    打分方式（2026-11-05 起）：不只比亮度，而是把「自选封面 + 3 张推荐封面」
+    一起交给 vision 按与协调端相同的三维标准打分（主体突出/视觉冲击/信息量），
+    取最高分。亮度只作为**硬门槛**：打分再高，luma < DARK_COVER_LUMA 也不采纳
+    —— 缩略图看不清主体的封面，评分模型也救不回来。
 
     策略：
-      1. 先等推荐封面就绪并下载，测亮度；
-      2. 自选封面（已过 rescue 兜底）也测亮度；
-      3. 推荐封面里取最亮的一张，若比自选封面更亮 → 先上传自选封面（保留
-         标题大字能力），再点平台推荐覆盖它；否则保持自选封面。
-         注意：推荐封面是平台生成的原图，无法叠标题大字——这是选择它的代价。
+      1. 等推荐封面就绪并下载；
+      2. 先上传自选封面（保证页面始终有一张体面的封面兜底）；
+      3. 把自选 + 推荐一起打分，取最高分且不过暗的那张；
+      4. 若最高分是推荐封面 → 点它覆盖；否则保留自选封面。
+      5. vision 不可用 → 退回「比亮度」的旧逻辑。
 
     返回 "recommend" / "self" / "none"，仅用于日志与测试断言。
     """
@@ -1583,36 +1588,106 @@ def _pick_best_cover(
         base = (self_cover.parent if self_cover else Path("/tmp"))
         reco_files = _download_cover_urls(urls, base / "reco_cover")
 
-    self_y: float | None = None
-    if self_cover and Path(self_cover).exists():
-        self_y = mean_luma(Path(self_cover))
+    self_exists = bool(self_cover and Path(self_cover).exists())
+    self_y = mean_luma(Path(self_cover)) if self_exists else None
 
-    best_reco: tuple[int, float] | None = None
-    for i, f in enumerate(reco_files):
-        y = mean_luma(f)
-        if y is None:
-            continue
-        if best_reco is None or y > best_reco[1]:
-            best_reco = (i, y)
-
-    if self_cover and Path(self_cover).exists():
+    # 先上传自选封面：保证页面上始终有一张合格的兜底封面
+    if self_exists:
         _upload_cover(page, Path(self_cover), title=title)
         log.info("已上传自选封面（luma=%s）",
                  f"{self_y:.1f}" if self_y is not None else "未知")
 
-    if best_reco is None:
-        if self_cover and Path(self_cover).exists():
+    if not reco_files:
+        if self_exists:
             return "self"
         log.warning("既无自选封面也无平台推荐封面，平台将改用视频帧")
         return "none"
 
-    idx, reco_y = best_reco
-    log.info("平台推荐封面最亮 luma=%.1f（自选封面 luma=%s）", reco_y,
-             f"{self_y:.1f}" if self_y is not None else "无")
-    if self_y is None or reco_y > self_y:
-        if _apply_recommend_cover(page, idx):
+    # 亮度过滤：过暗的推荐封面直接排除（评分模型对暗图常给高「信息量」分）
+    candidates: list[Path] = []
+    if self_exists:
+        candidates.append(Path(self_cover))
+    for f in reco_files:
+        y = mean_luma(f)
+        if y is None or y < DARK_COVER_LUMA:
+            log.info("推荐封面 %s 过暗（luma=%s），排除",
+                     f.name, f"{y:.1f}" if y is not None else "未知")
+            continue
+        candidates.append(f)
+
+    if not candidates:
+        log.warning("所有候选封面都过暗，保留自选封面")
+        return "self" if self_exists else "none"
+
+    # vision 打分（自选 + 未过暗的推荐一起比）
+    best = _score_cover_candidates(candidates, s)
+    if best is None:
+        # vision 不可用 → 退回「比亮度」
+        if self_exists and len(reco_files) == 0:
+            return "self"
+        brightest = None
+        for f in candidates:
+            y = mean_luma(f)
+            if y is None:
+                continue
+            if brightest is None or y > brightest[1]:
+                brightest = (f, y)
+        if brightest is None:
+            return "self" if self_exists else "none"
+        if self_exists and brightest[0] == Path(self_cover):
+            return "self"
+        idx = _index_in(reco_files, brightest[0])
+        if idx >= 0 and _apply_recommend_cover(page, idx):
             return "recommend"
-    return "self" if (self_cover and Path(self_cover).exists()) else "none"
+        return "self" if self_exists else "none"
+
+    chosen_note = best
+    if not (isinstance(chosen_note, (tuple, list)) and len(chosen_note) >= 2):
+        log.warning("封面打分结果异常（%r），保留自选封面", chosen_note)
+        return "self" if self_exists else "none"
+    chosen, score = chosen_note
+    if self_exists and chosen == Path(self_cover):
+        log.info("封面择优：自选封面胜出（%.1f 分）", score)
+        return "self"
+
+    idx = _index_in(reco_files, chosen)
+    log.info("封面择优：推荐封面第 %d 张胜出（%.1f 分，自选 luma=%s）",
+             idx + 1, score, f"{self_y:.1f}" if self_y is not None else "无")
+    if idx >= 0 and _apply_recommend_cover(page, idx):
+        return "recommend"
+    return "self" if self_exists else "none"
+
+
+def _index_in(items: list[Path], target: Path) -> int:
+    """返回 target 在 items 里的下标（按文件名比对），找不到返回 -1。"""
+    for i, it in enumerate(items):
+        if Path(it).name == Path(target).name:
+            return i
+    return -1
+
+
+def _score_cover_candidates(files: list[Path], s) -> tuple[Path, float] | None:
+    """用协调端同一套 vision 标准给封面候选打分，返回 (最佳文件, 分数)。
+
+    s 为空（或 vision 不可用）时返回 None，调用方退化为比亮度。
+    """
+    if not files or s is None:
+        return None
+    if not (getattr(s, "vision_api_key", "") or getattr(s, "ai_api_key", "")):
+        return None
+    try:
+        from ..ai.cover_pick import _vision_rank  # noqa: PLC0415
+        ranked = _vision_rank(list(files), s)
+    except Exception as e:
+        log.debug("封面 vision 打分不可用：%s", str(e)[:100])
+        return None
+    if not ranked:
+        return None
+    # _vision_rank 已按分降序
+    top = ranked[0]
+    if not isinstance(top, (tuple, list)) or len(top) < 2:
+        return None
+    return top[0], top[1]
 
 
 def _upload_cover(page: Page, cover: Path, title: str = "") -> None:

@@ -124,9 +124,11 @@ class PlatformConfig:
     attach_service: str = ""
     attach_prefer: str = ""
     attach_fallback: str = ""
-    # 快手：封面上叠标题大字（2026-11-02 起可关）。A 号已关——大字报与
-    # 窗口改动同批上线，中位播放 928→279 无法归因，先撤掉做基线对照。
-    cover_title: bool = True
+    # 快手：封面上叠标题大字。2026-11-05 起**全局取消**：
+    # A/B 号都已关，且平台「智能推荐封面」是原图无法叠字，
+    # 两套封面来源混用时叠字会造成风格不一致。
+    # 默认 False —— 新平台/漏配也不会突然开始叠大字。
+    cover_title: bool = False
     anchors: dict = field(default_factory=dict)  # 抖音：挂载标签 {类型: 搜索词}
     hot_topic: str = ""               # 抖音：关联热点词
     # 每平台覆盖 publish 段的全局节奏（None = 用全局值）。
@@ -374,7 +376,8 @@ def load_settings() -> Settings:
                 attach_service=str(conf.get("attach_service") or "").strip(),
                 attach_prefer=str(conf.get("attach_prefer") or "").strip(),
                 attach_fallback=str(conf.get("attach_fallback") or "").strip(),
-                cover_title=bool(conf.get("cover_title", True)),
+                # 2026-11-05 全局取消封面大字，缺省 False（显式写 true 仍可开启）
+                cover_title=bool(conf.get("cover_title", False)),
                 anchors={str(k): str(v) for k, v in _anchors.items() if v},
                 hot_topic=str(conf.get("hot_topic") or "").strip(),
                 daily_limit=_opt_int(conf.get("daily_limit")),

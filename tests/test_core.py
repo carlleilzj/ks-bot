@@ -758,4 +758,5 @@ def test_platform_attach_fields_default_empty(tmp_path):
     assert pc.attach_service == ""
     assert pc.attach_prefer == ""
     assert pc.attach_fallback == ""
-    assert pc.cover_title is True   # 默认叠字，A 号在 config 里显式关
+    # 2026-11-05 起全局取消封面大字，缺省不再叠字（显式写 true 才开）
+    assert pc.cover_title is False

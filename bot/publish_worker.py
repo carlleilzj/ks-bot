@@ -431,6 +431,7 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         if platform.startswith("kuaishou"):
             if plat_cfg:
                 extra["cover_title"] = plat_cfg.cover_title
+                extra["settings"] = s   # 封面 vision 择优需要 ai/vision 配置
                 # 热点/地点/作者声明（2026-11-04 接通：此前 config 写了但代码不读）
                 if plat_cfg.anchors:
                     extra["anchors"] = dict(plat_cfg.anchors)

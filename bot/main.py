@@ -383,6 +383,7 @@ def step_publish(s: Settings, db: Database, task: dict, headed: bool) -> None:
                 plat = s.platforms.get(pub.name)
                 if plat:
                     extra["cover_title"] = plat.cover_title
+                    extra["settings"] = s   # 封面 vision 择优需要 ai/vision 配置
                     if plat.anchors:
                         extra["anchors"] = dict(plat.anchors)
                 if copy.get("first_comment"):
