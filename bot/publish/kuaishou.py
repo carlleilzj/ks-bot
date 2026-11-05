@@ -688,12 +688,21 @@ def publish(
             if category:
                 _select_category(page, category)
 
-            # 5. 上传自定义封面（可选，失败不阻断；过暗封面先现场换帧，再叠标题大字）
+            # 5. 上传自定义封面（失败不阻断；缺失/过暗都先现场抽帧，再叠标题大字）
             #    大字报（2026-10-29 增长项②）：快手双列发现页先看封面再点，
             #    1280×960 裁切版中央叠 ≤2 行标题钩子（失败按原图发布）。
-            if cover and Path(cover).exists():
-                _upload_cover(page, rescue_dark_cover(Path(cover), Path(video)),
+            #
+            #    2026-11-05：条件从 `if cover and cover.exists()` 改为无条件调用。
+            #    原来的写法在「封面下载失败 / 文件缺失」时整段跳过上传，平台改用
+            #    视频首帧——暗色素材首帧往往是全黑的，这就是封面全黑的直接原因。
+            #    rescue_dark_cover 现在能处理 cover=None，从视频抽代表帧补齐。
+            rescue_cover = rescue_dark_cover(
+                Path(cover) if cover else None, Path(video))
+            if rescue_cover and Path(rescue_cover).exists():
+                _upload_cover(page, rescue_cover,
                               title=title if cover_title else "")
+            else:
+                log.warning("封面不可用且抽帧失败，平台将改用视频帧")
 
             # 5.5 挂「作者服务」推广（2026-11-02：星火已下架，改挂关联推广任务）
             #     attach_service 优先：任务池发布页实时读，失败软降级（不阻断）；
@@ -1382,42 +1391,73 @@ def _attach_spark_task(page: Page, prefer: str = "",
         return None
 
 
-# 封面过暗阈值：低于此值发布前现场换帧（与 cover_pick.DARK_COVER_LUMA 一致）
-DARK_COVER_LUMA = 26.0
+# 封面过暗阈值：低于此值发布前现场换帧。
+# 2026-11-05 从 26 提到 42：实测封面上线后大面积全黑，但线上作品 luma=40.6
+# 被旧阈值判为「合格」直接发布 —— 26 只挡得住纯黑帧，挡不住「暗到看不清主体」。
+# 快手双列发现页是缩略图，人眼可辨识的下限远高于纯黑判据。
+DARK_COVER_LUMA = 42.0
 
 
 def rescue_dark_cover(cover: Path | None, video: Path) -> Path | None:
-    """发布端兜底：封面过暗 → 从视频现抽代表帧替换。
+    """发布端兜底：封面缺失/过暗 → 从视频现抽代表帧。
 
     协调端选优已过滤暗帧，这里是第二道防线（覆盖：旧任务缓存封面、
-    选优降级、上传文件损坏等漏网情形）。任何失败都返回原封面，不阻断发布。
-    依赖 ffmpeg 二进制（发布端本就装有 /usr/bin/ffmpeg）。
+    选优降级、上传文件损坏、封面下载失败等漏网情形）。
+    任何失败都返回原封面，不阻断发布。
+
+    2026-11-05 修正两处漏网（曾导致作品封面一片全黑）：
+      1. 原实现 `if cover is None: return None` —— 封面下载失败时直接放行，
+         调用方再因 `if cover and cover.exists()` 为假整段跳过封面上传，
+         平台改用视频首帧（暗色素材往往是黑的）。
+         → 现在封面缺失也从视频抽帧。
+      2. 暗帧阈值 26 太低，luma=40 的暗封面照样被判合格。
+         → 阈值提到 42（见 DARK_COVER_LUMA）。
     """
     try:
         from ..media.ffmpeg import _ffmpeg, _run, mean_luma  # noqa: SLF001
     except Exception:
         return cover
     try:
-        if cover is None:
-            return None
-        cover = Path(cover)
+        video = Path(video)
+        cover = Path(cover) if cover else None
+
         y = None
-        if cover.exists():
+        if cover is not None and cover.exists():
             y = mean_luma(cover)
-            if y is None or y >= DARK_COVER_LUMA:
+            if y is not None and y >= DARK_COVER_LUMA:
                 return cover
-            log.warning("封面过暗（luma=%.1f），发布前从视频重抽代表帧", y)
-        out = cover.with_suffix(".rescue.jpg")
+            log.warning("封面过暗（luma=%s），发布前从视频重抽代表帧",
+                        f"{y:.1f}" if y is not None else "未知")
+        elif cover is None:
+            log.warning("封面缺失（下载失败或未生成），发布前从视频抽帧兜底")
+        else:
+            log.warning("封面文件不存在（%s），发布前从视频抽帧兜底", cover)
+
+        if not video.exists():
+            log.warning("视频文件不存在，无法抽帧（按原状态发布）")
+            return cover
+
+        out = (cover.with_suffix(".rescue.jpg") if cover
+               else video.parent / f"{video.stem}_cover_rescue.jpg")
         # thumbnail 滤镜：每 200 帧里选信息量最大的一帧（比中段盲截好）
         _run([_ffmpeg(), "-y", "-i", str(video),
               "-vf", "thumbnail=200", "-frames:v", "1", "-q:v", "2", str(out)],
              timeout=120)
         if out.exists() and out.stat().st_size > 2500:
             y2 = mean_luma(out)
-            if y2 is None or y2 >= DARK_COVER_LUMA or (y is not None and y2 > y):
-                log.info("暗封面已替换：luma %s → %s", y, y2)
+            # 抽出帧只要不比原图更暗就采纳（原图缺失时无条件采纳）
+            if y is None or y2 is None or y2 >= DARK_COVER_LUMA or y2 > y:
+                if y is not None:
+                    log.info("暗封面已替换：luma %.1f → %s", y,
+                             f"{y2:.1f}" if y2 is not None else "未知")
+                else:
+                    log.info("已用视频代表帧补齐封面：luma %s",
+                             f"{y2:.1f}" if y2 is not None else "未知")
                 return out
-            log.warning("代表帧仍暗（luma=%s），按原封面发布", y2)
+            log.warning("代表帧仍暗（luma=%s），按原封面发布",
+                        f"{y2:.1f}" if y2 is not None else "未知")
+        else:
+            log.warning("抽帧失败或产出过小，按原封面发布")
         return cover
     except Exception as e:
         log.debug("暗封面替换失败（按原封面发布）：%s", str(e)[:100])
