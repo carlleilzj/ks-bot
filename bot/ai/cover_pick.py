@@ -38,19 +38,83 @@ N_CANDIDATES = 6
 # 与 bot/publish/kuaishou.py 的 DARK_COVER_LUMA 保持一致。
 DARK_COVER_LUMA = 42.0
 
+# 封面三维权重（2026-11-05 起：视觉冲击优先）
+#
+# 为什么不再让模型「自己按权重算总分」：
+# 实测让模型分维度打分（subject/impact/info），三个维度呈**线性同增**
+# （7.5/7.0/6.5 → 9.0/9.0/8.5），维度间没有独立性——模型其实还是按
+# 「整体好看程度」给分，只是把一个分数拆成三份。权重写在 prompt 里
+# 既无法验证它是否真按比例算，也拿不到可调参的中间量。
+#
+# 所以改为：模型只负责它擅长的「主体识别/语义理解」（subject + info），
+# 「视觉冲击」用**客观图像统计量**在我们的代码里算，权重也在代码里。
+VISION_WEIGHT_SUBJECT = 0.5   # 主体突出：模型判断
+VISION_WEIGHT_IMPACT = 0.3    # 视觉冲击：客观统计量计算
+VISION_WEIGHT_INFO = 0.2      # 信息量：模型判断
+
+# 客观冲击分归一化基准
+IMPACT_SAT_FULL = 70.0        # SATAVG 到该值即饱和项满分
+IMPACT_CONTRAST_FULL = 180.0  # (YHIGH-YLOW) 到该值即对比项满分
+
 _SCORE_PROMPT = """你是短视频封面评审。下面是同一条视频按时间顺序均匀抽取的 %d 帧（第 1 张对应约 10%% 处，最后 1 张约 90%% 处）。
 
-请给每一帧打封面适用分（0~10，可一位小数），三个维度各占 1/3：
-1. 主体突出：画面主角（动物/角色/核心物体）清晰可辨、大小合适、不被遮挡；
-2. 视觉冲击：色彩、光影、构图是否让人「刷到就想点」；
-3. 信息量：能否一眼看出视频主题（在吃什么/在哪/正在发生什么）。
+请对每一帧只评估下面**两个**维度（0~10，可一位小数），分开给分：
+1. subject（主体突出）：画面主角（动物/角色/核心物体）是否清晰可辨、大小合适、不被遮挡。
+2. info（信息量）：能否一眼看出视频主题（在吃什么/在哪/正在发生什么）。
 
-同时报告每帧是否含真人（has_real_person，布尔）。
+注意：**不要评估色彩、光影、构图张力**，那项由程序另行计算。
+评判以画面内容为主，不要因为画面更亮就给更高分。
 
-只输出一个 JSON 对象，不要代码块标记：
-{"frames": [{"index": 1, "score": 7.5, "has_real_person": false, "why": "主角特写清晰"},
-            {"index": 2, "score": 4.0, "has_real_person": false, "why": "远景主体太小"}]}
+同时报告 has_real_person（布尔）。
+
+只输出 JSON，不要代码块：
+{"frames":[{"index":1,"subject":7.0,"info":6.0,"has_real_person":false,"why":"..."}]}
 index 从 1 开始，按图片顺序。"""
+
+
+def _objective_impact(path: Path) -> float:
+    """用图像统计量算「视觉冲击」分（0~10）。
+
+    取两个与「刷到就想点」最相关的客观特征：
+      - 饱和度均值 SATAVG：色彩鲜艳度（灰扑扑的帧点不动人）
+      - 亮度动态范围 YHIGH-YLOW：对比度/光影层次（平光画面没有冲击力）
+
+    刻意**不用亮度均值**做判据——否则又变成「越亮越好」，
+    而这正是模型打分被诟病的地方（暗调但有张力的画面会被埋掉）。
+    """
+    import re as _re
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [ffmpeg._ffmpeg(), "-i", str(path), "-vf",  # noqa: SLF001
+             "scale=128:128,signalstats,metadata=print:file=-",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return 0.0
+    txt = (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+    def grab(key: str) -> float | None:
+        m = _re.search(rf"signalstats\.{key}=([\d.]+)", txt)
+        return float(m.group(1)) if m else None
+
+    sat = grab("SATAVG")
+    yhigh, ylow = grab("YHIGH"), grab("YLOW")
+    if sat is None or yhigh is None or ylow is None:
+        return 0.0
+    contrast = max(0.0, yhigh - ylow)
+    sat_part = min(1.0, sat / IMPACT_SAT_FULL)
+    con_part = min(1.0, contrast / IMPACT_CONTRAST_FULL)
+    return round((sat_part + con_part) * 5.0, 2)
+
+
+def _composite_score(subject: float, info: float, impact: float) -> float:
+    """按权重合成封面总分（权重见 VISION_WEIGHT_*）。"""
+    return round(subject * VISION_WEIGHT_SUBJECT
+                 + impact * VISION_WEIGHT_IMPACT
+                 + info * VISION_WEIGHT_INFO, 3)
 
 
 def _extract_candidates(video: Path, work_dir: Path, sc: str) -> list[Path]:
@@ -144,16 +208,36 @@ def _vision_rank(frames: list[Path], s) -> list[tuple[Path, float, bool]] | None
                     continue
                 if not (1 <= idx <= len(frames)):
                     continue
-                try:
-                    score = float(it.get("score", 0))
-                except (TypeError, ValueError):
-                    score = 0.0
-                out.append((frames[idx - 1], score,
+
+                frame = frames[idx - 1]
+                # 优先用分维度分（subject/info）+ 客观冲击分合成；
+                # 模型若仍返回单一 score（旧 prompt/旧缓存），退回该值。
+                sub_raw = it.get("subject")
+                info_raw = it.get("info")
+                if sub_raw is not None and info_raw is not None:
+                    try:
+                        subject = float(sub_raw)
+                        info = float(info_raw)
+                    except (TypeError, ValueError):
+                        subject = info = 0.0
+                    impact = _objective_impact(frame)
+                    score = _composite_score(subject, info, impact)
+                    log.debug("封面分 %s：主体%.1f 冲击%.1f 信息%.1f → %.2f",
+                              frame.name, subject, impact, info, score)
+                else:
+                    try:
+                        score = float(it.get("score", 0))
+                    except (TypeError, ValueError):
+                        score = 0.0
+
+                out.append((frame, score,
                             bool(it.get("has_real_person", False))))
             if out:
                 out.sort(key=lambda x: -x[1])
-                log.info("封面选优完成（模型=%s）：最佳 %s（%.1f 分）",
-                         model, out[0][0].name, out[0][1])
+                log.info("封面选优完成（模型=%s，权重 主体%.1f/冲击%.1f/信息%.1f）："
+                         "最佳 %s（%.2f 分）",
+                         model, VISION_WEIGHT_SUBJECT, VISION_WEIGHT_IMPACT,
+                         VISION_WEIGHT_INFO, out[0][0].name, out[0][1])
                 return out
             last_err = f"模型 {model} frames 为空"
         except Exception as e:
