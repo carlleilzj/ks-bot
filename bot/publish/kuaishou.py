@@ -688,21 +688,22 @@ def publish(
             if category:
                 _select_category(page, category)
 
-            # 5. 上传自定义封面（失败不阻断；缺失/过暗都先现场抽帧，再叠标题大字）
+            # 5. 封面（缺失/过暗先现场抽帧，再与平台「智能推荐封面」对比择优）
             #    大字报（2026-10-29 增长项②）：快手双列发现页先看封面再点，
-            #    1280×960 裁切版中央叠 ≤2 行标题钩子（失败按原图发布）。
+            #    1280×960 裁切版中央叠 ≤2 行标题钩子。
             #
-            #    2026-11-05：条件从 `if cover and cover.exists()` 改为无条件调用。
-            #    原来的写法在「封面下载失败 / 文件缺失」时整段跳过上传，平台改用
-            #    视频首帧——暗色素材首帧往往是全黑的，这就是封面全黑的直接原因。
-            #    rescue_dark_cover 现在能处理 cover=None，从视频抽代表帧补齐。
+            #    2026-11-05：
+            #    - 条件从 `if cover and cover.exists()` 改为无条件调用。原来的写法
+            #      在「封面下载失败 / 文件缺失」时整段跳过上传，平台改用视频首帧
+            #      —— 暗色素材首帧往往是全黑的，这是封面全黑的直接原因。
+            #    - 新增平台「智能推荐封面」对比择优：转码后快手会给出 3 张高光帧，
+            #      比自选封面更亮就用它（代价：推荐封面无法叠标题大字）。
             rescue_cover = rescue_dark_cover(
                 Path(cover) if cover else None, Path(video))
-            if rescue_cover and Path(rescue_cover).exists():
-                _upload_cover(page, rescue_cover,
-                              title=title if cover_title else "")
-            else:
-                log.warning("封面不可用且抽帧失败，平台将改用视频帧")
+            chosen = _pick_best_cover(
+                page, rescue_cover,
+                title=title if cover_title else "")
+            log.info("封面最终来源：%s", chosen)
 
             # 5.5 挂「作者服务」推广（2026-11-02：星火已下架，改挂关联推广任务）
             #     attach_service 优先：任务池发布页实时读，失败软降级（不阻断）；
@@ -1462,6 +1463,156 @@ def rescue_dark_cover(cover: Path | None, video: Path) -> Path | None:
     except Exception as e:
         log.debug("暗封面替换失败（按原封面发布）：%s", str(e)[:100])
         return cover
+
+
+# 快手「智能推荐封面」的选择器（2026-11-05 实机核对）
+# 结构：封面设置区右侧 3 个缩略图槽位，图未就绪时带 _loading_ 类，
+# 加载完成后 img.src 才是可下载的 CDN 地址（加载中为空）。
+_RECO_ITEM_SEL = 'div[class*="recommend-cover-item"]'
+_RECO_STATE_JS = """() => {
+  const items = [...document.querySelectorAll('div[class*="recommend-cover-item"]')];
+  return items.map((el, i) => {
+    const cls = (el.className || '').toString();
+    const img = el.querySelector('img');
+    return {
+      i: i,
+      loading: cls.indexOf('loading') >= 0,
+      src: img ? (img.getAttribute('src') || '') : ''
+    };
+  });
+}"""
+
+
+def _wait_recommend_covers(page: Page, timeout_sec: float = 45.0) -> list[str]:
+    """等平台「智能推荐封面」加载完，返回可下载的 CDN 地址列表。
+
+    只在视频转码完成后才会出现；图未就绪时 div 带 _loading_ 类、img.src 为空。
+    超时或没有推荐封面返回空列表（调用方按原有自选封面走）。
+    """
+    import time as _time
+
+    deadline = _time.time() + timeout_sec
+    while _time.time() < deadline:
+        try:
+            state = page.evaluate(_RECO_STATE_JS) or []
+        except Exception:
+            state = []
+        if state and not any(x.get("loading") for x in state):
+            urls = [x["src"] for x in state if (x.get("src") or "").startswith("http")]
+            if urls:
+                log.info("平台推荐封面已就绪：%d 张", len(urls))
+                return urls
+        page.wait_for_timeout(2000)
+    log.debug("平台推荐封面未在 %.0fs 内就绪（按自选封面走）", timeout_sec)
+    return []
+
+
+def _download_cover_urls(urls: list[str], out_dir: Path) -> list[Path]:
+    """下载推荐封面到本地，返回成功落盘的文件列表。"""
+    import httpx
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    got: list[Path] = []
+    for i, url in enumerate(urls):
+        try:
+            with httpx.Client(timeout=25, follow_redirects=True) as c:
+                r = c.get(url, headers={"User-Agent": "Mozilla/5.0",
+                                        "Referer": "https://cp.kuaishou.com/"})
+            if r.status_code != 200 or len(r.content) < 3000:
+                continue
+            f = out_dir / f"reco_{i}.jpg"
+            f.write_bytes(r.content)
+            got.append(f)
+        except Exception as e:
+            log.debug("推荐封面下载失败[%d]：%s", i, str(e)[:80])
+    return got
+
+
+def _apply_recommend_cover(page: Page, index: int) -> bool:
+    """点击第 index 个平台推荐封面，并回读主封面是否真的切换。"""
+    try:
+        loc = page.locator(_RECO_ITEM_SEL)
+        if loc.count() <= index:
+            return False
+        before = page.evaluate("""() => {
+            const el = document.querySelector('[class*="_default-cover"]');
+            const img = el ? el.querySelector('img') : null;
+            return img ? (img.getAttribute('src') || '') : '';
+        }""")
+        loc.nth(index).click(timeout=15000)
+        page.wait_for_timeout(2500)
+        after = page.evaluate("""() => {
+            const el = document.querySelector('[class*="_default-cover"]');
+            const img = el ? el.querySelector('img') : null;
+            return img ? (img.getAttribute('src') || '') : '';
+        }""")
+        ok = bool(after) and after != before
+        if ok:
+            log.info("已采用平台推荐封面（第 %d 张）", index + 1)
+        else:
+            log.warning("点击推荐封面后主封面未变化（第 %d 张）", index + 1)
+        return ok
+    except Exception as e:
+        log.debug("采用推荐封面失败：%s", str(e)[:100])
+        return False
+
+
+def _pick_best_cover(
+    page: Page, self_cover: Path | None, title: str = "",
+) -> str:
+    """封面择优：自选封面 vs 平台推荐封面，取更亮的那个。
+
+    背景（2026-11-05）：快手发布页在视频转码后会给出 3 张「智能推荐封面」，
+    它们取自视频高光帧，通常比我们按亮度/评分选出的帧更贴合平台推荐流。
+    但并非总是更好（可能带黑边、主体不清），所以做**对比择优**而不是无脑替换。
+
+    策略：
+      1. 先等推荐封面就绪并下载，测亮度；
+      2. 自选封面（已过 rescue 兜底）也测亮度；
+      3. 推荐封面里取最亮的一张，若比自选封面更亮 → 先上传自选封面（保留
+         标题大字能力），再点平台推荐覆盖它；否则保持自选封面。
+         注意：推荐封面是平台生成的原图，无法叠标题大字——这是选择它的代价。
+
+    返回 "recommend" / "self" / "none"，仅用于日志与测试断言。
+    """
+    from ..media.ffmpeg import mean_luma
+
+    urls = _wait_recommend_covers(page)
+    reco_files: list[Path] = []
+    if urls:
+        base = (self_cover.parent if self_cover else Path("/tmp"))
+        reco_files = _download_cover_urls(urls, base / "reco_cover")
+
+    self_y: float | None = None
+    if self_cover and Path(self_cover).exists():
+        self_y = mean_luma(Path(self_cover))
+
+    best_reco: tuple[int, float] | None = None
+    for i, f in enumerate(reco_files):
+        y = mean_luma(f)
+        if y is None:
+            continue
+        if best_reco is None or y > best_reco[1]:
+            best_reco = (i, y)
+
+    if self_cover and Path(self_cover).exists():
+        _upload_cover(page, Path(self_cover), title=title)
+        log.info("已上传自选封面（luma=%s）",
+                 f"{self_y:.1f}" if self_y is not None else "未知")
+
+    if best_reco is None:
+        if self_cover and Path(self_cover).exists():
+            return "self"
+        log.warning("既无自选封面也无平台推荐封面，平台将改用视频帧")
+        return "none"
+
+    idx, reco_y = best_reco
+    log.info("平台推荐封面最亮 luma=%.1f（自选封面 luma=%s）", reco_y,
+             f"{self_y:.1f}" if self_y is not None else "无")
+    if self_y is None or reco_y > self_y:
+        if _apply_recommend_cover(page, idx):
+            return "recommend"
+    return "self" if (self_cover and Path(self_cover).exists()) else "none"
 
 
 def _upload_cover(page: Page, cover: Path, title: str = "") -> None:
