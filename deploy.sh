@@ -15,8 +15,13 @@ FILES=$(git ls-files 'bot/**' 'tests/**' 'deploy/**' 'tools/**' 'config.yaml' 'p
 sync_to() {
     local host="$1"
     echo "== 同步代码到 $host =="
+    # 注意：macOS 的 tar 会保留本机 uid（501:staff），传到 Linux 后会变成
+    # 陌生属主，导致以 ksbot 用户运行的服务读不到 config.yaml。
+    # 因此同步后统一 chown 回目标机的服务用户。
     COPYFILE_DISABLE=1 tar -cf - $FILES | ssh -o ConnectTimeout=15 "$host" \
-        'cd /opt/ks-bot && tar -xf - && find . -name "._*" -not -path "./.git/*" -delete && chmod -R o+rX bot tests deploy tools && chmod o+r config.yaml 2>/dev/null; true'
+        'cd /opt/ks-bot && tar -xf - && find . -name "._*" -not -path "./.git/*" -delete \
+         && chown -R ksbot:ksbot bot tests deploy tools config.yaml 2>/dev/null || true; \
+         chmod -R o+rX bot tests deploy tools; chmod o+r config.yaml 2>/dev/null; true'
 }
 
 case "$TARGET" in
