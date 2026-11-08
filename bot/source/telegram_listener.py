@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from ..config import Settings
+from ..config import RAW_DIR, Settings
 from ..db import Database, State
 from ..notify import telegram
 from ..publish import enabled_publishers
@@ -225,6 +225,13 @@ class TelegramListener(threading.Thread):
             log.debug("忽略非配置 chat_id 的消息：%s", chat_id)
             return
 
+        # 直接发视频/文件 = 本地文件投链（绕过 yt-dlp，任何来源的素材都能进流水线）
+        video_obj = msg.get("video") or msg.get("animation")
+        doc_obj = msg.get("document") or {}
+        if video_obj or doc_obj:
+            self._handle_local_file(msg, video_obj, doc_obj)
+            return
+
         text = msg.get("text") or ""
         if not text:
             return
@@ -244,14 +251,17 @@ class TelegramListener(threading.Thread):
             if t_low in ("/help", "/start", "帮助"):
                 telegram.send_text(
                     self.s,
-                    "📬 直接发视频链接给我即可\n"
-                    "支持：Instagram / YouTube / Facebook / TikTok / 抖音 / 小红书 / B站 等\n"
-                    "收到后会自动下载 → 转码 → 生成文案 → 加字幕 → 发布到快手/抖音\n"
-                    "重复链接会自动判定，不会重复处理\n\n"
+                    "📬 发视频链接或直接发视频文件给我\n"
+                    "支持链接：Instagram / YouTube / Facebook / TikTok / 抖音 / 小红书 / B站 等\n"
+                    "也支持直接发 mp4 文件（yt-dlp 不支持的来源用这个）\n"
+                    "收到后会自动转码 → 生成文案 → 加字幕 → 发布\n"
+                    "重复内容会自动判定，不会重复处理\n\n"
                     "💡 指定发布平台：链接后加平台名，如\n"
                     "  https://... @抖音\n"
                     "  https://... @douyin,xhs\n"
                     "不指定则发到所有启用的平台\n\n"
+                    "📎 发本地文件时，平台标记写在**文件说明（caption）**里，如：\n"
+                    "  发视频 + 说明填「@ig萌宠」\n\n"
                     "🌍 出海发布（Instagram 矩阵号，自动裁中文字幕+英文文案）：\n"
                     "  https://... @ig萌宠   → 搞笑萌宠号\n"
                     "  https://... @ig解压   → 视觉解压号（保留原声 ASMR）\n"
@@ -287,6 +297,147 @@ class TelegramListener(threading.Thread):
             except Exception as e:
                 log.exception("处理链接失败：%s", raw_url)
                 telegram.send_text(self.s, f"❌ 处理链接失败：{str(e)[:200]}\n链接：{raw_url}")
+
+    # ---------- 本地文件投链 ----------
+
+    def _handle_local_file(self, msg: dict, video_obj: dict | None,
+                           doc_obj: dict) -> None:
+        """处理用户直接发来的视频/文件：下载 → 入库（跳过解析与下载阶段）。
+
+        为什么需要这条路径：
+        yt-dlp 不支持的来源（Threads、私域链接、本机录屏、AI 生成素材等）
+        原先完全进不了流水线。本地文件投链让「任何来源的 mp4」都能走完
+        转码 → AI 文案 → 清洗 → 发布，下游逻辑完全复用。
+        """
+        media = video_obj or doc_obj
+
+        # 文件类型校验：只收视频（避免误发图片/文档把队列搞乱）
+        if video_obj:
+            mime = (video_obj.get("mime_type") or "video/mp4")
+            file_name = video_obj.get("file_name") or ""
+        else:
+            mime = doc_obj.get("mime_type") or ""
+            file_name = doc_obj.get("file_name") or ""
+        if not (mime.startswith("video/") or mime == "application/octet-stream"):
+            telegram.send_text(
+                self.s,
+                f"⚠️ 只接受视频文件（收到 {mime or '未知类型'}）\n"
+                f"请直接发送 mp4 视频，或发链接让我下载。",
+            )
+            return
+
+        file_id = media.get("file_id") or ""
+        if not file_id:
+            return
+
+        file_size = int(media.get("file_size") or 0)
+        size_mb = file_size / 1048576
+        if file_size and size_mb > telegram.TG_MAX_DOWNLOAD_MB:
+            telegram.send_text(
+                self.s,
+                f"⚠️ 文件 {size_mb:.1f} MB 超过 Bot API 下载上限 "
+                f"（{telegram.TG_MAX_DOWNLOAD_MB} MB）\n\n"
+                f"两个办法：\n"
+                f"1. 先压缩/剪辑到 {telegram.TG_MAX_DOWNLOAD_MB} MB 以内再发\n"
+                f"2. 发原始链接（如果该平台 yt-dlp 支持）",
+            )
+            return
+
+        # 解析发布平台：文件名或 caption 里都能带 @标记
+        caption = msg.get("caption") or ""
+        hint_text = f"{caption} {file_name}"
+        target_platforms, unknown = _parse_target_platforms(hint_text)
+        target_platforms, disabled = _split_disabled_targets(self.s, target_platforms)
+        if disabled and not target_platforms:
+            names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in disabled)
+            telegram.send_text(self.s, f"⛔ {names} 已停用，本条未入库")
+            return
+
+        # 生成唯一标识：文件唯一 id + 时间戳，避免同一文件重复投被当成同一条
+        unique_key = (media.get("file_unique_id") or file_id)[:32]
+        shortcode = f"local_{unique_key}"
+
+        # 查重：同一文件重复发送（同一 shortcode）直接提示
+        existing = self.db.find_by_source_url(f"local://{unique_key}")
+        if existing:
+            state = existing.get("state", "")
+            label = _STATE_LABELS.get(state, state)
+            telegram.send_text(
+                self.s,
+                f"⏳ 这个文件已经投过了\n标识：{existing.get('shortcode','?')}\n状态：{label}",
+            )
+            return
+
+        telegram.send_text(
+            self.s,
+            f"📥 收到本地视频文件{'（' + file_name + '）' if file_name else ''}\n"
+            f"正在下载（{size_mb:.1f} MB）…",
+        )
+
+        raw_path = RAW_DIR / f"{shortcode}.mp4"
+        if telegram.download_file(self.s, file_id, raw_path) is None:
+            telegram.send_text(self.s, "❌ 下载失败，请重试或改用链接投递")
+            return
+
+        # 校验确实是视频（有宽高/时长），避免把伪装成 mp4 的文件塞进流水线
+        try:
+            from ..media import ffmpeg
+            info = ffmpeg.video_info(raw_path)
+        except Exception as e:
+            raw_path.unlink(missing_ok=True)
+            telegram.send_text(self.s, f"❌ 文件不是有效视频：{str(e)[:150]}")
+            return
+
+        if not info.get("duration") or info["duration"] <= 0:
+            raw_path.unlink(missing_ok=True)
+            telegram.send_text(self.s, "❌ 视频时长为 0，文件可能损坏")
+            return
+
+        # 入库：state 直接 DOWNLOADED（文件已在本地，跳过下载阶段）
+        from .downloader import VideoMeta
+        meta = VideoMeta(
+            source_url=f"local://{unique_key}",
+            platform="local",
+            video_id=unique_key,
+            shortcode=shortcode,
+            username=msg.get("from", {}).get("username") or "local",
+            title=file_name or shortcode,
+            caption=caption,
+            thumbnail_url="",
+            duration=float(info.get("duration") or 0),
+            permalink="",
+        )
+        tid = self.db.insert_video(meta, target_platforms=target_platforms,
+                                   state=State.DOWNLOADED)
+        if tid is None:
+            raw_path.unlink(missing_ok=True)
+            telegram.send_text(self.s, "⚠️ 该文件已入库（可能刚被处理）")
+            return
+        self.db.update(tid, raw_path=str(raw_path))
+
+        if target_platforms:
+            pub_names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in target_platforms)
+            pub_line = f"发布到：{pub_names}"
+        else:
+            from ..publish import default_publishers
+            def_names = "、".join(_PUBLISH_PLATFORM_CN.get(p.name, p.name)
+                                  for p in default_publishers(self.s))
+            pub_line = f"发布到：{def_names or '（无默认平台）'}"
+
+        warn_line = f"\n⚠️ 未识别的平台名：{', '.join(unknown)}" if unknown else ""
+        telegram.send_text(
+            self.s,
+            f"✅ 本地视频已入库\n"
+            f"标识：{shortcode}\n"
+            f"分辨率：{info['width']}x{info['height']}\n"
+            f"时长：{int(info.get('duration') or 0)}秒\n"
+            f"{pub_line}{warn_line}\n\n"
+            f"流水线：转码 → 转录 → 文案 → 字幕 → 发布（已跳过下载）",
+        )
+        log.info("📥 本地文件入库 [%s] tid=%d targets=%s",
+                 shortcode, tid, target_platforms or "all")
+        if self._wakeup is not None:
+            self._wakeup.set()
 
     # ---------- callback_query 处理（登录菜单按钮） ----------
 
@@ -527,6 +678,10 @@ def _parse_target_platforms(text: str) -> tuple[list[str] | None, list[str]]:
     # 之前写成 sub(lambda m: m.group(0).rstrip(...)) 只是把 URL 原样写回，
     # 等于没删，URL 里的域名会被当成「未识别的平台名」提示给用户。
     remaining = _URL_RE.sub("", text)
+    # 剥掉文件名里的扩展名：本地文件投链时平台标记常写在文件名里
+    # （clip_@快手.mp4），不处理的话 token 是「快手.mp4」认不出来。
+    remaining = re.sub(r"\.(?:mp4|mov|m4v|webm|mkv|avi|flv|wmv)\b",
+                       "", remaining, flags=re.I)
     # 按空格、逗号、@、冒号分割成 token
     raw_tokens = re.split(r"[\s,@:：]+", remaining)
     # 这些词不是平台名，忽略

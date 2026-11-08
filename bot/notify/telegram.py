@@ -167,3 +167,63 @@ def answer_callback(s: Settings, callback_query_id: str, text: str = "",
     _post(s, "answerCallbackQuery",
           json_payload={"callback_query_id": callback_query_id,
                         "text": text[:200], "show_alert": show_alert})
+
+
+# ---------- 文件下载（本地文件投链） ----------
+
+# TG 单文件上限：bot 通过 getFile 下载的官方限制是 20MB（Bot API 限制），
+# 但 2026 年起自行托管 Bot API 可到 2GB。这里按保守值判断并给出明确提示。
+TG_MAX_DOWNLOAD_MB = 20
+
+
+def get_file_path(s: Settings, file_id: str) -> str | None:
+    """调 getFile 拿文件在 TG 服务器上的路径。"""
+    resp = _post(s, "getFile", json_payload={"file_id": file_id})
+    if not resp:
+        return None
+    result = resp.get("result") or {}
+    return result.get("file_path") or None
+
+
+def download_file(s: Settings, file_id: str, dest: Path,
+                  max_mb: int = TG_MAX_DOWNLOAD_MB) -> Path | None:
+    """从 Telegram 下载文件到 dest。
+
+    为什么需要它：本地文件投链要先把用户发来的视频存到磁盘，才能进流水线。
+    TG 的 Bot API 会先返回 file_id，再用 getFile 换出临时下载路径。
+
+    返回 dest（成功）或 None（失败，已记日志）。
+    """
+    file_path = get_file_path(s, file_id)
+    if not file_path:
+        log.error("getFile 失败，无法获取文件路径（file_id=%s）", file_id[:40])
+        return None
+
+    url = f"{s.telegram_api_base}/file/bot{s.telegram_bot_token}/{file_path}"
+    client_kw: dict = {"timeout": 300}
+    if s.telegram_proxy:
+        client_kw["proxy"] = s.telegram_proxy
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with httpx.Client(**client_kw, follow_redirects=True) as client:
+            with client.stream("GET", url) as r:
+                if r.status_code != 200:
+                    log.error("下载 TG 文件失败：HTTP %d", r.status_code)
+                    return None
+                size = 0
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_bytes(1 << 20):
+                        f.write(chunk)
+                        size += len(chunk)
+        tmp.replace(dest)
+        log.info("TG 文件已下载：%s（%.1f MB）", dest.name, dest.stat().st_size / 1048576)
+        return dest
+    except Exception as e:
+        log.error("下载 TG 文件异常：%s", str(e)[:200])
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
