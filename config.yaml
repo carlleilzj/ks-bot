@@ -99,12 +99,15 @@ platforms:
     default: false              # 只有显式 @快手2 才发，绝不占默认队列
     daily_limit: 6              # 与 A 号相同节奏（间隔 2h，全天分散）
     min_gap_hours: 2            # 覆盖全局，与 A 号一致
-    # 2026-11-03 配置与 A 号保持一致：
-    #   改挂「作者服务」推广任务（短剧 CPS / 商品 CPS 兜底），软降级不阻断；
-    #   关闭封面大字报（cover_title: false）。
-    attach_service: "关联推广任务"
-    attach_prefer: "短剧"
-    attach_fallback: "关联商品"
+    # 2026-11-09 起：**取消全部变现挂载**（用户要求）。
+    #   attach_service / attach_prefer / attach_fallback 全部留空 = 发布页不挂任何
+    #   「作者服务」（推广任务/商品都不挂），spark_task 也保持 false。
+    #   代码侧判定：attach_service 为空且 spark_task 为 false → 整段挂载逻辑跳过，
+    #   不会去点任何下拉（见 bot/publish/kuaishou.py 的 attach_service 分支）。
+    #   日后要恢复：把 attach_service 填回 "关联推广任务" 即可。
+    attach_service: ""
+    attach_prefer: ""
+    attach_fallback: ""
     cover_title: false
     spark_task: false           # 星火已下架；留字段便于日后恢复
     anchors:

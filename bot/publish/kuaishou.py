@@ -744,7 +744,12 @@ def publish(
             if anchors:
                 try:
                     from .kuaishou_anchor import apply_anchors
-                    anchor_done = apply_anchors(page, anchors)
+                    # 变现开关只看 attach_service：它为空 = 该账号不做变现挂载。
+                    # 这样即使 anchors 里误写了「推广任务/小程序」，也不会偷偷挂上
+                    # （2026-11-09：kuaishou2 要求取消全部变现挂载）。
+                    anchor_done = apply_anchors(
+                        page, anchors,
+                        allow_monetization=bool(attach_service or spark_task))
                     if anchor_done:
                         log.info("已挂载：%s", "、".join(anchor_done))
                     else:

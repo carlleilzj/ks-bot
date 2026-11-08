@@ -497,23 +497,35 @@ def apply_declaration(page: Page, text: str) -> bool:
 
 # ---------- 批量入口 ----------
 
-def apply_anchors(page: Page, anchors: dict | None, hot_topic: str = "") -> list[str]:
-    """批量挂载。anchors 支持：热点 / 地点 / 推广任务 / 变现任务 / 小程序 / 声明。"""
+def apply_anchors(page: Page, anchors: dict | None, hot_topic: str = "",
+                  allow_monetization: bool = True) -> list[str]:
+    """批量挂载。anchors 支持：热点 / 地点 / 推广任务 / 变现任务 / 小程序 / 声明。
+
+    allow_monetization=False 时**跳过整段作者服务**（推广任务/变现任务/小程序），
+    只挂热点/地点/声明这类非变现项。用于「某账号不做变现」的配置
+    （如 kuaishou2 已知 attach_service 留空，这里再加一道防线，
+    防止有人误把 推广任务/小程序 写进 anchors 而绕过 attach_service 开关）。
+    """
     done: list[str] = []
     anchors = anchors or {}
 
-    # 1. 作者服务（推广任务 / 变现任务 / 小程序）
-    for service_name, key in SERVICE_MAP.items():
-        pick = str(anchors.get(key) or "").strip()
-        if not pick:
-            continue
-        try:
-            got = apply_service(page, service_name, pick)
-            if got:
-                done.append(f"{key}:{got[:20]}")
-        except Exception as e:
-            log.warning("%s 挂载异常：%s", service_name, str(e)[:100])
-        time.sleep(1)
+    # 1. 作者服务（推广任务 / 变现任务 / 小程序）—— 变现类，可整体禁用
+    if allow_monetization:
+        for service_name, key in SERVICE_MAP.items():
+            pick = str(anchors.get(key) or "").strip()
+            if not pick:
+                continue
+            try:
+                got = apply_service(page, service_name, pick)
+                if got:
+                    done.append(f"{key}:{got[:20]}")
+            except Exception as e:
+                log.warning("%s 挂载异常：%s", service_name, str(e)[:100])
+            time.sleep(1)
+    else:
+        monet_keys = [k for k in SERVICE_MAP.values() if anchors.get(k)]
+        if monet_keys:
+            log.info("变现挂载已禁用，跳过 anchors 里的：%s", monet_keys)
 
     # 2. 热点
     hot = str(anchors.get("热点") or hot_topic or "").strip()
