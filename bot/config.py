@@ -138,6 +138,10 @@ class PlatformConfig:
     # 矩阵号冷启动期常用：kuaishou2 日限 3、间隔放宽。
     daily_limit: int | None = None
     min_gap_hours: float | None = None
+    # 每平台覆盖发布窗口（None = 用全局 window）。
+    # Instagram 用得上：欧美受众的黄金时段是北京时间凌晨，
+    # 沿用国内的 10:00~22:00 等于把内容发在他们的深夜。
+    window: tuple[str, str] | None = None
 
 
 @dataclass
@@ -388,6 +392,10 @@ def load_settings() -> Settings:
                 daily_limit=_opt_int(conf.get("daily_limit")),
                 min_gap_hours=_opt_float(conf.get("min_gap_hours")),
             )
+            # 每平台发布窗口（列表形式 ["HH:MM","HH:MM"]，支持跨夜）
+            win_raw = conf.get("window")
+            if isinstance(win_raw, (list, tuple)) and len(win_raw) == 2:
+                pc.window = (str(win_raw[0]), str(win_raw[1]))
             pcats = plat_cats_raw.get(name)
             if isinstance(pcats, list) and pcats:
                 pc.categories = [str(c).strip() for c in pcats if str(c).strip()]

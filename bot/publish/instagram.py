@@ -43,6 +43,9 @@ from .base import PublishError
 log = logging.getLogger(__name__)
 
 GRAPH_HOST = "https://graph.instagram.com"
+# Facebook Login 通道（token 以 EAA 开头）走 graph.facebook.com，
+# 两条通道的 API 形状一致，只是 host 与权限名不同。
+GRAPH_HOST_FB = "https://graph.facebook.com"
 API_VERSION = "v23.0"
 
 # 容器状态轮询：Meta 建议每分钟查一次、最多 5 分钟
@@ -66,6 +69,21 @@ class IgAccount:
         t = self.access_token or ""
         return f"{t[:6]}…{t[-4:]}" if len(t) > 12 else "（未配置）"
 
+    @property
+    def graph_host(self) -> str:
+        """按 token 前缀判断该走哪条 Meta 通道。
+
+        - `IGAA...` → Instagram Login（graph.instagram.com）
+        - `EAA...`  → Facebook Login（graph.facebook.com）
+        两者 API 形状相同，混用 host 会得到
+        「Cannot parse access token」这种误导性错误。
+        """
+        return GRAPH_HOST_FB if self.access_token.startswith("EAA") else GRAPH_HOST
+
+    @property
+    def channel(self) -> str:
+        return "facebook_login" if self.access_token.startswith("EAA") else "instagram_login"
+
 
 def load_account(key: str) -> IgAccount | None:
     """从环境变量读取账号凭据。未配置返回 None（由调用方决定是跳过还是报错）。"""
@@ -86,7 +104,7 @@ def _request(method: str, path: str, acct: IgAccount, *,
              params: dict | None = None, json_body: dict | None = None,
              timeout: float = 60.0) -> dict:
     """调用 Graph API 并统一处理错误。"""
-    url = f"{GRAPH_HOST}/{API_VERSION}/{path.lstrip('/')}"
+    url = f"{acct.graph_host}/{API_VERSION}/{path.lstrip('/')}"
     headers = {"Authorization": f"Bearer {acct.access_token}"}
     try:
         with httpx.Client(timeout=timeout) as c:

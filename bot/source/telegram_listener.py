@@ -471,10 +471,14 @@ _PUBLISH_PLATFORM_ALIASES = {
     "今日头条": "toutiao", "头条": "toutiao", "头条号": "toutiao",
     "toutiao": "toutiao", "tt": "toutiao",
     # Instagram 矩阵号（出海线）
+    # 国内用户习惯打中文，同时兼容 config 里的原名与去下划线写法
     "ig": "ig_pets", "ig萌宠": "ig_pets", "ig宠物": "ig_pets", "ig_pets": "ig_pets",
-    "ig解压": "ig_satisfying", "ig治愈": "ig_satisfying", "ig_satisfying": "ig_satisfying",
-    "ig动画": "ig_anim", "ig_anim": "ig_anim",
+    "igpets": "ig_pets", "萌宠ig": "ig_pets",
+    "ig解压": "ig_satisfying", "ig治愈": "ig_satisfying",
+    "ig_satisfying": "ig_satisfying", "igsatisfying": "ig_satisfying", "解压ig": "ig_satisfying",
+    "ig动画": "ig_anim", "ig_anim": "ig_anim", "iganim": "ig_anim", "动画ig": "ig_anim",
     "ig家居": "ig_home", "ig好物": "ig_home", "ig_home": "ig_home",
+    "ighome": "ig_home", "家居ig": "ig_home", "ig带货": "ig_home",
 }
 
 # canonical key → 中文名（TG 回复用）

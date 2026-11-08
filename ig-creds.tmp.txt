@@ -1,0 +1,23 @@
+# Carllei Graph (Meta app 1116042631048558) - Instagram API unified login
+# business: Carllei Media (1006668248398446), config_id: 1616660089510386
+# token type: system user access token (per console), generated 2026-11-08
+# duck token VERIFIED 2026-11-08 23:4x CST via graph.facebook.com/v21.0/<id> -> username duck.86021417 (use graph.facebook.com host; graph.instagram.com rejects it)
+# tiger token VERIFIED 2026-11-08 23:48 CST via graph.facebook.com/v21.0/<id> -> username tiger.1009023
+IG_DUCK_USERNAME=duck.86021417
+IG_DUCK_USER_ID=17841473195055943
+IG_DUCK_TOKEN=EAAP3COyT7W4BS3z5Do6eiADWvzzGfdlOW7ibeo92m8lFtO1pNvWVfo1ctZAPU817lkMjRHHc0LNnKfuousMFcrRKKpy2fBvnWi5pgUal5keSDBiuYuZAqzUyhK7G1wtZBZCJgZBvN65LZBpM81SUPFECJsvF7BbQ85XCrqdzdDTHMgIs2UWImNPIOEMpzRAbPcLAiJct3t5VKRqKbcRPsckoNihFOOZBls1iFlUZBKGIZCs8aXDBJlQZDZD
+IG_TIGER_USERNAME=tiger.1009023
+IG_TIGER_USER_ID=17841473668160274
+IG_TIGER_TOKEN=EAAP3COyT7W4BSyMZCThuQfBQy1QubHdyywn9ZCsdftizBindoUtSaZALbJakMhrrJzFcfxesnjuvcsLwlfkjeZAWpZAZBlZBWdtX3pezpE5TmequajPfEj8M1dHdXl5JHJu5TQIfZC4s0WAiPcIHkF157RZAjyfXZABPVCPHw0hIK2aesHjH3USBFnhj4AYK15PRktTVEStExNzE9y8uOWgxt9uIh9TstiZBLamBMI6yKGkHeZAY6e9HzQZDZD
+
+# --- Account 3: carllei2027 (3D/AI animation; professional account) ---
+IG_ACCT3_USERNAME=carllei2027
+IG_ACCT3_USER_ID=17841434821501925
+# acct3 token VERIFIED 2026-11-09 00:21 CST via graph.facebook.com/v21.0/<id> -> username carllei2027
+IG_ACCT3_TOKEN=EAAP3COyT7W4BS38I2j41c9pz3NTzOrznzgCSpHUkbsvq39ZCk3rSLsYkhD5VEbZCEODetlZBTv2swhh3oH9GZCruE0hAT1E3kciprjCU1kGZAa2COD1ogT8fBmwDvxTZAlacZBqWrZCVkz4Mblzmj8FBXWOSuPuT2iSo3kZCMWdURO9qPjivSUs3CCCEpIZCPuBEVU9kfZBUHZBMhzWbRCrwaEFweTYiHDXxq5fyZAmr5nZC1yUqEwDZCSmyQZDZD
+
+# --- Account 4: carllei2028 (smart home finds; professional account) ---
+IG_ACCT4_USERNAME=carllei2028
+IG_ACCT4_USER_ID=17841480891119134
+# acct4 token VERIFIED 2026-11-09 00:39 CST via graph.facebook.com/v21.0/<id> -> username carllei2028
+IG_ACCT4_TOKEN=EAAP3COyT7W4BS1eZBO8IoQn0OT9dFS0VOxqwWZC5EELPZBlcZASWh5WbMHTxZBBQzYRBZBBcHVtRCBirdDKPW6kuCBq3UwYH2amxBZAInIUk0UnxTxZCgYbLWZCIdFWyZBgkZBsH7F3qeAKJU6JBwoorts1phKahdSLe30ZBh8a3zab4goEZB3F6eiwly1LobAZAy8TZBW5O2rawFNFZCkFqz4zZBORZB7cbN1NhFZBb670ckST2G4xQFaH7adZANAZDZD

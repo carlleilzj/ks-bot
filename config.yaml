@@ -137,28 +137,46 @@ platforms:
   #   1. 没有独立标题字段，caption 第一行就是钩子（见 ai/copywriter 的 ig_* profile）；
   #   2. 视频必须公网可访问（Meta 自己来拉），由协调端的 /api/media-url 出签名直链；
   #   3. 凭据在 .env：IG_TOKEN_<KEY> / IG_USERID_<KEY>，没有扫码登录态文件。
-  # 默认 default: false —— 只有链接里显式 @ig_pets 这类才发，绝不占用国内默认队列。
+  #
+  # default 必须 false —— 只有链接里显式 @ig萌宠 这类才发。
+  # 否则任何没写平台名的链接会同时发到 IG，把国内素材误发到海外账号。
+  #
+  # 节奏（新号冷启动，2026-11-09 起）：
+  #   日限 2 条、间隔 6 小时：新号猛发是最高危的封号行为，
+  #   每天 1~2 条持续 2 周，比一天 5 条安全得多。
   # ============================================================
   ig_pets:
-    enabled: false          # 配好 .env 凭据后改 true
+    enabled: true
     default: false
     share_to_feed: true
     is_ai_generated: false  # 萌宠素材多为实拍/拟真动画，不声明 AI
+    daily_limit: 2
+    min_gap_hours: 6
+    window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
   ig_satisfying:
-    enabled: false
+    enabled: true
     default: false
     share_to_feed: true
     is_ai_generated: false
+    daily_limit: 2
+    min_gap_hours: 6
+    window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
   ig_anim:
-    enabled: false
+    enabled: true
     default: false
     share_to_feed: true
     is_ai_generated: true   # 3D/AI 动画，Meta 要求自我披露
+    daily_limit: 2
+    min_gap_hours: 6
+    window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
   ig_home:
-    enabled: false
+    enabled: true
     default: false
     share_to_feed: true
     is_ai_generated: false
+    daily_limit: 2
+    min_gap_hours: 6
+    window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
 
 # 各平台可选分区列表（发布页有分区选择的平台才需要；抖音/小红书无分区，用话题标签）
 # LLM 会从中选择一个；列表与实际不符时自动降级为不选分类

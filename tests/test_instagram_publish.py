@@ -1,10 +1,11 @@
-"""Instagram 发布链路测试：Meta Graph API 三步流程 + 媒体公网托管 + caption 拼接。
+"""IG 发布链路测试：Meta Graph API 三步流程 + 媒体公网托管 + caption 拼接。
 
 重点覆盖「错了就会白发/发错」的约束：
 1. caption 拼接顺序（第一行必须是钩子，hashtags 在末尾）；
 2. 三步流程的顺序与参数（容器 → 轮询 → publish）；
 3. 容器状态非 FINISHED 时绝不能进入发布；
-4. 媒体 URL 签名校验（过期/篡改/路径穿越都必须拒绝）。
+4. 媒体 URL 签名校验（过期/篡改/路径穿越都必须拒绝）；
+5. 两条 Meta 通道按 token 前缀自动切换 host（EAA→facebook / IGAA→instagram）。
 """
 from __future__ import annotations
 
@@ -16,6 +17,31 @@ import pytest
 
 from bot.publish import instagram as ig
 from bot.publish import media_upload as mu
+
+
+# ---------- 通道识别 ----------
+
+class TestGraphChannel:
+    def test_igaa_token_uses_instagram_host(self):
+        acct = ig.IgAccount(key="ig_pets", ig_user_id="1", access_token="IGAAxxxx")
+        assert acct.graph_host == ig.GRAPH_HOST
+        assert acct.channel == "instagram_login"
+
+    def test_eaa_token_uses_facebook_host(self):
+        """Facebook Login 的 token（EAA 开头）必须走 graph.facebook.com。
+
+        混用 host 会得到「Cannot parse access token」这种误导性报错——
+        2026-11-09 实测踩过：token 明明是有效的，只是域名不对。
+        """
+        acct = ig.IgAccount(key="ig_pets", ig_user_id="1", access_token="EAAP3Cxxxx")
+        assert acct.graph_host == ig.GRAPH_HOST_FB
+        assert acct.channel == "facebook_login"
+
+    def test_masked_token_hides_secret(self):
+        acct = ig.IgAccount(key="k", ig_user_id="1", access_token="EAAP3ClongtokenvalueZDZD")
+        masked = acct.masked_token
+        assert "longtokenvalue" not in masked
+        assert masked.endswith("ZDZD")
 
 
 # ---------- caption 拼接 ----------
@@ -174,6 +200,5 @@ class TestBuildPublicUrl:
         assert url.startswith("https://cdn.example.com/ig-media/")
         assert url.endswith("/abc_final.mp4")
 
-        # URL 里的 token 必须能通过校验
         token = url.split("/ig-media/")[1].rsplit("/", 1)[0]
         assert mu.verify_media_token("abc_final.mp4", token)

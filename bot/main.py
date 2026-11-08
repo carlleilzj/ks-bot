@@ -540,15 +540,17 @@ def publish_gate(s: Settings, db: Database, platform: str | None = None) -> str 
             return f"{platform} 已停用（platforms.{platform}.enabled=false）"
     pub = s.publish
     now = datetime.now()
-    if pub.window:
-        start, end = (_parse_hhmm(x) for x in pub.window)
+    plat = s.platforms.get(platform) if platform else None
+    # 平台可覆盖发布窗口（IG 用得上：欧美黄金时段是北京时间凌晨）
+    window = (plat.window if plat and plat.window else pub.window)
+    if window:
+        start, end = (_parse_hhmm(x) for x in window)
         cur = now.hour * 60 + now.minute
         in_window = start <= cur < end if start <= end else (cur >= start or cur < end)
         if not in_window:
-            return f"不在发布窗口 {pub.window[0]}~{pub.window[1]}"
+            return f"不在发布窗口 {window[0]}~{window[1]}"
     today0 = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(timespec="seconds")
     # 每平台可覆盖全局节奏（矩阵号冷启动常配不同日限/间隔）
-    plat = s.platforms.get(platform) if platform else None
     daily_limit = (plat.daily_limit if plat and plat.daily_limit is not None
                    else pub.daily_limit)
     gap_hours = (plat.min_gap_hours if plat and plat.min_gap_hours is not None
@@ -755,21 +757,29 @@ def cmd_ig_check(s: Settings) -> None:
         print(f"   ig_user_id = {acct.ig_user_id}")
         print(f"   token      = {acct.masked_token}")
 
-        # 只调一个轻量只读接口验证 token 真的有效
+        # 只调一个轻量只读接口验证 token 真的有效。
+        # 注意：字段可用性随通道不同——Instagram Login 有 account_type，
+        # Facebook Login 没有（会报 #100 nonexisting field），所以只查两边都有的。
         try:
             data = ig._request("GET", acct.ig_user_id, acct,
-                              params={"fields": "username,account_type"})
+                              params={"fields": "username"})
             username = data.get("username") or "(未知)"
-            account_type = data.get("account_type") or "(未知)"
-            print(f"   ✓ 凭据有效：@{username}（{account_type}）")
-            if "BUSINESS" not in str(account_type).upper() and \
-                    "MEDIA_CREATOR" not in str(account_type).upper() and \
-                    "CREATOR" not in str(account_type).upper():
-                print("   ⚠️  账号类型可能不是专业号：Reels API 只支持 Business/Creator")
+            print(f"   ✓ 凭据有效：@{username}（通道 {acct.channel}）")
             ok_count += 1
         except Exception as e:
-            print(f"   ✗ 凭据校验失败：{str(e)[:200]}")
-            continue
+            msg = str(e)
+            if "#100" in msg and "nonexisting field" in msg:
+                # 字段问题不等于 token 有问题，再试一次只取 id
+                try:
+                    data = ig._request("GET", acct.ig_user_id, acct)
+                    print(f"   ✓ 凭据有效（通道 {acct.channel}，字段受限）")
+                    ok_count += 1
+                except Exception as e2:
+                    print(f"   ✗ 凭据校验失败：{str(e2)[:200]}")
+                    continue
+            else:
+                print(f"   ✗ 凭据校验失败：{msg[:200]}")
+                continue
 
         used = ig.check_publishing_quota(acct)
         if used is not None:
