@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -93,7 +94,73 @@ _PLATFORM_MAP = {
     "TikTok": "tiktok",
     "Twitter": "twitter",
     "YouTubeShorts": "youtube",
+    # 国内素材源（出海线的上游）
+    "Douyin": "douyin",
+    "XiaoHongShu": "xhs",
+    "BiliBili": "bilibili",
+    "Weibo": "weibo",
 }
+
+# 国内平台的分享短链域名：yt-dlp 只能识别展开后的最终 URL。
+# 抖音/小红书分享文案里给的是 v.douyin.com / xhslink.com 这类短链，
+# 必须先把短链展开成 www.douyin.com/video/<id> 才能解析，
+# 否则 yt-dlp 会直接报 Unsupported URL。
+SHORT_LINK_HOSTS = {
+    "v.douyin.com": "douyin",
+    "xhslink.com": "xhs",
+    "xhslink.cn": "xhs",
+    "b23.tv": "bilibili",
+}
+
+# 从分享文案里抠出 URL（用户常整段转发：「7.89 复制打开抖音... https://v.douyin.com/xxx/」）
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s\u4e00-\u9fff，。！？、；：\"'）】]+")
+
+
+def extract_url_from_text(text: str) -> str:
+    """从聊天文本里提取第一个 URL（支持国内 App 的整段分享文案）。
+
+    国内分享文案形如：
+        7.89 abc:/ 复制打开抖音，看看【xxx的作品】... https://v.douyin.com/iABC123/
+    直接把这整段丢给 yt-dlp 必然失败，必须先正则抠出链接。
+    """
+    m = _URL_IN_TEXT_RE.search(text or "")
+    return m.group(0) if m else ""
+
+
+def expand_short_link(url: str, timeout: float = 10.0) -> tuple[str, str]:
+    """展开国内平台短链，返回 (最终URL, 平台标识)。
+
+    短视频平台为了 App 引流，分享出来的都是跳转短链（v.douyin.com/xxx），
+    里面没有视频 ID，yt-dlp 无法解析。这里跟随一次 302 拿到真实地址。
+
+    非短链（或展开失败）原样返回，平台标识为空 —— 让 yt-dlp 自己处理，
+    失败也只是常规报错，不会因这一步把整条链路搞挂。
+    """
+    host = (urlparse(url).hostname or "").lower()
+    platform = SHORT_LINK_HOSTS.get(host, "")
+    if not platform:
+        return url, ""
+
+    try:
+        import httpx
+        # 必须不自动跟随，手动读 Location：短链服务有时会套多层跳转，
+        # 且部分站点对 HEAD 请求返回 405，用 GET + 关掉 stream 更稳。
+        with httpx.Client(timeout=timeout, follow_redirects=True,
+                          headers={"User-Agent": _BROWSER_UA}) as c:
+            r = c.get(url)
+            final = str(r.url)
+        if final and final != url:
+            log.info("短链已展开（%s）：%s -> %s", platform, url, final[:120])
+            return final, platform
+    except Exception as e:
+        log.debug("短链展开失败（按原链接尝试）：%s", str(e)[:120])
+    return url, platform
+
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+)
 
 
 @dataclass
@@ -143,6 +210,8 @@ def extract_meta(url: str) -> VideoMeta:
     会自动跳过非视频内容（图文/直播等）。
     """
     clean_url = parse_url(url)
+    # 国内分享短链（v.douyin.com 等）先展开，否则 yt-dlp 直接 Unsupported URL
+    clean_url, _ = expand_short_link(clean_url)
 
     # IG 优先走自研解析器；若自研失败（除纯图文帖外），回退到 yt-dlp 兜底
     if ig_api.is_instagram(clean_url):
@@ -225,6 +294,9 @@ def download(url: str, dest: Path) -> Path:
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     clean_url = parse_url(url)
+    # 短链展开（与 extract_meta 保持一致：两处都必须展开，
+    # 否则会出现「元数据拿到了、下载却报 Unsupported URL」的割裂）
+    clean_url, _ = expand_short_link(clean_url)
 
     # yt-dlp 的 outtmpl 控制：我们指定完整文件名，用 dest 的 stem + dir
     out_dir = str(dest.parent)

@@ -224,7 +224,80 @@ journalctl -u ksbot-publish.service -f | grep -i instagram
 
 ---
 
-## 八、与国内线的隔离原则
+## 八、前置链路：国内素材怎么进来
+
+出海任务的 `target_platforms` 里只要有 `ig_*`，整条流水线就走**出海分支**，
+与国内分支的差异全部自动生效，不需要额外的开关。
+
+### 1. 投链方式
+
+直接把国内素材的链接发给 TG bot，末尾加 `@ig*`：
+
+```
+https://v.douyin.com/iABC123/ @ig萌宠
+https://www.xiaohongshu.com/explore/6789abc @ig家居
+```
+
+也支持**直接粘贴整段分享文案**（国内 App 导出的那种），程序会自动抠出 URL：
+
+```
+7.89 abc:/ 复制打开抖音，看看【某某的作品】... https://v.douyin.com/iABC123/ 复制此链接 @ig解压
+```
+
+短链会自动展开（`v.douyin.com` / `xhslink.com` / `b23.tv`），
+然后交给 yt-dlp 解析元数据 + 下载无水印原片。
+
+### 2. 画面清洗（`bot/media/export.py`）
+
+| 处理 | 国内分支 | 出海分支 |
+| :--- | :--- | :--- |
+| 中文硬字幕 | 生成并烧录 | **裁掉底部字幕区**（比例按账号 8%~12%，带随机抖动） |
+| 裁后处理 | — | **放大回原分辨率**，保持 9:16 满屏 |
+| 音频 | 保留 | 按账号：解压/萌宠/家居**保声**，动画**剥音轨** |
+| 水印 | delogo（按需） | delogo（默认 `corner_pair` 双点位） |
+| 二创变换 | 可选 | 可选（同一套 `transform` 配置） |
+
+**账号配方**（`ExportProfile.for_account`）：
+
+| 账号 | 裁字幕 | 音轨 | 原因 |
+| :--- | :--- | :--- | :--- |
+| `ig_satisfying` | 8% | **保留** | ASMR 原声就是内容本体，剥掉等于毁片 |
+| `ig_pets` | 10% | 保留 | 叫声/环境声有信息量 |
+| `ig_anim` | 12% | **剥离** | 3D/AI 动画多配中文旁白，海外无意义且暴露搬运 |
+| `ig_home` | 9% | 保留 | 轻音乐是氛围的一部分 |
+
+### 3. 字幕阶段
+
+出海任务**跳过中文字幕烧录**（`step_subtitle` 直接 copy）。
+老外看不懂中文，烧上去只会显得廉价、拉低完播。
+
+### 4. 成品校验
+
+`verify_export` 会在日志里告警（不阻断）：
+
+- 输出仍是横屏 → IG Reels 会裁掉两侧主体；
+- 高度超过 1080p 等效 → 会被平台二次压缩；
+- 时长 <3s 或 >90s → 前者难进推荐，后者掉完播。
+
+---
+
+## 九、上线前的两次冒烟
+
+```bash
+# 1. 发布链路（mock Meta，不消耗真实配额）
+python tools/smoke_ig_pipeline.py
+
+# 2. 画面清洗（真实 ffmpeg，验证滤镜链能出片）
+python tools/smoke_export_video.py
+```
+
+两个脚本都通过，才算真正可以开 `enabled: true`。
+
+---
+
+---
+
+## 十、与国内线的隔离原则
 
 - **日限独立**：`platforms.ig_*.daily_limit` 单独计，不占快手的 6 条；
 - **文案独立**：`ig_*` profile 走全英文 prompt，不套中文禁用词表；

@@ -124,9 +124,34 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
     raw = Path(task["raw_path"])
     tc = WORK_DIR / f"{sc}_tc.mp4"
     cover = WORK_DIR / f"{sc}_cover.jpg"
+
+    from .media.export import export_account_of, is_export_task
+    is_export = is_export_task(task.get("target_platforms"))
+    export_account = export_account_of(task.get("target_platforms"))
+
     ffmpeg.ensure_compatible(raw, tc)
     # 去除元数据里的作者/来源痕迹（IG 视频会带 title/comment 标签）
     ffmpeg.strip_metadata(tc, tc)
+
+    # 出海素材清洗（目标平台含 ig_* 时启用）：裁掉国内烧录的中文硬字幕区，
+    # 按账号决定是否剥音轨（解压类必须保声，动画类剥掉中文配音）。
+    # 必须在二创/抽封面之前做，否则封面会截到「即将被裁掉的字幕区」。
+    export_params = None
+    if is_export and export_account:
+        try:
+            from .media.export import ExportProfile, build_export_video, verify_export
+            prof = ExportProfile.for_account(export_account)
+            cleaned = WORK_DIR / f"{sc}_export.mp4"
+            export_params = build_export_video(tc, cleaned, prof)
+            problems = verify_export(tc, cleaned)
+            tc = cleaned
+            log.info("[%s] 出海清洗完成（账号=%s）：%s%s", sc, export_account,
+                     export_params,
+                     "；告警：" + "；".join(problems) if problems else "")
+            for p in problems:
+                log.warning("[%s] 出海成品告警：%s", sc, p)
+        except Exception as e:
+            log.warning("[%s] 出海清洗失败（按原片继续）：%s", sc, str(e)[:150])
 
     # 二创变换（可选）：抖音「原创性不足」对策。画面帧特征 + 音频 + 编码
     # 参数三层随机化，必须在抽封面与烧字幕之前做，保证封面取自成片画面。
@@ -299,6 +324,17 @@ def step_subtitle(s: Settings, db: Database, task: dict) -> None:
     tc = Path(task["work_path"])
     final = FINAL_DIR / f"{sc}_final.mp4"
     ass = WORK_DIR / f"{sc}.ass"
+
+    # 出海任务绝不烧中文字幕：老外看不懂，且会在 IG 上显得廉价。
+    # 国内任务照旧（字幕是国内平台完播率的重要抓手）。
+    targets = task.get("target_platforms")
+    from .media.export import is_export_task
+    if is_export_task(targets):
+        shutil.copyfile(tc, final)
+        db.update(task["id"], state=State.SUBTITLED, final_path=str(final), error=None)
+        log.info("[%s] 出海任务跳过中文字幕，成品就绪：%s", sc, final)
+        return
+
     if s.subtitle.enabled and ass.exists():
         ffmpeg.burn_subtitles(tc, ass, final)
     else:

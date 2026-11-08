@@ -245,13 +245,19 @@ class TelegramListener(threading.Thread):
                 telegram.send_text(
                     self.s,
                     "📬 直接发视频链接给我即可\n"
-                    "支持：Instagram / YouTube / Facebook / TikTok 等\n"
+                    "支持：Instagram / YouTube / Facebook / TikTok / 抖音 / 小红书 / B站 等\n"
                     "收到后会自动下载 → 转码 → 生成文案 → 加字幕 → 发布到快手/抖音\n"
                     "重复链接会自动判定，不会重复处理\n\n"
                     "💡 指定发布平台：链接后加平台名，如\n"
                     "  https://... @抖音\n"
                     "  https://... @douyin,xhs\n"
                     "不指定则发到所有启用的平台\n\n"
+                    "🌍 出海发布（Instagram 矩阵号，自动裁中文字幕+英文文案）：\n"
+                    "  https://... @ig萌宠   → 搞笑萌宠号\n"
+                    "  https://... @ig解压   → 视觉解压号（保留原声 ASMR）\n"
+                    "  https://... @ig动画   → 3D 动画号\n"
+                    "  https://... @ig家居   → 家居好物号\n"
+                    "  可直接粘贴抖音/小红书分享文案，会自动抠出链接\n\n"
                     "🔑 /login —— 平台扫码重登（不带参数弹菜单）\n"
                     "   /login weixin / kuaishou / douyin / toutiao\n"
                     "   中文别名也行：/login 快手、/login 快手2\n",
