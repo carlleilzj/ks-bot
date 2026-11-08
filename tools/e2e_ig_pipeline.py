@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name == "tools" else "/opt/ks-bot"))
 
 from bot.config import FINAL_DIR, WORK_DIR, load_settings   # noqa: E402
 from bot.media import export as ex_exporter                 # noqa: E402

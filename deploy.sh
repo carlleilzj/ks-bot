@@ -10,13 +10,13 @@ set -e
 cd "$(dirname "$0")"
 
 TARGET="${1:-all}"
-FILES=$(git ls-files 'bot/**' 'tests/**' 'deploy/**' | grep -v -E 'cookies|state')
+FILES=$(git ls-files 'bot/**' 'tests/**' 'deploy/**' 'tools/**' 'config.yaml' 'pyproject.toml' 'requirements.txt' | grep -v -E 'cookies|state')
 
 sync_to() {
     local host="$1"
     echo "== 同步代码到 $host =="
     COPYFILE_DISABLE=1 tar -cf - $FILES | ssh -o ConnectTimeout=15 "$host" \
-        'cd /opt/ks-bot && tar -xf - && find . -name "._*" -not -path "./.git/*" -delete && chmod -R o+rX bot tests deploy'
+        'cd /opt/ks-bot && tar -xf - && find . -name "._*" -not -path "./.git/*" -delete && chmod -R o+rX bot tests deploy tools && chmod o+r config.yaml 2>/dev/null; true'
 }
 
 case "$TARGET" in
