@@ -332,14 +332,16 @@ class TelegramListener(threading.Thread):
 
         file_size = int(media.get("file_size") or 0)
         size_mb = file_size / 1048576
-        if file_size and size_mb > telegram.TG_MAX_DOWNLOAD_MB:
+        limit_mb = telegram.max_download_mb(self.s)
+        if file_size and size_mb > limit_mb:
+            hint = ("先压缩/剪辑到上限以内再发"
+                    if limit_mb <= telegram.TG_MAX_DOWNLOAD_MB_OFFICIAL
+                    else "文件过大，建议先压缩")
             telegram.send_text(
                 self.s,
-                f"⚠️ 文件 {size_mb:.1f} MB 超过 Bot API 下载上限 "
-                f"（{telegram.TG_MAX_DOWNLOAD_MB} MB）\n\n"
-                f"两个办法：\n"
-                f"1. 先压缩/剪辑到 {telegram.TG_MAX_DOWNLOAD_MB} MB 以内再发\n"
-                f"2. 发原始链接（如果该平台 yt-dlp 支持）",
+                f"⚠️ 文件 {size_mb:.1f} MB 超过当前通道上限（{limit_mb} MB）\n\n"
+                f"{hint}\n"
+                f"或改用链接投递（让服务器自己下载）",
             )
             return
 

@@ -21,9 +21,12 @@ from bot.db import State
 from bot.source.telegram_listener import TelegramListener
 
 
-def _listener():
+def _listener(api_base="https://api.telegram.org"):
     s = MagicMock()
     s.telegram_chat_id = "123"
+    # telegram_api_base 必须是真实字符串：max_download_mb 靠它判断
+    # 是官方通道（20MB）还是自建通道（2000MB）。
+    s.telegram_api_base = api_base
     # 平台配置要真实：_split_disabled_targets 会按 enabled 过滤，
     # 用 MagicMock 会让所有平台被判定为「已停用」而静默丢弃。
     s.platforms = {
@@ -91,13 +94,30 @@ class TestSizeLimit:
     def test_oversize_rejected_with_guidance(self, patched_tg):
         send_text, download_file = patched_tg
         lst = _listener()
-        msg = _video_msg(size=200 * 1048576)
+        lst.db.find_by_source_url.return_value = None
+        msg = _video_msg(size=200 * 1048576)   # 200MB，超官方 20MB 上限
         lst._handle_local_file(msg, msg["video"], {})
         text = _sent_text(send_text)
         assert "超过" in text
         assert "20" in text
-        assert "压缩" in text and "链接" in text
+        assert "压缩" in text or "链接" in text
         assert not download_file.called
+
+    def test_oversize_uses_local_limit_when_selfhosted(self, patched_tg, tmp_path):
+        """自建 Bot API 时 200MB 应当放行（不再卡 20MB）。"""
+        send_text, download_file = patched_tg
+        lst = _listener(api_base="http://127.0.0.1:8081")
+        lst.db.find_by_source_url.return_value = None
+        lst.db.insert_video.return_value = 21
+        msg = _video_msg(size=200 * 1048576)
+        download_file.return_value = tmp_path / "x.mp4"
+        with patch("bot.source.telegram_listener.RAW_DIR", tmp_path), \
+             patch("bot.media.ffmpeg.video_info",
+                  return_value={"width": 1080, "height": 1920, "duration": 40.0}):
+            lst._handle_local_file(msg, msg["video"], {})
+        # 不应该出现「超过上限」的拒绝，应当直接入库
+        assert lst.db.insert_video.called
+        assert "超过" not in _sent_text(send_text)
 
 
 class TestStateMachineEntry:

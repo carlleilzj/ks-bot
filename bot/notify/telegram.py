@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 from pathlib import Path
 
 import httpx
@@ -171,40 +173,97 @@ def answer_callback(s: Settings, callback_query_id: str, text: str = "",
 
 # ---------- 文件下载（本地文件投链） ----------
 
-# TG 单文件上限：bot 通过 getFile 下载的官方限制是 20MB（Bot API 限制），
-# 但 2026 年起自行托管 Bot API 可到 2GB。这里按保守值判断并给出明确提示。
-TG_MAX_DOWNLOAD_MB = 20
+# 官方 Bot API 的单文件下载上限是 20MB（getFile 限制）。
+# 自建 Bot API server 且开 --local 模式时上限提高到 2000MB。
+TG_MAX_DOWNLOAD_MB_OFFICIAL = 20
+TG_MAX_DOWNLOAD_MB_LOCAL = 2000
+# 兼容旧引用（测试/调用方按这个名字取值）
+TG_MAX_DOWNLOAD_MB = TG_MAX_DOWNLOAD_MB_OFFICIAL
 
 
-def get_file_path(s: Settings, file_id: str) -> str | None:
-    """调 getFile 拿文件在 TG 服务器上的路径。"""
+def is_local_bot_api(s: Settings) -> bool:
+    """是否连自建 Bot API server（本机/内网地址，非 api.telegram.org）。"""
+    base = (getattr(s, "telegram_api_base", "") or "").lower()
+    return bool(base) and "api.telegram.org" not in base
+
+
+def max_download_mb(s: Settings) -> int:
+    """当前 Bot API 通道允许的单文件大小上限（MB）。"""
+    return TG_MAX_DOWNLOAD_MB_LOCAL if is_local_bot_api(s) else TG_MAX_DOWNLOAD_MB_OFFICIAL
+
+
+def get_file_result(s: Settings, file_id: str) -> dict | None:
+    """调 getFile，返回完整 result（含 file_path / file_size）。"""
     resp = _post(s, "getFile", json_payload={"file_id": file_id})
     if not resp:
         return None
     result = resp.get("result") or {}
-    return result.get("file_path") or None
+    return result or None
+
+
+def get_file_path(s: Settings, file_id: str) -> str | None:
+    """调 getFile 拿文件在 TG 服务器上的路径。"""
+    result = get_file_result(s, file_id)
+    return (result or {}).get("file_path") or None
 
 
 def download_file(s: Settings, file_id: str, dest: Path,
-                  max_mb: int = TG_MAX_DOWNLOAD_MB) -> Path | None:
-    """从 Telegram 下载文件到 dest。
+                  max_mb: int | None = None) -> Path | None:
+    """把 Telegram 上的文件取到本地 dest。
 
-    为什么需要它：本地文件投链要先把用户发来的视频存到磁盘，才能进流水线。
-    TG 的 Bot API 会先返回 file_id，再用 getFile 换出临时下载路径。
+    两条路径（自动选择）：
+    1. **自建 Bot API（--local）**：getFile 返回的 file_path 是服务器绝对路径，
+       直接 hardlink 或复制即可，**不走 HTTP、不限大小、不重复传输**；
+    2. **官方 api.telegram.org**：走 /file/bot<token>/<path> 下载，上限 20MB。
 
     返回 dest（成功）或 None（失败，已记日志）。
     """
-    file_path = get_file_path(s, file_id)
+    result = get_file_result(s, file_id)
+    if not result:
+        log.error("getFile 失败，无法获取文件信息（file_id=%s）", file_id[:40])
+        return None
+    file_path = result.get("file_path") or ""
     if not file_path:
-        log.error("getFile 失败，无法获取文件路径（file_id=%s）", file_id[:40])
+        log.error("getFile 未返回 file_path（file_id=%s）", file_id[:40])
+        return None
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # ---- 路径 1：自建 local server，file_path 就是本机绝对路径 ----
+    if is_local_bot_api(s) and file_path.startswith("/"):
+        src = Path(file_path)
+        if src.is_file():
+            try:
+                # 优先硬链接（同分区零拷贝）；失败退回复制
+                if dest.exists():
+                    dest.unlink()
+                try:
+                    os.link(src, dest)
+                    log.info("TG 本地文件已硬链接：%s（%.1f MB）",
+                             dest.name, dest.stat().st_size / 1048576)
+                except OSError:
+                    shutil.copyfile(src, dest)
+                    log.info("TG 本地文件已复制：%s（%.1f MB）",
+                             dest.name, dest.stat().st_size / 1048576)
+                return dest
+            except Exception as e:
+                log.warning("本地文件取用失败，回退 HTTP 下载：%s", str(e)[:120])
+        else:
+            log.debug("file_path 不是可读的本机文件（%s），回退 HTTP 下载", file_path[:80])
+
+    # ---- 路径 2：官方 API，走 HTTP 下载 ----
+    limit_mb = max_mb if max_mb is not None else max_download_mb(s)
+    size = int(result.get("file_size") or 0)
+    if size and size / 1048576 > limit_mb:
+        log.error("文件 %.1f MB 超过当前通道上限 %d MB",
+                  size / 1048576, limit_mb)
         return None
 
     url = f"{s.telegram_api_base}/file/bot{s.telegram_bot_token}/{file_path}"
-    client_kw: dict = {"timeout": 300}
+    client_kw: dict = {"timeout": 600}
     if s.telegram_proxy:
         client_kw["proxy"] = s.telegram_proxy
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
         with httpx.Client(**client_kw, follow_redirects=True) as client:
