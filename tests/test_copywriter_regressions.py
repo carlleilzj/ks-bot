@@ -54,10 +54,15 @@ def test_banned_patterns_all_reach_prompt():
 
 
 def test_title_len_hint_respects_platform_cap():
-    """长度提示不能超过 12~24 基线，也不能超过平台硬上限。"""
+    """长度提示不能超过 12~24 基线，也不能超过平台硬上限。
+
+    Instagram 矩阵号走独立英文 prompt（无「N~M 个字」中文提示），跳过。
+    """
     import re as _re
 
     for name, prof in PLATFORM_PROFILES.items():
+        if name.startswith("ig_"):
+            continue
         prompt = _system_prompt(prof)
         m = _re.search(r"\*\*短\*\*：(\d+)~(\d+) 个字", prompt)
         assert m, f"{name} 缺少长度提示"
@@ -65,6 +70,46 @@ def test_title_len_hint_respects_platform_cap():
         assert high <= prof.max_title_len, f"{name} 提示上限 {high} 超过硬上限 {prof.max_title_len}"
         assert high <= 24, f"{name} 提示上限 {high} 超过已验证基线 24"
         assert low <= high
+
+
+def test_ig_prompt_is_english_and_hook_first():
+    """IG 矩阵号的 prompt 必须是英文钩子优先，不能混入中文写作规范。"""
+    for name in ("ig_pets", "ig_satisfying", "ig_anim", "ig_home"):
+        prof = PLATFORM_PROFILES[name]
+        prompt = _system_prompt(prof)
+        assert "CAPTION HOOK" in prompt
+        assert "exactly 8" in prompt, f"{name} 未要求恰好 8 个话题"
+        # 中文平台的硬约束绝不能出现在英文 prompt 里
+        assert "个字" not in prompt
+        assert "不要专栏前缀" not in prompt
+
+
+def test_latin_tag_merge_keeps_broader_tag():
+    """英文标签去重：animation 与 3danimation 是同一池，保留更泛的那个。"""
+    from bot.ai.copywriter import merge_tags
+
+    out = merge_tags(
+        ["dogsofinstagram", "3danimation", "animation", "puppylove"],
+        max_tags=8, content_slots=8,
+        fixed_pool=("reelsviral", "fyp"), latin=True)
+
+    assert "animation" in out
+    assert "3danimation" not in out, "子串同池的标签不应重复占位"
+    assert len(out) <= 8
+    assert all(" " not in t for t in out)
+
+
+def test_latin_tag_merge_fills_to_max():
+    """AI 给得不够时用固定池补齐；池子用完就到此为止（不硬凑重复）。"""
+    from bot.ai.copywriter import merge_tags
+
+    out = merge_tags(["catsofinstagram"], max_tags=8, content_slots=8,
+                     fixed_pool=("petmemes", "reelsviral", "fyp"), latin=True)
+    # 1 个 AI 词 + 3 个池词 = 4（池只有 3 个，不重复填充）
+    assert len(out) == 4
+    assert out[0] == "catsofinstagram"
+    assert all(t.islower() for t in out)
+    assert len(set(out)) == len(out)
 
 
 # ---------- first_comment 清洗 ----------

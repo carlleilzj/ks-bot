@@ -131,6 +131,9 @@ class PlatformConfig:
     cover_title: bool = False
     anchors: dict = field(default_factory=dict)  # 抖音：挂载标签 {类型: 搜索词}
     hot_topic: str = ""               # 抖音：关联热点词
+    # Instagram Reels（Meta Graph API）：
+    share_to_feed: bool = True        # 是否同时分享到 Feed（false = 只在 Reels 标签页）
+    is_ai_generated: bool = False     # AI 生成内容自我披露（Meta 要求，AI 动画类账号建议开）
     # 每平台覆盖 publish 段的全局节奏（None = 用全局值）。
     # 矩阵号冷启动期常用：kuaishou2 日限 3、间隔放宽。
     daily_limit: int | None = None
@@ -380,6 +383,8 @@ def load_settings() -> Settings:
                 cover_title=bool(conf.get("cover_title", False)),
                 anchors={str(k): str(v) for k, v in _anchors.items() if v},
                 hot_topic=str(conf.get("hot_topic") or "").strip(),
+                share_to_feed=bool(conf.get("share_to_feed", True)),
+                is_ai_generated=bool(conf.get("is_ai_generated", False)),
                 daily_limit=_opt_int(conf.get("daily_limit")),
                 min_gap_hours=_opt_float(conf.get("min_gap_hours")),
             )

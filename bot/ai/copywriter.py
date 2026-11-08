@@ -112,11 +112,148 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
         tone="口语短句、有具体看点。标题硬限 30 字，不带专栏前缀",
         desc_hint="1~2 句话点出画面里真正发生的事，不要把标题再抄一遍",
     ),
+    # ---------------- Instagram 矩阵（4 个账号，全英文） ----------------
+    # 海外 Reels 的文案逻辑与国内完全不同：
+    #   1. caption 第一行就是钩子（列表页只露 ~125 字符，必须把钩子放最前）；
+    #   2. 不讲剧情概要，用「情绪反应式短句」（Wait for it… / I wasn't ready）；
+    #   3. hashtags 走「赛道词 + 泛流量词」两层，数量 5~8 个（IG 上限 30，但多了会被判 spam）。
+    "ig_pets": PlatformProfile(
+        name="ig_pets", display_name="IG·萌宠", max_title_len=90, max_tags=8,
+        tone="English, playful and casual like a pet-owner friend. First line = the hook.",
+        desc_hint="one short punchy line (max ~100 chars) that lands the joke; no plot summary",
+        title_style=(
+            "2. Write the CAPTION HOOK in English, native-speaker casual tone:\n"
+            "   - React to the moment, don't describe it: \"the way he just... 😭\",\n"
+            "     \"bro really thought he ate 💀\", \"not the side-eye at the end 💀\"\n"
+            "   - Or set up an open loop: \"wait for the ending 😭\", \"watch till the end\"\n"
+            "   - Capitalize normally, use at most 2 emojis, no hashtags inside the hook\n"
+            "   - NEVER start with \"This video shows\" / \"In this video\""
+        ),
+        tag_base="",
+        tag_content_slots=8,
+        tag_fixed_pool=("funnypets", "petmemes", "dogsofinstagram", "catsofinstagram",
+                        "reelsviral", "fyp"),
+    ),
+    "ig_satisfying": PlatformProfile(
+        name="ig_satisfying", display_name="IG·解压", max_title_len=90, max_tags=8,
+        tone="English, calm and sensory. First line = the sensory hook.",
+        desc_hint="one short line naming what's satisfying (texture/sound/result), max ~100 chars",
+        title_style=(
+            "2. Write the CAPTION HOOK in English for an oddly-satisfying account:\n"
+            "   - Name the sensory payoff: \"the sound alone 🧘\", \"this is my therapy\",\n"
+            "     \"perfectly clean, no notes ✨\", \"I could watch this for hours\"\n"
+            "   - Or invite the loop: \"save this for when you can't sleep\"\n"
+            "   - Calm, lowercase-friendly, at most 2 emojis\n"
+            "   - NEVER mention ASMR in a fake way; only imply the sound is good"
+        ),
+        tag_base="",
+        tag_content_slots=8,
+        tag_fixed_pool=("oddlysatisfying", "satisfying", "asmr", "relaxing",
+                        "reelsviral", "fyp"),
+    ),
+    "ig_anim": PlatformProfile(
+        name="ig_anim", display_name="IG·动画", max_title_len=90, max_tags=8,
+        tone="English, witty like a meme page. First line = the punchline setup.",
+        desc_hint="one short witty line about the twist, max ~100 chars",
+        title_style=(
+            "2. Write the CAPTION HOOK in English for a 3D/animation meme account:\n"
+            "   - Set up the twist without spoiling it: \"he had ONE job 😭\",\n"
+            "     \"the plot twist at the end 💀\", \"I was NOT ready for that\",\n"
+            "     \"explain this to me slowly 🧐\"\n"
+            "   - Match the character's emotion, keep it under 90 characters\n"
+            "   - at most 2 emojis; no hashtags inside the hook"
+        ),
+        tag_base="",
+        tag_content_slots=8,
+        tag_fixed_pool=("animation", "3danimation", "cartoon", "funnyvideos",
+                        "reelsviral", "fyp"),
+    ),
+    "ig_home": PlatformProfile(
+        name="ig_home", display_name="IG·家居", max_title_len=90, max_tags=8,
+        tone="English, aspirational home-decor voice. First line = the desire hook.",
+        desc_hint="one short line selling the feeling/benefit, max ~100 chars",
+        title_style=(
+            "2. Write the CAPTION HOOK in English for a home-decor / gadgets account:\n"
+            "   - Sell the feeling, not the product: \"this is the corner I never leave ✨\",\n"
+            "     \"my dream setup, no notes 🛋️\", \"the coziest 10 seconds of my day\"\n"
+            "   - Or create save-bait: \"saving this for my future apartment\"\n"
+            "   - at most 2 emojis; never invent brand names or prices"
+        ),
+        tag_base="",
+        tag_content_slots=8,
+        tag_fixed_pool=("homedecor", "interiordesign", "cozyhome", "amazonfinds",
+                        "reelsviral", "fyp"),
+    ),
 }
 
 
 class CopywriterError(RuntimeError):
     pass
+
+
+def _ig_system_prompt(profile: PlatformProfile) -> str:
+    """Instagram 矩阵号专用英文 prompt。
+
+    与中文 prompt 的差异（都是实测出来的海外习惯）：
+    1. caption 第一行是唯一钩子位（视频列表页只露 ~125 字符）；
+    2. 不写剧情摘要，写情绪反应 / 设悬念 / 给收藏理由；
+    3. hashtags 两层结构：内容词（精准搜索）+ 泛流量词（reelsviral/fyp）；
+    4. 严格禁止中式英语和「This video shows」这类旁白腔。
+    """
+    return f"""You are the copywriter for an Instagram Reels account.
+
+Account type: {profile.display_name}
+Voice: {profile.tone}
+
+【What you receive】(highest to lowest trust)
+1. 【ACTUAL VISUAL CONTENT】 - objective description from a vision model that
+   watched the video frame by frame. THIS IS THE GROUND TRUTH.
+2. 【SOURCE CAPTION】 - the original poster's caption (may contain the real story
+   beats, but often mixes in promo junk like "follow for more").
+3. 【TRANSCRIPT】 - usually empty (most of our clips have no dialogue).
+
+Your job:
+1. Identify the actual subject and what really happens from the VISUAL CONTENT.
+   If the source caption contradicts the visuals, always trust the visuals.
+2. From the source caption only take story beats. Ignore "follow/link in bio" junk.
+3. NEVER invent details. Never describe cooking, kids, homework, or household
+   chores unless they are literally visible in the video.
+
+【CAPTION HOOK — the most important part】
+1. The first line is all that shows in the feed before "... more".
+   Put the entire hook in the first ~90 characters.
+{profile.title_style}
+3. Rules:
+   - Write like a native English speaker scrolling Reels, NOT like a product page;
+   - Contractions are good (isn't, can't, y'all); no formal register;
+   - Max 2 emojis in the hook, and only if they fit the joke;
+   - No hashtags in the hook line — they go at the end;
+   - NEVER open with "This video shows" / "In this video" / "Watch as".
+
+【DESCRIPTION】
+{profile.desc_hint}
+Do not repeat the hook. Do not summarize the plot.
+
+【HASHTAGS — exactly 8, two-layer structure】
+Output exactly 8 hashtag words (no # symbol, no spaces):
+- Slots 1-4: content-specific tags that real people search on Instagram
+  (e.g. for a pet clip: dogsofinstagram, puppylove, dogmom, goldenretriever);
+- Slots 5-8: reach tags that get into broader pools
+  (e.g. reelsviral, fyp, explorepage, reelsinstagram).
+Each tag must be lowercase, one word or one concatenated phrase, no spaces.
+No two tags may share the same word stem.
+
+【OUTPUT FORMAT】
+Output ONLY a valid JSON object. No code fences, no explanation:
+{{
+  "title": "the caption hook, plain English, no hashtags, max {profile.max_title_len} chars",
+  "description": "one short supporting line, max 120 chars",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8"],
+  "category": ""
+}}
+
+- Never mention Instagram, reels, repost, original creator, or watermarks.
+- Never state a brand name or price unless it is literally readable in the video."""
 
 
 def _system_prompt(profile: PlatformProfile) -> str:
@@ -138,6 +275,11 @@ def _system_prompt(profile: PlatformProfile) -> str:
     _lower = min(12, _upper)
     title_len_hint = (f"{_lower}~{_upper} 个字，最多两小句" if _upper > _lower
                       else f"不超过 {_upper} 个字，一句话说完")
+
+    # Instagram 矩阵号走独立的全英文 prompt：海外 Reels 的写法和国内完全不同，
+    # 复用中文规范（12~24 字、禁套话表、情绪垫句清单）在英文里毫无意义。
+    if profile.name.startswith("ig_"):
+        return _ig_system_prompt(profile)
     style_block = profile.title_style or (
         "2. 先写笑点，不写旁白。一句里要有「谁 + 反差/误会/吃瘪」，把最炸的结果咽住半句当钩子。\n"
         "   只学口气，禁止照抄，必须换成这条画面里真实发生的事：\n"
@@ -310,13 +452,16 @@ def _fit_title_natural(title: str, max_len: int) -> str:
 def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dict:
     if not isinstance(obj, dict):
         raise ValueError("输出不是 JSON 对象")
+    is_ig = profile.name.startswith("ig_")
     title = str(obj.get("title", "")).strip().strip('"""')
     if not title:
         raise ValueError("title 为空")
 
-    title = _strip_legacy_prefix(title)
-    if not title:
-        raise ValueError("title 为空")
+    if not is_ig:
+        # 中文平台的专栏前缀清洗（【有点视频】等历史遗留）对英文无意义
+        title = _strip_legacy_prefix(title)
+        if not title:
+            raise ValueError("title 为空")
     title = _fit_title_natural(title, profile.max_title_len)
 
     description = str(obj.get("description", "")).strip()[:400]
@@ -329,14 +474,23 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     tags_raw = obj.get("tags") or []
     if not isinstance(tags_raw, list):
         tags_raw = []
-    tags = [str(t).lstrip("#").strip()[:10] for t in tags_raw if str(t).strip()]
+    is_ig = profile.name.startswith("ig_")
+    if is_ig:
+        # 英文标签：不截断到 10 字符（会切坏 longtail），去空格保留下划线/连写
+        tags = []
+        for t in tags_raw:
+            tag = re.sub(r"\s+", "", str(t).lstrip("#").strip().lower())
+            tag = re.sub(r"[^a-z0-9_]", "", tag)
+            if tag and tag not in tags:
+                tags.append(tag)
+    else:
+        tags = [str(t).lstrip("#").strip()[:10] for t in tags_raw if str(t).strip()]
 
     # 基础 IP 标签保障（tag_base 为空 = 该平台不锚基础话题，
     # 如 kuaishou2 女性生活号：教程类有人声，不挂「无声视频」）
     if profile.tag_base and profile.tag_base not in tags:
         tags.insert(0, profile.tag_base)
     tags = [t for t in tags if t]
-
     # 话题策略（2026-10-23 改）：锚 1 个 + AI 内容话题 + 固定池补齐。
     # 此前固定组合（无声视频+搞笑日常+沙雕视频+搞笑动画）每条完全一样：
     # 话题没有方差 → 回流的播放数据永远无法归因到话题上。
@@ -345,7 +499,8 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     tags = merge_tags(tags, profile.max_tags, title=title,
                       base_tag=profile.tag_base,
                       content_slots=profile.tag_content_slots,
-                      fixed_pool=profile.tag_fixed_pool or None)
+                      fixed_pool=profile.tag_fixed_pool or None,
+                      latin=is_ig)
 
     category = str(obj.get("category", "")).strip()
     if profile.supports_category and categories:
@@ -382,10 +537,68 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     }
 
 
+def _merge_tags_latin(model_tags: list[str], max_tags: int, content_slots: int,
+                      fixed_pool: tuple[str, ...] | list[str],
+                      base_tag: str = "") -> list[str]:
+    """英文标签组合：AI 内容词优先，子串去重，固定池补齐到 max_tags。
+
+    去重规则：某标签若是已选标签的子串（或反之），视为同一流量池。
+    命中时保留**更泛的那个**：animation 与 3danimation 同池，
+    但 animation 覆盖面更广、更容易进大池，所以用它替换掉 3danimation。
+    """
+    def norm(t: str) -> str:
+        return re.sub(r"[^a-z0-9_]", "", str(t or "").lstrip("#").strip().lower())
+
+    def absorb(cand: str, chosen: list[str]) -> bool:
+        """把 cand 合并进 chosen。返回 True 表示 cand 已被吸收（不新增）。"""
+        for i, c in enumerate(chosen):
+            if cand == c:
+                return True
+            if len(cand) >= 4 and len(c) >= 4 and (cand in c or c in cand):
+                # 同池：留下更短（更泛）的那个
+                if len(cand) < len(c):
+                    chosen[i] = cand
+                return True
+        return False
+
+    picked: list[str] = []
+    base = norm(base_tag)
+    if base:
+        picked.append(base)
+
+    for t in model_tags or []:
+        n = norm(t)
+        if not n:
+            continue
+        if absorb(n, picked):
+            continue
+        picked.append(n)
+        if len(picked) >= max(1, content_slots) + (1 if base else 0):
+            break
+
+    pool = [norm(f) for f in fixed_pool if norm(f)]
+    for f in pool:
+        if len(picked) >= max_tags:
+            break
+        if absorb(f, picked):
+            continue
+        picked.append(f)
+
+    # 兜底：数量不足时直接补池里的词（宁可略重复也不少于 max_tags）
+    for f in pool:
+        if len(picked) >= max_tags:
+            break
+        if f not in picked:
+            picked.append(f)
+
+    return picked[:max_tags]
+
+
 def merge_tags(model_tags: list[str], max_tags: int, title: str = "",
                base_tag: str = "无声视频",
                content_slots: int = 2,
-               fixed_pool: tuple[str, ...] | list[str] | None = None) -> list[str]:
+               fixed_pool: tuple[str, ...] | list[str] | None = None,
+               latin: bool = False) -> list[str]:
     """话题组合：锚 1 个 + AI 内容话题 + 固定池补齐。
 
     base_tag 非空时始终在第 1 位（账号辨识度）；为空则不锚，
@@ -393,7 +606,16 @@ def merge_tags(model_tags: list[str], max_tags: int, title: str = "",
     AI 给的内容话题按家族去重后最多占 content_slots 席——既保留
     验证过的基础池，又让每条视频有内容相关的话题方差，
     播放回流后才能比较出哪个话题真的带流量。
+
+    latin=True 时（Instagram 英文标签）改用英文去重规则：
+    中文 tag_family 的词根（「动画」「3d」等）对英文无效，而且
+    `3danimation` 里含 `3d` 会被误判进「动画」家族、把同一条的
+    `animation` 误删——所以英文按「标签是否为另一标签的子串」去重。
     """
+    if latin:
+        return _merge_tags_latin(model_tags, max_tags, content_slots,
+                                 fixed_pool or (), base_tag)
+
     from .tag_quality import tag_family
     pool = list(fixed_pool) if fixed_pool else [
         "搞笑日常", "沙雕视频", "搞笑动画", "笑到肚子疼",
@@ -549,6 +771,15 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     def _content_block() -> str:
         if not (content and content.get("summary")):
             return ""
+        if profile.name.startswith("ig_"):
+            return (
+                f"【ACTUAL VISUAL CONTENT (vision model, frame by frame — ground truth)】\n"
+                f"Subject: {content.get('subject') or 'unknown'}\n"
+                f"Action: {content.get('action') or 'unknown'}\n"
+                f"Setting: {content.get('setting') or 'unknown'}\n"
+                f"Beats: {content.get('beats') or 'unknown'}\n"
+                f"Key moment: {content.get('summary')}\n\n"
+            )
         return (
             f"【画面实际内容（视觉模型逐帧看片所得，以此为准）】\n"
             f"主角：{content.get('subject') or '未知'}\n"
@@ -574,6 +805,19 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     cap_full = caption.strip() or "（无外文简介）"
 
     def _build_user(with_content: bool, cap: str) -> str:
+        is_ig = profile.name.startswith("ig_")
+        if is_ig:
+            uc = (
+                (_content_block() if with_content else "")
+                + "【SOURCE CAPTION (story beats only; ignore promo talk & hashtags)】\n"
+                + f"{cap}\n\n"
+                + "【TRANSCRIPT】\n"
+                + (raw or "(no dialogue / no speech — pure visual storytelling)") + "\n\n"
+            )
+            uc += (f"【PLATFORM】\n{profile.display_name} Reels "
+                   f"(no category field — output empty string)\n")
+            return uc
+
         uc = (
             (_content_block() if with_content else "")
             + f"【视频来源文案（仅取剧情线索，忽略引流话术与话题标签）】\n"
@@ -653,37 +897,44 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
             content = resp.choices[0].message.content or ""
             result = _validate(_extract_json(content), categories, profile)
 
-            banned = _check_hallucination(result["title"], result["description"])
-            if banned:
-                # 幻觉（编造做饭/带娃等画面外剧情）绝不能兜底复用，
-                # 那是比套话严重一个量级的问题：文案与画面完全不符。
-                last_err = "；".join(banned)
-                log.warning("[%s] 文案命中禁用词（第 %d 次）：%s", profile.name, attempt, last_err)
-                messages.append({"role": "user", "content": f"上次生成违规：{last_err}。请绝对不要出现任何做饭、带娃或俗套套话，只针对原文案角色与事件重新输出。"})
-                continue
+            # 中文专用校验（幻觉词/套话/首评模板）：英文文案里这些中文字串
+            # 永远不可能命中，跑一遍纯属浪费，还会因「12 到 24 字」这类
+            # 中文重写指令把英文文案带歪。
+            is_ig = profile.name.startswith("ig_")
+            if not is_ig:
+                banned = _check_hallucination(result["title"], result["description"])
+                if banned:
+                    # 幻觉（编造做饭/带娃等画面外剧情）绝不能兜底复用，
+                    # 那是比套话严重一个量级的问题：文案与画面完全不符。
+                    last_err = "；".join(banned)
+                    log.warning("[%s] 文案命中禁用词（第 %d 次）：%s", profile.name, attempt, last_err)
+                    messages.append({"role": "user", "content": f"上次生成违规：{last_err}。请绝对不要出现任何做饭、带娃或俗套套话，只针对原文案角色与事件重新输出。"})
+                    continue
 
-            cliche = _check_cliche(result["title"])
-            if cliche:
-                last_err = "、".join(cliche)
-                # 命中套话的版本只作最末兜底（比抛异常强），不能覆盖已收录的
-                # 「未命中套话」版本 —— 否则后面的更差版本会把好的顶掉。
-                if last_result is None:
-                    last_cliche_result = result
-                log.warning("[%s] 标题命中套话（第 %d 次）：%s | %r",
-                            profile.name, attempt, last_err, result["title"])
-                messages.append({"role": "user", "content": (
-                    f"上次标题用了这些被用烂的词：{last_err}。"
-                    f"重写一句：诙谐、好懂、12 到 24 字，用反差或误会当钩子，"
-                    f"不要平铺剧情，也不要加「没声音 / 太绝了 / 笑到停不下来」这种垫句。"
-                    f"上次标题：{result['title']}"
-                )})
-                continue
+                cliche = _check_cliche(result["title"])
+                if cliche:
+                    last_err = "、".join(cliche)
+                    # 命中套话的版本只作最末兜底（比抛异常强），不能覆盖已收录的
+                    # 「未命中套话」版本 —— 否则后面的更差版本会把好的顶掉。
+                    if last_result is None:
+                        last_cliche_result = result
+                    log.warning("[%s] 标题命中套话（第 %d 次）：%s | %r",
+                                profile.name, attempt, last_err, result["title"])
+                    messages.append({"role": "user", "content": (
+                        f"上次标题用了这些被用烂的词：{last_err}。"
+                        f"重写一句：诙谐、好懂、12 到 24 字，用反差或误会当钩子，"
+                        f"不要平铺剧情，也不要加「没声音 / 太绝了 / 笑到停不下来」这种垫句。"
+                        f"上次标题：{result['title']}"
+                    )})
+                    continue
             # 只有「未命中套话」的版本才进入首选兜底
             last_result = result
 
             # 首评质量：拦截「…吗？」这类提问式模板收尾（实测占 60%）。
             # 只重写首评，不推翻已合格的标题/标签，避免整条重来时标题又变差。
-            bad_comment = _check_first_comment(result.get("first_comment") or "")
+            # Instagram 没有首评概念（Meta API 不支持作者置顶首评），跳过。
+            bad_comment = ([] if is_ig
+                           else _check_first_comment(result.get("first_comment") or ""))
             if bad_comment:
                 log.warning("[%s] 首评命中提问式模板（第 %d 次）：%s | %r",
                             profile.name, attempt, "、".join(bad_comment),

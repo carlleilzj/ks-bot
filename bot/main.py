@@ -43,6 +43,9 @@ from .notify import telegram
 from .publish import all_publishers, default_publishers, enabled_publishers, get_publisher
 from .publish.base import LoginExpired
 from .source import downloader
+
+# IG 媒体托管端口（nginx 把 /ig-media/ 反代到这里）
+MEDIA_PORT = 8766
 from .source.telegram_listener import TelegramListener
 
 log = logging.getLogger("bot")
@@ -675,6 +678,75 @@ def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "
 
 # ---------- 子命令 ----------
 
+def cmd_ig_check(s: Settings) -> None:
+    """检查 Instagram 矩阵号配置：凭据 / 发布配额 / 媒体公网链路。
+
+    设计成「只读 + 不发视频」：这条命令的目的是一眼看出
+    「token 过期了」「user id 填错了」「媒体 URL 打不通」这类配置问题，
+    而不是踩雷才发现。
+    """
+    from .publish import instagram as ig
+    from .publish.media_upload import _MEDIA_PREFIX, public_base_url
+
+    print("=" * 60)
+    print(" Instagram 矩阵号配置自检")
+    print("=" * 60)
+
+    ig_platforms = [name for name in s.platforms if name.startswith("ig_")]
+    if not ig_platforms:
+        print("⚠️  config.yaml 里没有 ig_* 平台配置")
+        return
+
+    base = public_base_url()
+    print(f"\n媒体基地址 IG_MEDIA_BASE_URL = {base or '（未配置 ✗）'}")
+    if not base:
+        print("   ✗ 未配置：Meta 需要公网可访问的 video_url，发布会直接失败")
+    else:
+        print(f"   期望 nginx 把 {_MEDIA_PREFIX} 反代到本机媒体服务（默认 127.0.0.1:{MEDIA_PORT}）")
+
+    ok_count = 0
+    for name in sorted(ig_platforms):
+        cfg = s.platforms[name]
+        acct = ig.load_account(name)
+        status = "启用" if cfg.enabled else "未启用"
+        print(f"\n--- {name}（{status}） ---")
+
+        if acct is None:
+            env_key = name.upper()
+            print(f"   ✗ 未配置凭据：请在 .env 填 IG_TOKEN_{env_key} / IG_USERID_{env_key}")
+            continue
+
+        print(f"   ig_user_id = {acct.ig_user_id}")
+        print(f"   token      = {acct.masked_token}")
+
+        # 只调一个轻量只读接口验证 token 真的有效
+        try:
+            data = ig._request("GET", acct.ig_user_id, acct,
+                              params={"fields": "username,account_type"})
+            username = data.get("username") or "(未知)"
+            account_type = data.get("account_type") or "(未知)"
+            print(f"   ✓ 凭据有效：@{username}（{account_type}）")
+            if "BUSINESS" not in str(account_type).upper() and \
+                    "MEDIA_CREATOR" not in str(account_type).upper() and \
+                    "CREATOR" not in str(account_type).upper():
+                print("   ⚠️  账号类型可能不是专业号：Reels API 只支持 Business/Creator")
+            ok_count += 1
+        except Exception as e:
+            print(f"   ✗ 凭据校验失败：{str(e)[:200]}")
+            continue
+
+        used = ig.check_publishing_quota(acct)
+        if used is not None:
+            print(f"   24h 发布配额已用：{used}/100")
+
+        if not cfg.enabled:
+            print("   （该账号 enabled=false，暂时不会自动发布）")
+
+    print("\n" + "=" * 60)
+    print(f"可用账号：{ok_count}/{len(ig_platforms)}")
+    print("=" * 60)
+
+
 def cmd_setup(s: Settings) -> None:
     """交互式初始化向导：长效 token 交换 + 发现 IG_USER_ID + TG chat_id。"""
     print("=" * 56)
@@ -815,6 +887,8 @@ def main() -> None:
                         help="自动嗅探拉取作品评论并进行 AI 互动回复（默认 dry-run 校验，配合 --execute 真实发送）")
     parser.add_argument("--execute", action="store_true",
                         help="与 --reply-comments 配合：执行真实回复（未指定则为安全 dry-run）")
+    parser.add_argument("--ig-check", action="store_true",
+                        help="检查 Instagram 矩阵号配置：凭据有效性、发布配额、媒体公网链路（不发视频）")
     parser.add_argument("--max-replies", type=int, default=3, metavar="N",
                         help="--reply-comments 单轮最大回复条数（默认 3，硬上限 10）")
     parser.add_argument("--retry-failed", action="store_true", help="重置失败任务并续跑")
@@ -888,6 +962,10 @@ def main() -> None:
                         browser.close()
                     except Exception:
                         pass
+        sys.exit(0)
+
+    if args.ig_check:
+        cmd_ig_check(s)
         sys.exit(0)
 
     if args.stats_report:
@@ -1007,6 +1085,13 @@ def main() -> None:
             api_thread = start_api_thread(s, db, gate_fn=lambda p: publish_gate(s, db, p))
             log.info("Remote API 已启动（%s:%d，家庭端发布 worker 接入点）",
                      s.remote_api_bind, s.remote_api_port)
+            # IG 媒体托管：Meta 的 Reels API 只接受公网可访问的 video_url，
+            # 由协调端出签名直链（nginx 反代 /ig-media/ 到本端口）。
+            try:
+                from .publish.media_upload import start_media_server
+                start_media_server(s.remote_api_bind, MEDIA_PORT)
+            except Exception as e:
+                log.warning("IG 媒体服务未启动（不影响国内平台）：%s", e)
         else:
             log.warning("REMOTE_API_TOKEN/REMOTE_API_BIND 未配置，Remote API 未启动")
 

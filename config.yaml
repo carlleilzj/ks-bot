@@ -131,6 +131,35 @@ platforms:
     anchors:
       声明: "AI生成"  # 素材是 AI 动画；页面文案就是「AI生成」
 
+  # ============================================================
+  # Instagram 矩阵号（出海线）：走 Meta 官方 Graph API，不用 Playwright。
+  # 与国内平台的关键差异：
+  #   1. 没有独立标题字段，caption 第一行就是钩子（见 ai/copywriter 的 ig_* profile）；
+  #   2. 视频必须公网可访问（Meta 自己来拉），由协调端的 /api/media-url 出签名直链；
+  #   3. 凭据在 .env：IG_TOKEN_<KEY> / IG_USERID_<KEY>，没有扫码登录态文件。
+  # 默认 default: false —— 只有链接里显式 @ig_pets 这类才发，绝不占用国内默认队列。
+  # ============================================================
+  ig_pets:
+    enabled: false          # 配好 .env 凭据后改 true
+    default: false
+    share_to_feed: true
+    is_ai_generated: false  # 萌宠素材多为实拍/拟真动画，不声明 AI
+  ig_satisfying:
+    enabled: false
+    default: false
+    share_to_feed: true
+    is_ai_generated: false
+  ig_anim:
+    enabled: false
+    default: false
+    share_to_feed: true
+    is_ai_generated: true   # 3D/AI 动画，Meta 要求自我披露
+  ig_home:
+    enabled: false
+    default: false
+    share_to_feed: true
+    is_ai_generated: false
+
 # 各平台可选分区列表（发布页有分区选择的平台才需要；抖音/小红书无分区，用话题标签）
 # LLM 会从中选择一个；列表与实际不符时自动降级为不选分类
 platform_categories:

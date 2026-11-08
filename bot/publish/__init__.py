@@ -35,7 +35,7 @@ def state_path_for(name: str) -> Path:
 
 
 def _build_specs() -> dict[str, PublisherSpec]:
-    from . import douyin, kuaishou, toutiao, weixin, xhs
+    from . import douyin, instagram, kuaishou, toutiao, weixin, xhs
 
     specs = [
         PublisherSpec(
@@ -70,6 +70,19 @@ def _build_specs() -> dict[str, PublisherSpec]:
             login=toutiao.login_interactive, publish=toutiao.publish,
         ),
     ]
+    # Instagram 矩阵号：同一套 Meta API 实现，凭据按 platform name 从 .env 读取。
+    # 走官方 API，无登录态文件（state_path 仅占位保持接口一致）。
+    for ig_name, ig_display in (
+        ("ig_pets", "IG·萌宠"),
+        ("ig_satisfying", "IG·解压"),
+        ("ig_anim", "IG·动画"),
+        ("ig_home", "IG·家居"),
+    ):
+        specs.append(PublisherSpec(
+            name=ig_name, display_name=ig_display,
+            state_path=state_path_for(ig_name), supports_category=False,
+            login=instagram.login_interactive, publish=instagram.publish,
+        ))
     return {sp.name: sp for sp in specs}
 
 

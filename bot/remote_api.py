@@ -13,6 +13,7 @@
   POST /api/report             {task_id, platform, ok, url?, error?, login_expired?} 回报结果
   GET  /api/missing-urls       已发布但链接为空的 job 清单（发布端补链接用）
   POST /api/report-url         {task_id, platform, url} 补录作品公开链接
+  POST /api/media-url          {task_id} 生成公网可访问的成品视频 URL（IG 发布用）
   GET  /api/published          近期已发布作品清单（审核巡检测匹配用）
   POST /api/audit              {task_id, note, deleted} 审核违规处理回报
   GET  /api/health             健康检查（token 可选，用于 worker 心跳）
@@ -352,9 +353,33 @@ class RemoteApi:
                 pass
         return {"ok": True, "updated": updated}
 
+    def media_url_payload(self, data: dict) -> dict:
+        """为 Instagram 发布生成公网可访问的媒体 URL。
+
+        背景：Meta 的 Reels API 不接受文件上传，只接受 video_url，由 Meta 服务器
+        主动 cURL 拉取。成品视频在协调端，发布端（阿里云）拿不到，因此由协调端
+        生成带签名、限时有效的公网地址交给发布端透传。
+        """
+        from .publish.media_upload import build_public_url
+
+        task_id = int(data.get("task_id") or 0)
+        if not task_id:
+            return {"ok": False, "error": "task_id 必填"}
+        task = self.db.get(task_id)
+        if not task:
+            return {"ok": False, "error": f"任务 {task_id} 不存在"}
+        final_path = task.get("final_path") or ""
+        if not final_path or not Path(final_path).exists():
+            return {"ok": False, "error": f"任务 {task_id} 无成品文件"}
+        try:
+            url = build_public_url(Path(final_path))
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:250]}
+        log.info("[%s] 已生成 IG 媒体公网地址", task.get("shortcode"))
+        return {"ok": True, "url": url}
+
     def claim(self, task_id: int, platform: str, force: bool = False) -> dict:
         """原子认领：UPDATE ... WHERE state='PENDING' 抢占，防两端并发重复发布。
-
         认领前复检 gate（窗口/限额/间隔），防止 worker 批量取走同平台多条 job 后
         在冷却窗内连续发布——gate 只在 pending_payload 快照时算过一次，
         取走到实际发布之间可能已有同平台新发布落地。
@@ -749,6 +774,13 @@ class RemoteApi:
                     # 发布端事后补录作品公开链接（发布时未抓到链接的兜底）
                     try:
                         self._send_json(200, api.report_url(data))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
+                if parsed.path == "/api/media-url":
+                    # Instagram 发布用：协调端生成公网可访问的成品视频 URL
+                    try:
+                        self._send_json(200, api.media_url_payload(data))
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return

@@ -464,6 +464,11 @@ _PUBLISH_PLATFORM_ALIASES = {
     "视频号": "weixin", "weixin": "weixin", "wx": "weixin", "微信视频号": "weixin",
     "今日头条": "toutiao", "头条": "toutiao", "头条号": "toutiao",
     "toutiao": "toutiao", "tt": "toutiao",
+    # Instagram 矩阵号（出海线）
+    "ig": "ig_pets", "ig萌宠": "ig_pets", "ig宠物": "ig_pets", "ig_pets": "ig_pets",
+    "ig解压": "ig_satisfying", "ig治愈": "ig_satisfying", "ig_satisfying": "ig_satisfying",
+    "ig动画": "ig_anim", "ig_anim": "ig_anim",
+    "ig家居": "ig_home", "ig好物": "ig_home", "ig_home": "ig_home",
 }
 
 # canonical key → 中文名（TG 回复用）
@@ -474,6 +479,10 @@ _PUBLISH_PLATFORM_CN = {
     "xhs": "小红书",
     "weixin": "微信视频号",
     "toutiao": "今日头条",
+    "ig_pets": "IG·萌宠",
+    "ig_satisfying": "IG·解压",
+    "ig_anim": "IG·动画",
+    "ig_home": "IG·家居",
 }
 
 

@@ -245,6 +245,17 @@ def report_url(base: str, s: Settings, task_id: int, platform: str, url: str) ->
         _check(r, f"补录链接 {task_id}/{platform}")
 
 
+def fetch_media_url(base: str, s: Settings, task_id: int) -> str:
+    """为 Instagram 发布向协调端要一个公网可访问的成品视频 URL。"""
+    with httpx.Client(timeout=60) as c:
+        r = c.post(f"{base}/api/media-url", headers=_headers(s),
+                   json={"task_id": task_id})
+        data = _check(r, f"获取媒体 URL {task_id}")
+    if not data.get("ok") or not data.get("url"):
+        raise WorkerError(f"协调端未返回媒体 URL：{data.get('error') or data}")
+    return str(data["url"])
+
+
 def push_stats(base: str, s: Settings, platform: str, rows: list[dict]) -> dict | None:
     """把抓到的播放量回传协调端落库（失败静默，返回 None）。"""
     try:
@@ -409,16 +420,27 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
                      task.get("shortcode"), platform)
             return
         pub = get_publisher(platform)
-        if not pub.state_path.exists():
+        # Instagram 走 Meta 官方 API，没有浏览器登录态文件；凭据在 .env 里，
+        # 由 publish() 内部校验并抛 LoginExpired，这里不能按快手的方式判存在性。
+        is_ig = platform.startswith("ig_")
+        if not is_ig and not pub.state_path.exists():
             report(base, s, task_id, platform, ok=False,
                    error="登录态文件不存在", login_expired=True)
             return
 
         dest_dir = REMOTE_DIR / str(task_id)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        video = download_file(base, s, payload["final_file"], dest_dir)
+        # Instagram 走 Meta API：视频必须由 Meta 服务器从公网拉取。
+        # 成品在协调端，与其把几百 MB 下载到阿里云再传出去，
+        # 不如让协调端直接给一个限时签名 URL（见 remote_api.media_url_payload）。
+        ig_media_url = ""
+        if is_ig:
+            ig_media_url = fetch_media_url(base, s, task_id)
+            video = Path(payload["final_file"]["name"])   # 仅用于日志展示，不做本地读写
+        else:
+            video = download_file(base, s, payload["final_file"], dest_dir)
         cover = None
-        if payload.get("cover_file"):
+        if payload.get("cover_file") and not is_ig:
             try:
                 cover = download_file(base, s, payload["cover_file"], dest_dir)
             except WorkerError as e:
@@ -471,6 +493,14 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
             decl = (plat_cfg.anchors.get("声明") if plat_cfg and plat_cfg.anchors else "") or ""
             if decl:
                 extra["declaration"] = decl
+        elif is_ig:
+            # Instagram Reels：凭据按平台名从 .env 读（IG_TOKEN_<KEY>/IG_USERID_<KEY>）
+            extra["account_key"] = platform
+            extra["media_url"] = ig_media_url
+            if plat_cfg and getattr(plat_cfg, "share_to_feed", True) is False:
+                extra["share_to_feed"] = False
+            if plat_cfg and getattr(plat_cfg, "is_ai_generated", False):
+                extra["is_ai_generated"] = True
         log.info("[%s] %s 开始发布：%s", task["shortcode"], pub.display_name, copy["title"][:40])
         try:
             url = pub.publish(
