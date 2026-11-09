@@ -295,6 +295,14 @@ def run_discovery(s, db, force: bool = False) -> dict:
                 skipped += 1
                 log.debug("[%s] 元数据阶段丢弃 %s：%s", name, c.url, why)
                 continue
+            # 有 require_any 的 lane 必须能证明题材对口。
+            # 若搜索标题和真实 caption 都是空的（实测有这种视频：caption 只有
+            # 外链或被平台清空），说明拿不到任何题材证据 —— 宁可不要，
+            # 也不要把「不知道是什么」的内容发出去。B 号漂移就是这样开始的。
+            if lane.require_any and not check.matched_keywords:
+                skipped += 1
+                log.debug("[%s] 无题材证据（caption 为空）丢弃 %s", name, c.url)
+                continue
             try:
                 tid = db.insert_video(meta, target_platforms=[name],
                                       source_tag=f"auto:{c.source}")

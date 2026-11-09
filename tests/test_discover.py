@@ -398,6 +398,23 @@ class TestRunDiscovery:
         assert out["kuaishou2"]["new"] == 0
         assert db.inserted == []
 
+    def test_rejects_candidate_without_genre_evidence(self, monkeypatch):
+        """搜索标题和真实 caption 都拿不到题材证据时丢弃。
+
+        实测确有这种视频（caption 为空或只有外链）。B 号有 require_any 闸门，
+        不能因为「不知道是什么」就放行 —— 那正是漂移的起点。
+        """
+        monkeypatch.setattr(dc, "_last_run", {})
+        monkeypatch.setitem(dc.SOURCES, "youtube",
+                            lambda q, n: [dc.Candidate(url="u1", title="",
+                                                       source="youtube")])
+        monkeypatch.setattr("bot.source.downloader.extract_meta",
+                            lambda url: _meta(url, caption=""))
+        db = _FakeDB()
+        out = dc.run_discovery(self._settings(), db, force=True)
+        assert out["kuaishou2"]["new"] == 0
+        assert db.inserted == []
+
     def test_one_bad_candidate_does_not_stop_batch(self, monkeypatch):
         monkeypatch.setattr(dc, "_last_run", {})
         monkeypatch.setitem(dc.SOURCES, "youtube",
