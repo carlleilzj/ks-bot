@@ -177,13 +177,17 @@ class TestGate:
 
 
 class TestPersistence:
-    def test_roundtrip(self, tmp_path, monkeypatch):
-        """状态必须能落库再读回，否则重启就绕过冷却。"""
+    def test_roundtrip(self, tmp_path):
+        """状态必须能落库再读回，否则重启就绕过冷却。
+
+        注意：这里显式传 path，不靠 monkeypatch DB_PATH ——
+        Database 的默认参数在定义时就绑定，patch 模块变量对它无效，
+        会静默写进真实生产库。
+        """
         from bot import db as db_mod
         from bot.risk import RiskState
 
-        monkeypatch.setattr(db_mod, "DB_PATH", tmp_path / "t.db")
-        d = db_mod.Database()
+        d = db_mod.Database(tmp_path / "t.db")
         st = RiskState(platform="kuaishou", risk_level=3,
                        cooldown_until="2026-11-09T20:00:00",
                        last_risk_reason="操作过于频繁")
@@ -195,20 +199,18 @@ class TestPersistence:
         assert loaded.cooldown_until == "2026-11-09T20:00:00"
         assert loaded.last_risk_reason == "操作过于频繁"
 
-    def test_upsert_updates_existing(self, tmp_path, monkeypatch):
+    def test_upsert_updates_existing(self, tmp_path):
         from bot import db as db_mod
         from bot.risk import RiskState
 
-        monkeypatch.setattr(db_mod, "DB_PATH", tmp_path / "t.db")
-        d = db_mod.Database()
+        d = db_mod.Database(tmp_path / "t.db")
         d.save_risk_state(RiskState(platform="kuaishou", risk_level=1))
         d.save_risk_state(RiskState(platform="kuaishou", risk_level=3))
         assert d.get_risk_state("kuaishou").risk_level == 3
 
-    def test_missing_returns_none(self, tmp_path, monkeypatch):
+    def test_missing_returns_none(self, tmp_path):
         from bot import db as db_mod
-        monkeypatch.setattr(db_mod, "DB_PATH", tmp_path / "t.db")
-        d = db_mod.Database()
+        d = db_mod.Database(tmp_path / "t.db")
         assert d.get_risk_state("nothing") is None
 
 

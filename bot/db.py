@@ -106,8 +106,13 @@ def now_iso() -> str:
 
 
 class Database:
-    def __init__(self, path: Path = DB_PATH):
-        self.path = Path(path)
+    def __init__(self, path: Path | None = None):
+        # 注意：默认值必须写 None 再在函数体内取 DB_PATH。
+        # 如果写成 `def __init__(self, path: Path = DB_PATH)`，DB_PATH 会在
+        # **函数定义时**就绑定，之后 monkeypatch.setattr(db_mod, "DB_PATH", ...)
+        # 完全无效 —— 测试会静默写进真实生产库（2026-11-09 实际踩过：
+        # test_risk 的两条用例把 risk_level=3 写进了线上 data/bot.db）。
+        self.path = Path(path if path is not None else DB_PATH)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         import threading
         self._lock = threading.Lock()
