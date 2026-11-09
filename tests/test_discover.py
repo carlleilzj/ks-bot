@@ -287,8 +287,26 @@ class TestLaneFromConfig:
     def test_sources_filters_unknown(self):
         assert dc.sources_from_config({"sources": ["youtube", "myspace"]}) == ["youtube"]
 
-    def test_sources_all_unknown_falls_back(self):
-        assert dc.sources_from_config({"sources": ["nope"]}) == ["youtube"]
+    def test_sources_empty_list_means_disabled(self):
+        """显式 `sources: []` = 停用关键词搜索，绝不能回退成 youtube。
+
+        2026-11-09 踩过：用户要停 YouTube，代码把空列表当「没配置」
+        自动补回 youtube，配置改了却不生效。
+        """
+        assert dc.sources_from_config({"sources": []}) == []
+
+    def test_sources_all_unknown_returns_empty(self):
+        """全是无效来源时返回空，而不是悄悄启用 youtube。"""
+        assert dc.sources_from_config({"sources": ["nope"]}) == []
+
+    def test_run_lane_empty_sources_skips_search(self, monkeypatch):
+        """run_lane(sources=[]) 不应该去搜 —— 白名单-only 模式。"""
+        called = []
+        monkeypatch.setitem(dc.SOURCES, "youtube",
+                            lambda q, n: called.append(q) or [])
+        lane = dc.LaneConfig(name="t", queries=["q"], per_run=3)
+        assert dc.run_lane(lane, sources=[]) == []
+        assert called == [], "空 sources 时不得调用任何来源"
 
 
 class TestConfigYamlQueries:

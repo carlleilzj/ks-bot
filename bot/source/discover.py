@@ -359,12 +359,21 @@ def lane_from_config(name: str, conf: dict) -> LaneConfig:
 
 
 def sources_from_config(conf: dict) -> list[str]:
-    """配置里的 sources 列表，过滤掉不认识的来源。"""
+    """配置里的 sources 列表，过滤掉不认识的来源。
+
+    注意：显式写空列表 `sources: []` 表示「不要关键词搜索」，
+    必须原样返回空 —— 不能回退成默认的 youtube。
+    2026-11-09 踩过：用户要停 YouTube，但代码把空列表当成「没配置」
+    自动补回 youtube，配置改了却不生效。
+    只有**完全没写这个字段**（None）才用默认值。
+    """
     raw = conf.get("sources")
+    if raw is None:
+        return ["youtube"]
     if not isinstance(raw, (list, tuple)):
         return ["youtube"]
     picked = [str(x).strip() for x in raw if str(x).strip()]
-    return [s for s in picked if s in SOURCES] or ["youtube"]
+    return [s for s in picked if s in SOURCES]
 
 
 # ---------------------------------------------------------------------------
@@ -518,8 +527,13 @@ def _discovery_due(s) -> bool:
 
 def run_lane(lane: LaneConfig, sources: list[str] | None = None,
              per_query: int = 8) -> list[Candidate]:
-    """按 lane 配置跑一轮发现，返回通过题材过滤的去重候选。"""
-    sources = sources or ["youtube"]
+    """按 lane 配置跑一轮发现，返回通过题材过滤的去重候选。
+
+    sources 显式传空列表 = 不跑关键词搜索（只走白名单）。
+    只有 None 才回退到默认 youtube —— 同 sources_from_config 的理由。
+    """
+    if sources is None:
+        sources = ["youtube"]
     seen_urls: set[str] = set()
     picked: list[Candidate] = []
 
