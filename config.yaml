@@ -72,6 +72,22 @@ publish:
 platforms:
   kuaishou:
     enabled: true
+    # 自动素材发现（2026-11-09）：替代人工投链。
+    # 只发现「链接」，候选仍走原有流水线（去重 → 下载 → 转码 → 文案 → 发布），
+    # 不另造一套下载逻辑。
+    discover:
+      enabled: true
+      interval_hours: 6
+      per_query: 8
+      per_run: 8
+      sources: [youtube]        # IG 发现需 sessionid，当前无（见 bot/source/discover.py）
+      queries:
+        - funny animal animation short
+        - cute pet fail compilation short
+        - ai animated short film funny
+      # A 号是搞笑/萌宠号，不限题材，只排除明显不符的
+      require_any: []
+      block_any: [makeup tutorial, cooking recipe, news report]
     # 2026-11-02 星火下架（收益过低），改挂「作者服务」推广：
     #   主营业务 = 关联推广任务（星任务/短剧 CPS），发布页实时选任务，无需 App 收藏；
     #   池空/失败时兜底挂关联商品（日用百货 CPS，佣金低但稳定）；
@@ -97,6 +113,61 @@ platforms:
   kuaishou2:
     enabled: true
     default: false              # 只有显式 @快手2 才发，绝不占默认队列
+    # 自动素材发现：B 号是家居号，**必须做题材过滤**。
+    # 2026-11-09 真实数据：10-24~11-02 床品占 71%，11-03 之后掉到 45%，
+    # 修眉/女鞋/电竞房混进来 27%。人工挑会漂，这里用关键词挡在入库之前。
+    discover:
+      enabled: true
+      interval_hours: 6
+      per_query: 8
+      per_run: 6
+      sources: [youtube]
+      queries:
+        - cozy bedroom decor
+        - fluffy bedding duvet
+        - bedroom makeover small room
+        - home bedding aesthetic
+        - 四件套 床品 卧室
+      # 标题/描述必须命中其一 —— 这是 B 号的题材闸门
+      require_any:
+        - bed
+        - bedding
+        - duvet
+        - blanket
+        - pillow
+        - sheet
+        - mattress
+        - quilt
+        - comforter
+        - bedroom
+        - sofa
+        - cushion
+        - rug
+        - curtain
+        - pyjama
+        - pajama
+        - 四件套
+        - 床品
+        - 毛绒
+        - 被
+        - 枕
+        - 床单
+        - 卧室
+      # 命中即丢弃，优先级高于 require_any。
+      # 用途：挡住「在卧室里化妆」这类 require 会命中、但题材完全不相关的内容。
+      block_any:
+        - makeup
+        - eyebrow
+        - skincare
+        - gaming room
+        - gaming setup
+        - pc build
+        - minecraft
+        - 修眉
+        - 化妆
+        - 护肤
+        - 电竞
+        - 游戏
     daily_limit: 6              # 与 A 号相同节奏（间隔 2h，全天分散）
     min_gap_hours: 2            # 覆盖全局，与 A 号一致
     # 2026-11-09 起：**取消全部变现挂载**（用户要求）。

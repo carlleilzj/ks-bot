@@ -142,6 +142,9 @@ class PlatformConfig:
     # Instagram 用得上：欧美受众的黄金时段是北京时间凌晨，
     # 沿用国内的 10:00~22:00 等于把内容发在他们的深夜。
     window: tuple[str, str] | None = None
+    # 自动素材发现（2026-11-09）：替代人工投链。
+    # 结构见 config.yaml 的 platforms.<name>.discover；空 dict = 该平台不自动发现。
+    discover: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -391,6 +394,11 @@ def load_settings() -> Settings:
                 is_ai_generated=bool(conf.get("is_ai_generated", False)),
                 daily_limit=_opt_int(conf.get("daily_limit")),
                 min_gap_hours=_opt_float(conf.get("min_gap_hours")),
+                # 自动素材发现配置：原样透传，由 bot.source.discover 解释。
+                # 结构校验放在消费端（那里能看到实际字段含义），
+                # 这里只保证是 dict，避免 YAML 写错类型时下游崩在别处。
+                discover=(conf.get("discover")
+                          if isinstance(conf.get("discover"), dict) else {}),
             )
             # 每平台发布窗口（列表形式 ["HH:MM","HH:MM"]，支持跨夜）
             win_raw = conf.get("window")

@@ -728,6 +728,21 @@ def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "
     for task in db.pending():
         advance_task(s, db, task["id"], dry_run, headed, stage)
 
+    # 3) 自动素材发现（2026-11-09）：替代人工投链。
+    #    只入库，不下载；下载/转码/文案/发布仍走上面的流水线。
+    #    放在流水线推进之后，避免新入库的任务抢在本轮之前没处理完的任务前面。
+    if not dry_run:
+        try:
+            from .source.discover import run_discovery
+            summary = run_discovery(s, db)
+            for name, info in (summary or {}).items():
+                if info.get("new"):
+                    telegram.notify_info(
+                        s, f"🔍 自动发现 [{name}]：新增 {info['new']} 条素材"
+                           f"（候选 {info['found']}，跳过 {info['skipped']}）")
+        except Exception:
+            log.exception("自动发现失败（不影响发布主流程）")
+
 
 # ---------- 子命令 ----------
 
