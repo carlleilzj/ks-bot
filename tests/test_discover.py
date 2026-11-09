@@ -237,6 +237,47 @@ class TestLaneFromConfig:
         assert dc.sources_from_config({"sources": ["nope"]}) == ["youtube"]
 
 
+class TestConfigYamlQueries:
+    """真实 config.yaml 的查询词必须能被完整读出来。
+
+    2026-11-09 踩过：YAML 里写 `- cozy bedroom decor #shorts`，
+    `#` 被当成注释，查询词静默变成 "cozy bedroom decor"，`#shorts`
+    后缀丢失 —— 而正是这个后缀决定能不能搜到短视频。
+    这种错误不报错，只是效果变差，所以必须用测试钉住。
+    """
+
+    def _queries(self, platform):
+        import yaml
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        data = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+        return data["platforms"][platform]["discover"]["queries"]
+
+    def test_shorts_suffix_preserved_for_home_lane(self):
+        qs = self._queries("kuaishou2")
+        with_shorts = [q for q in qs if "#shorts" in q]
+        assert len(with_shorts) >= 3, f"B 号查询词丢了 #shorts：{qs}"
+
+    def test_shorts_suffix_preserved_for_animal_lane(self):
+        qs = self._queries("kuaishou")
+        with_shorts = [q for q in qs if "#shorts" in q]
+        assert len(with_shorts) >= 3, f"A 号查询词丢了 #shorts：{qs}"
+
+    def test_home_lane_has_genre_gate(self):
+        """B 号必须有题材闸门，否则会重新漂移。"""
+        import yaml
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        data = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+        conf = data["platforms"]["kuaishou2"]["discover"]
+        assert conf.get("require_any"), "B 号缺少 require_any 题材闸门"
+        assert conf.get("block_any"), "B 号缺少 block_any 排除词"
+        # 曾经真实混入的内容类型必须在排除名单里
+        blocked = " ".join(conf["block_any"]).lower()
+        for word in ("makeup", "gaming", "修眉", "电竞"):
+            assert word in blocked, f"排除词缺少 {word}"
+
+
 # ---------- 调度器 ----------
 
 class _FakePlat:

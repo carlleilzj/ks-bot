@@ -81,10 +81,12 @@ platforms:
       per_query: 8
       per_run: 8
       sources: [youtube]        # IG 发现需 sessionid，当前无（见 bot/source/discover.py）
+      # 同样必须带 #shorts：不带后缀返回的是长片/纪录片，会被时长闸门丢掉。
       queries:
-        - funny animal animation short
-        - cute pet fail compilation short
-        - ai animated short film funny
+        - "funny animal animation #shorts"
+        - "cute pet fail #shorts"
+        - "ai animated short funny #shorts"
+        - "萌宠 搞笑 动画"
       # A 号是搞笑/萌宠号，不限题材，只排除明显不符的
       require_any: []
       block_any: [makeup tutorial, cooking recipe, news report]
@@ -122,12 +124,17 @@ platforms:
       per_query: 8
       per_run: 6
       sources: [youtube]
+      # 查询词必须带 #shorts 或 short —— 实测不带后缀时 YouTube 返回的多是
+      # 5~25 分钟的教程/测评（2026-11-09 诊断：6 条里 5 条时长 500s+ 被丢），
+      # 带 #shorts 后 8 条里 5 条是 20 秒内的竖屏短视频。
+      # 中文查询反而最准（「四件套 床品 卧室」6 条全过），保留。
       queries:
-        - cozy bedroom decor
-        - fluffy bedding duvet
-        - bedroom makeover small room
-        - home bedding aesthetic
-        - 四件套 床品 卧室
+        - "cozy bedroom decor #shorts"
+        - "fluffy bedding duvet #shorts"
+        - "bedroom makeover #shorts"
+        - "home bedding aesthetic #shorts"
+        - "四件套 床品 卧室"
+        - "床上用品 开箱 展示"
       # 标题/描述必须命中其一 —— 这是 B 号的题材闸门
       require_any:
         - bed
