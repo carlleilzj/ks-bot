@@ -335,13 +335,13 @@ class TestIgSearch:
         from bot.source import ig_discover as igd
         called = []
 
-        def fake_tag(tag, limit=24, cookiefile=None, cookie_dir=None):
-            called.append(("tag", tag))
+        def fake_tag(tag, limit=24, cookiefile=None, cookie_dir=None, pages=1):
+            called.append(("tag", tag, pages))
             return [{"url": f"https://www.instagram.com/p/{tag}1/", "code": f"{tag}1"}]
 
         monkeypatch.setattr(igd, "discover_instagram_tag", fake_tag)
-        out = dc.run_ig_search(["床品"], [], per_run=5)
-        assert called == [("tag", "床品")]
+        out = dc.run_ig_search(["床品"], [], per_run=5, pages=2)
+        assert called == [("tag", "床品", 2)], "pages 必须透传到抓取层"
         assert len(out) == 1
         assert out[0].source == "instagram_tag"
 
@@ -397,6 +397,36 @@ class TestIgConfig:
         assert len(tags) >= 5, f"B 号 IG 标签太少：{tags}"
         assert any(any("\u4e00" <= c <= "\u9fff" for c in t) for t in tags), \
             "至少要有一个中文标签（实测 #床品 可用）"
+
+    def test_home_lane_targets_bedding_and_pyjamas(self):
+        """B 号带货定位：主带四件套 + 女性睡衣（2026-11-09 用户明确）。
+
+        hashtag 和题材闸门都必须围绕这两个品类，
+        不能再收窗帘/沙发/地毯这类非 SKU 内容。
+        """
+        conf = self._conf("kuaishou2")
+        tags = " ".join(conf.get("ig_tags") or []).lower()
+        req = " ".join(conf.get("require_any") or []).lower()
+
+        # 四件套类
+        for w in ("四件套", "床品", "bedding", "duvet"):
+            assert w in tags or w in req, f"缺少床品类关键词 {w}"
+        # 睡衣类
+        for w in ("睡衣", "pajama", "sleepwear"):
+            assert w in tags or w in req, f"缺少睡衣类关键词 {w}"
+
+    def test_home_lane_excludes_non_sku_categories(self):
+        """窗帘/沙发/地毯/靠垫不是要卖的 SKU，必须在闸门之外。
+
+        收进来会稀释账号的带货标签 —— 平台后续给这个号的推荐流量
+        会混进「家居装修」而不是「床品睡衣」。
+        """
+        conf = self._conf("kuaishou2")
+        req = " ".join(conf.get("require_any") or []).lower()
+        tags = " ".join(conf.get("ig_tags") or []).lower()
+        for w in ("curtain", "窗帘", "sofa", "沙发", "rug", "地毯", "cushion", "靠垫"):
+            assert w not in req, f"require_any 不该含非 SKU 词：{w}"
+            assert w not in tags, f"ig_tags 不该含非 SKU 词：{w}"
 
     def test_animal_lane_has_ig_tags(self):
         conf = self._conf("kuaishou")
@@ -492,7 +522,7 @@ class TestConfigYamlQueries:
         assert has_script("\uac00", "\ud7af"), "缺少韩语关键词"
         # 西班牙语用拉丁字母，靠具体词判断
         joined_all = " ".join(req).lower()
-        for w in ("colchon", "sabana", "almohada"):
+        for w in ("sabana", "almohada", "pijama"):
             assert w in joined_all, f"缺少西班牙语关键词 {w}"
         # 抽查几个真会用到的词
         joined = " ".join(req)

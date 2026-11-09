@@ -108,16 +108,24 @@ def discover_instagram_profile(username: str, limit: int = 12,
 
 def discover_instagram_tag(tag: str, limit: int = 24,
                            cookiefile: Path | None = None,
-                           cookie_dir: Path | None = None) -> list[dict]:
+                           cookie_dir: Path | None = None,
+                           pages: int = 1) -> list[dict]:
     """打开 hashtag 页，取该话题下的帖子链接。
 
     2026-11-09 实测可用：explore/tags/bedroomdecor 与中文 #床品 都能拿到
     24 条链接。这才是「关键词搜索」的正确形态 —— 之前我误判成不可用，
     是因为只测了 API 接口（429/404），没测网页。
+
+    pages > 1 时滚动触发翻页，拿更多候选。
+    为什么要翻页：一屏只有 24 条，单标签跑几轮就耗尽。
+    注意 IG 的 hashtag 页**没有时间排序参数**（实测 GraphQL variables 只有
+    query/after/first 三个），是推荐排序，所以翻页拿到的不是「更新」而是
+    「更多」，对带货选品反而合适。
     """
     t = tag.lstrip("#").strip().replace(" ", "")
     path = f"https://www.instagram.com/explore/tags/{quote(t)}/"
-    return _scrape_links(path, limit, cookiefile, cookie_dir, label=f"#{t}")
+    return _scrape_links(path, limit, cookiefile, cookie_dir,
+                         label=f"#{t}", pages=pages)
 
 
 def discover_instagram_keyword(query: str, limit: int = 24,
@@ -138,8 +146,13 @@ def discover_instagram_keyword(query: str, limit: int = 24,
 def _scrape_links(path: str, limit: int,
                   cookiefile: Path | None,
                   cookie_dir: Path | None,
-                  label: str = "") -> list[dict]:
-    """打开 path，从 DOM 取 /reel/ 与 /p/ 链接。三个入口共用。"""
+                  label: str = "",
+                  pages: int = 1) -> list[dict]:
+    """打开 path，从 DOM 取 /reel/ 与 /p/ 链接。三个入口共用。
+
+    pages > 1 时反复滚动页面底部触发懒加载，再重新采集。
+    每滚动一次等待 2.5 秒 —— 太短拿不到新内容，太长浪费时间。
+    """
     from playwright.sync_api import sync_playwright
 
     if cookiefile is None:
@@ -154,6 +167,40 @@ def _scrape_links(path: str, limit: int,
         return []
 
     found: list[dict] = []
+    seen_codes: set[str] = set()
+
+    def _collect(page) -> int:
+        """采集一次，返回本次新增条数。"""
+        links = page.evaluate("""() => {
+            const out = [];
+            document.querySelectorAll('a[href*="/reel/"], a[href*="/p/"]')
+              .forEach(a => {
+                const h = a.getAttribute('href') || '';
+                if (h && !out.includes(h)) out.push(h);
+              });
+            return out;
+        }""")
+        added = 0
+        for href in (links or []):
+            if len(found) >= limit:
+                break
+            parts = [p for p in href.split("/") if p]
+            code = None
+            if "reel" in parts:
+                code = parts[parts.index("reel") + 1]
+                url = f"https://www.instagram.com/reel/{code}/"
+            elif "p" in parts:
+                code = parts[parts.index("p") + 1]
+                url = f"https://www.instagram.com/p/{code}/"
+            else:
+                continue
+            if not code or code in seen_codes:
+                continue
+            seen_codes.add(code)
+            found.append({"url": url, "code": code})
+            added += 1
+        return added
+
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
@@ -167,32 +214,20 @@ def _scrape_links(path: str, limit: int,
                 page = ctx.new_page()
                 page.goto(path, wait_until="domcontentloaded", timeout=45000)
                 page.wait_for_timeout(7000)
+                _collect(page)
 
-                links = page.evaluate("""() => {
-                    const out = [];
-                    document.querySelectorAll('a[href*="/reel/"], a[href*="/p/"]')
-                      .forEach(a => {
-                        const h = a.getAttribute('href') || '';
-                        if (h && !out.includes(h)) out.push(h);
-                      });
-                    return out;
-                }""")
-                for href in (links or []):
+                for _ in range(max(0, pages - 1)):
                     if len(found) >= limit:
                         break
-                    parts = [p for p in href.split("/") if p]
-                    if "reel" in parts:
-                        code = parts[parts.index("reel") + 1]
-                        found.append({
-                            "url": f"https://www.instagram.com/reel/{code}/",
-                            "code": code,
-                        })
-                    elif "p" in parts:
-                        code = parts[parts.index("p") + 1]
-                        found.append({
-                            "url": f"https://www.instagram.com/p/{code}/",
-                            "code": code,
-                        })
+                    try:
+                        page.evaluate(
+                            "window.scrollTo(0, document.body.scrollHeight)")
+                        page.wait_for_timeout(2500)
+                    except Exception:
+                        break
+                    if _collect(page) == 0:
+                        # 滚不动了（内容到底或被限流），停止
+                        break
             finally:
                 browser.close()
     except Exception as e:

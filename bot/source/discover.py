@@ -201,7 +201,8 @@ def discover_instagram(query: str, limit: int = 8) -> list[Candidate]:
 
 def run_ig_search(tags: list[str], keywords: list[str],
                   limit_per_entry: int = 24,
-                  per_run: int = 10) -> list[Candidate]:
+                  per_run: int = 10,
+                  pages: int = 1) -> list[Candidate]:
     """跑 IG hashtag + 关键词搜索，返回候选。
 
     2026-11-09 实测三种入口都可用（各拿到 24 条链接）：
@@ -226,7 +227,7 @@ def run_ig_search(tags: list[str], keywords: list[str],
 
     for tag in tags:
         for it in discover_instagram_tag(tag, limit=limit_per_entry,
-                                         cookie_dir=cdir):
+                                         cookie_dir=cdir, pages=pages):
             if it["url"] in seen:
                 continue
             seen.add(it["url"])
@@ -476,6 +477,7 @@ def run_discovery(s, db, force: bool = False) -> dict:
                         tags, kws,
                         limit_per_entry=int(conf.get("ig_limit_per_entry", 24)),
                         per_run=lane.per_run - len(cands),
+                        pages=int(conf.get("ig_pages", 1)),
                     )
             if len(cands) < lane.per_run and srcs:
                 cands += run_lane(lane, sources=srcs,
