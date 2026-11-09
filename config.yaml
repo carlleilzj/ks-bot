@@ -76,32 +76,35 @@ platforms:
     # 只发现「链接」，候选仍走原有流水线（去重 → 下载 → 转码 → 文案 → 发布），
     # 不另造一套下载逻辑。
     discover:
-      # 2026-11-09 停用：用户反馈 YouTube 搜到的优质内容很少。
-      # 实测也确实如此 —— 搜索返回的多是 5~25 分钟教程/测评/带货推广，
-      # 时长闸门能挡掉大部分，剩下的质量也一般。
-      # 改为走 IG hashtag/关键词搜索（见下），这条路质量明显更好。
-      # 恢复 YouTube：enabled 改回 true 并把 sources 设为 ["youtube"]。
+      # 2026-11-10 定位落地：【以小动物/拟人化生物为主角的 AI 3D 搞笑剧情动画】
+      # （依据：历史 Top4 全部百万/十万级大爆款均为 3D 拟人动物翻车动画短片）
       enabled: true
       interval_hours: 6
       per_query: 8
       per_run: 8
       sources: []               # 关键词搜索走 IG，不用 yt-dlp 搜索
-      # IG hashtag（搞笑/萌宠赛道的活跃标签）
+      # IG 话题：重点抓 3D/AI 动物动画与搞笑拟人剧情短片
       ig_tags:
+        - aianimation
+        - animalanimation
+        - 3danimation
+        - funnyanimation
+        - animatedanimals
+        - funnyfroggy
         - funnyanimals
-        - cuteanimals
         - petmemes
-        - funnypets
-        - animalvideos
-        - dogsofinstagram
-        - catsofinstagram
-        - 萌宠
-        - 搞笑动物
-        - 宠物日常
+        - cartoonanimals
+        - 搞笑动画
+        - 动物动画
+        - 3D动画
+        - 脑洞动画
+        - 治愈动画
       ig_keywords:
-        - funny animal
-        - cute pets
-        - 萌宠 搞笑
+        - funny animal animation
+        - 3d animal animation
+        - AI 搞笑动画
+        - 动物 搞笑 3D
+        - 搞笑 动物 动画
       ig_limit_per_entry: 24
       # 旧的 YouTube 查询词，保留备查（sources 为空时不生效）
       queries:
@@ -109,9 +112,54 @@ platforms:
         - "cute pet fail #shorts"
         - "ai animated short funny #shorts"
         - "萌宠 搞笑 动画"
-      # A 号是搞笑/萌宠号，不限题材，只排除明显不符的
-      require_any: []
-      block_any: [makeup tutorial, cooking recipe, news report]
+      # 题材闸门：确保主角具备动物亲和力，或具备 3D/AI 动画剧情特征（避免纯人类生活与新闻实拍）
+      require_any:
+        - animal
+        - cat
+        - dog
+        - pet
+        - frog
+        - bird
+        - dragon
+        - chameleon
+        - chicken
+        - hen
+        - duck
+        - squirrel
+        - bear
+        - rabbit
+        - bunny
+        - hamster
+        - 动物
+        - 猫
+        - 狗
+        - 鸡
+        - 鸭
+        - 兔
+        - 龙
+        - 鸟
+        - 蛙
+        - 鼠
+        - 熊
+        - 萌宠
+        - animation
+        - animated
+        - cartoon
+        - 3d
+        - cgi
+        - ai
+        - 动画
+        - 卡通
+        - 沙雕
+        - 搞笑
+      block_any:
+        - makeup tutorial
+        - cooking recipe
+        - news report
+        - pc build
+        - 化妆教程
+        - 新闻报道
+        - 采访街访
     # 2026-11-10 取消全部变现挂载（用户核验快手 App 收益账单）：
     #   累计收益 248.23 元中：星火 208.10 元、磁力万合 40.13 元，磁力聚星近 30 天收益为 0.00 元！
     #   短剧 CPS 需要用户充值转化，搞笑萌宠受众与短剧完全割裂，转化率为 0；

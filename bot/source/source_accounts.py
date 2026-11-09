@@ -228,6 +228,31 @@ SEED_HOME = [
      "note": "n=6 中位 2622（库内显示名 GRAND STYLE，用户名待用户核对）"},
 ]
 
+# 快手 A 号爆款源账号（2026-11-10 从历史 Top 爆款实测数据中精准反查）
+# 定位：以小动物/奇幻生物为主角的 AI 3D 搞笑剧情动画微剧场
+SEED_ANIMALS = [
+    {"account": "kataicinema", "url": "https://www.instagram.com/kataicinema/",
+     "note": "Top1 383万大爆款源头（Paco 变色龙 AI 动画）"},
+    {"account": "chipcoi888", "url": "https://www.instagram.com/chipcoi888/",
+     "note": "Top2 134万大爆款源头（拟人蜜獾平头哥短片）"},
+    {"account": "mamahentale", "url": "https://www.instagram.com/mamahentale/",
+     "note": "Top3 12.5万大爆款源头（母鸡历险记 3D 动画）"},
+    {"account": "bingwave123", "url": "https://www.instagram.com/bingwave123/",
+     "note": "Top4 11.4万大爆款源头（小鸟与鱼无声 3D 动画）"},
+    {"account": "aivoxy", "url": "https://www.instagram.com/aivoxy/",
+     "note": "1.7万播放（树洞小动物治愈动画）"},
+    {"account": "cart.oons9493", "url": "https://www.instagram.com/cart.oons9493/",
+     "note": "1.1万播放（小鸡搞笑动画短片）"},
+    {"account": "cartoonworldtop", "url": "https://www.instagram.com/cartoonworldtop/",
+     "note": "1.1万播放（母鸡孵出巨龙奇幻动画）"},
+    {"account": "zooya.world", "url": "https://www.instagram.com/zooya.world/",
+     "note": "8267播放（毛茸茸小家伙奇妙日常）"},
+    {"account": "hello_bug88", "url": "https://www.instagram.com/hello_bug88/",
+     "note": "6747播放（火山翻车搞笑动画）"},
+    {"account": "she_talks_ai", "url": "https://www.instagram.com/she_talks_ai/",
+     "note": "4015播放（Bruno & Luma 3D 系列动画）"},
+]
+
 
 def seed_if_empty() -> int:
     """首次运行时写入预置白名单（已有内容则不动）。返回写入条数。"""
@@ -236,6 +261,24 @@ def seed_if_empty() -> int:
     n = 0
     for item in SEED_HOME:
         ok, _ = add_account("kuaishou2", "instagram",
+                            item["account"], item["url"], item["note"])
+        n += int(ok)
+    for item in SEED_ANIMALS:
+        ok, _ = add_account("kuaishou", "instagram",
+                            item["account"], item["url"], item["note"])
+        n += int(ok)
+    return n
+
+
+def sync_builtin_seeds() -> int:
+    """将内置的爆款高置信账号补入白名单（已有不重复添加，幂等）。返回新补充条数。"""
+    n = 0
+    for item in SEED_HOME:
+        ok, _ = add_account("kuaishou2", "instagram",
+                            item["account"], item["url"], item["note"])
+        n += int(ok)
+    for item in SEED_ANIMALS:
+        ok, _ = add_account("kuaishou", "instagram",
                             item["account"], item["url"], item["note"])
         n += int(ok)
     return n

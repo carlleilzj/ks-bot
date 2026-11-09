@@ -84,14 +84,14 @@ class TelegramListener(threading.Thread):
             ("start", "使用帮助"),
         ]):
             log.info("TG 命令菜单已注册：/login /src /help /start")
-        # 首次启动写入预置白名单（已有内容则不动）
+        # 启动时同步预置高置信账号（已有不重复添加）
         try:
-            from .source_accounts import seed_if_empty
-            n = seed_if_empty()
+            from .source_accounts import sync_builtin_seeds
+            n = sync_builtin_seeds()
             if n:
-                log.info("源账号白名单已预置 %d 个（可从 TG 直接补充）", n)
+                log.info("源账号白名单已补充内置高置信账号 %d 个", n)
         except Exception as e:
-            log.debug("预置白名单跳过：%s", e)
+            log.debug("内置白名单同步跳过：%s", e)
         telegram.notify_info(self.s, "🎧 投链监听已启动\n直接发视频链接给我即可（IG/YouTube/Facebook/TikTok 等）")
         # 解析重试放独立线程：extract_meta 是同步网络请求（单条可达几十秒），
         # 若在 poll 循环里跑，期间按钮回调全部排队，等处理时 answerCallbackQuery
