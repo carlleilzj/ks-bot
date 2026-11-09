@@ -18,10 +18,26 @@ sync_to() {
     # 注意：macOS 的 tar 会保留本机 uid（501:staff），传到 Linux 后会变成
     # 陌生属主，导致以 ksbot 用户运行的服务读不到 config.yaml。
     # 因此同步后统一 chown 回目标机的服务用户。
+    #
+    # 2026-11-09 补：tar 只覆盖不删除，所以**本地删除/改名的文件会永远残留在
+    # 线上**。本次就因此踩到：tests/test_banned_tags.py 本地已删，线上还在跑，
+    # 部署时 14 个用例报错、部署中止。
+    # 处理方式：把本次文件清单送到远端，删掉 bot/ tests/ 下不在清单里的 .py。
+    # 只碰 .py，不动 data/media/logs/env，避免误删运行数据。
     COPYFILE_DISABLE=1 tar -cf - $FILES | ssh -o ConnectTimeout=15 "$host" \
         'cd /opt/ks-bot && tar -xf - && find . -name "._*" -not -path "./.git/*" -delete \
          && chown -R ksbot:ksbot bot tests deploy tools config.yaml 2>/dev/null || true; \
          chmod -R o+rX bot tests deploy tools; chmod o+r config.yaml 2>/dev/null; true'
+
+    printf '%s\n' $FILES > /tmp/ks_deploy_manifest.txt
+    ssh -o ConnectTimeout=15 "$host" 'cat > /tmp/ks_deploy_manifest.txt' \
+        < /tmp/ks_deploy_manifest.txt
+    ssh -o ConnectTimeout=15 "$host" \
+        'cd /opt/ks-bot && find bot tests -name "*.py" -type f | while read -r f; do \
+           rel="${f#./}"; \
+           grep -qxF "$rel" /tmp/ks_deploy_manifest.txt \
+             || { echo "  清理线上残留: $rel"; rm -f "$f"; }; \
+         done; true'
 }
 
 case "$TARGET" in
