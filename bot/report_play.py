@@ -263,11 +263,14 @@ def detect_change_points(days: list[DayStat],
 
     返回按严重程度排序的拐点列表。
     """
-    if len(days) < min_samples_per_side * 2:
+    if len(days) < min_samples_per_side:
         return []
 
     points: list[ChangePoint] = []
-    for i in range(min_samples_per_side, len(days) - min_samples_per_side + 1):
+    # 扫描所有可能的分割点；两侧各自用**样本条数**判断是否足够，
+    # 而不是用天数 —— 否则「4 天数据、min=4」会让循环范围为空，
+    # 明明样本够却检不出拐点（2026-11-09 踩过）。
+    for i in range(1, len(days)):
         before = [p for d in days[:i] for p in d.plays]
         after = [p for d in days[i:] for p in d.plays]
         if len(before) < min_samples_per_side or len(after) < min_samples_per_side:
