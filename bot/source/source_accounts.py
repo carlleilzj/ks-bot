@@ -282,3 +282,113 @@ def sync_builtin_seeds() -> int:
                             item["account"], item["url"], item["note"])
         n += int(ok)
     return n
+
+
+# ---------------------------------------------------------------------------
+# 自动化闭环：从播放数据回流中发掘并晋升爆款源账号
+# ---------------------------------------------------------------------------
+
+def promote_burst_accounts(db, s=None, threshold_play: int = 2500) -> list[dict]:
+    """从已发布作品的真实播放量中，发掘并晋升优质源账号入白名单。
+
+    数据闭环原理（2026-11-10 引入）：
+    1. 标签探索抓取生面孔作者作品入库并发布。
+    2. 播放数据回流（play_count 落库）。
+    3. 若该视频播放量 >= threshold_play，由公域真实推荐验证为爆款源。
+    4. 自动加入对应赛道的白名单（带题材闸门校验）。
+    5. 下次采集时，优先从该账号的 /reels/ 扫出整套同系列作品。
+
+    返回新晋升成功的账号信息列表。
+    """
+    lanes = ["kuaishou", "kuaishou2"]
+    if s:
+        lanes = [n for n, p in s.platforms.items() if getattr(p, "discover", None) and p.discover.get("enabled")]
+
+    if not lanes:
+        return []
+
+    ph = ",".join("?" * len(lanes))
+    with db._lock:
+        rows = db.conn.execute(f"""
+            SELECT j.platform as lane, t.username, t.play_count, t.title, 
+                   t.source_url, t.source_platform, t.caption
+            FROM publish_jobs j
+            JOIN tasks t ON j.task_id = t.id
+            WHERE j.state = 'PUBLISHED'
+              AND j.platform IN ({ph})
+              AND t.play_count IS NOT NULL
+              AND t.play_count >= ?
+              AND t.source_platform IN ('instagram', 'youtube')
+            ORDER BY t.play_count DESC
+        """, (*lanes, threshold_play)).fetchall()
+
+    existing_by_lane: dict[str, set[str]] = {}
+    for lane, plats in list_accounts().items():
+        existing_by_lane[lane] = set()
+        for plat, items in plats.items():
+            for it in items:
+                existing_by_lane[lane].add(str(it.get("account") or "").strip().lower())
+
+    promoted: list[dict] = []
+
+    for r in rows:
+        lane = r["lane"]
+        src_plat = r["source_platform"]
+        raw_user = (r["username"] or "").strip()
+        play = r["play_count"]
+        title = (r["title"] or "").strip()
+        caption = r["caption"] or ""
+
+        # 提取合法 handle
+        handle = ""
+        if re.match(r"^[a-zA-Z0-9._]{2,30}$", raw_user):
+            handle = raw_user
+        elif src_plat == "instagram":
+            cleaned = re.sub(r"[^a-zA-Z0-9._]", "", raw_user)
+            if 3 <= len(cleaned) <= 30:
+                handle = cleaned
+
+        if not handle or handle.lower() in _IG_RESERVED:
+            continue
+
+        handle_lower = handle.lower()
+        lane_existing = existing_by_lane.setdefault(lane, set())
+        if handle_lower in lane_existing:
+            continue
+
+        # 题材闸门二次校验：防止非本赛道的偶发内容被错误晋级
+        text = f"{title} {caption}".lower()
+        if s and lane in s.platforms:
+            try:
+                from .discover import match_keywords
+                conf = s.platforms[lane].discover or {}
+                req = conf.get("require_any") or []
+                block = conf.get("block_any") or []
+                if block and match_keywords(text, block):
+                    continue
+                if req and not match_keywords(text, req):
+                    continue
+            except Exception:
+                pass
+
+        if src_plat == "instagram":
+            profile_url = f"https://www.instagram.com/{handle}/"
+        else:
+            profile_url = f"https://www.youtube.com/@{handle}"
+
+        note = f"实测爆款晋升: 播{play} 《{title[:20]}》"
+        ok, msg = add_account(lane, src_plat, handle, profile_url, note)
+        if ok:
+            lane_existing.add(handle_lower)
+            promoted.append({
+                "lane": lane,
+                "platform": src_plat,
+                "account": handle,
+                "url": profile_url,
+                "play_count": play,
+                "title": title[:30],
+            })
+            log.info("🌟 爆款源账号自动晋级白名单 [%s/%s]: @%s (播 %d)",
+                     lane, src_plat, handle, play)
+
+    return promoted

@@ -1192,6 +1192,9 @@ def main() -> None:
                         help="账号环境隔离诊断：检查是否为同一 Profile/登录态/出口 IP（评估连坐风险）")
     parser.add_argument("--risk-status", action="store_true",
                         help="查看各平台风控冷却状态（风险等级/剩余冷却时间/最近原因）")
+    parser.add_argument("--promote-burst-accounts", type=int, nargs="?", const=2500, default=None,
+                        metavar="PLAY_COUNT",
+                        help="扫描历史实测高播放作品，自动发掘并晋升爆款源账号入白名单（默认门槛 2500 播放）")
     parser.add_argument("--clear-risk", nargs="?", const="all", default=None,
                         metavar="PLATFORM",
                         help="人工解除平台风控冷却（平台名或 all）")
@@ -1320,6 +1323,19 @@ def main() -> None:
         cmd_drift_report(db, str(args.drift_report),
                          cut_date=args.drift_cut,
                          recent_days=args.drift_recent_days)
+        sys.exit(0)
+
+    if args.promote_burst_accounts is not None:
+        threshold = int(args.promote_burst_accounts)
+        from .source.source_accounts import promote_burst_accounts
+        print(f"=== 扫描历史高播放作品发掘爆款账号（门槛 >= {threshold} 播放）===")
+        promoted = promote_burst_accounts(db, s=s, threshold_play=threshold)
+        if not promoted:
+            print("未发现新的达标未入库账号（现有爆款账号均已在白名单中）。")
+        else:
+            print(f"🎉 成功发掘并晋升 {len(promoted)} 个新爆款账号入白名单：")
+            for it in promoted:
+                print(f"  [{it['lane']}] @{it['account']} (实测播 {it['play_count']}) 《{it['title']}》")
         sys.exit(0)
 
     if args.reply_comments is not None:

@@ -198,6 +198,23 @@ class RemoteApi:
         res = persist_stats(self.db, stats, platform=platform)
         if res.get("updated"):
             log.info("[stats] %s 播放回流：%d 条落库", platform, res["updated"])
+            # 播放数据回流触发：自动发掘并晋升爆款源账号入白名单
+            try:
+                from .source.source_accounts import promote_burst_accounts
+                promoted = promote_burst_accounts(self.db, s=self.s)
+                for item in promoted:
+                    from .notify import telegram
+                    telegram.send_text(
+                        self.s,
+                        f"🌟 自动捕获新爆款源账号！\n"
+                        f"账号：@{item['account']}（{item['platform']}）\n"
+                        f"赛道：{item['lane']}\n"
+                        f"依据：实测播放量达 {item['play_count']} 次！\n"
+                        f"作品：《{item['title']}》\n"
+                        f"已自动晋升至白名单，后续将持续追踪该账号最新作品。"
+                    )
+            except Exception as pe:
+                log.debug("自动发掘爆款账号跳过: %s", pe)
         return {"ok": True, **res}
 
     def hot_topics_ingest(self, data: dict) -> dict:
