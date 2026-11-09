@@ -690,7 +690,8 @@ def _advance_one_step(s: Settings, db: Database, task: dict, st: str,
 _last_cleanup_date: str | None = None
 
 
-def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "all") -> None:
+def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "all",
+          wakeup: threading.Event | None = None) -> None:
     """每轮：自愈滞留任务 + 推进流水线 + 每日清理。
 
     新作品发现已改为 TG 投链驱动（TelegramListener 线程），不再自动监控 IG。
@@ -735,11 +736,17 @@ def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "
         try:
             from .source.discover import run_discovery
             summary = run_discovery(s, db)
+            has_new = False
             for name, info in (summary or {}).items():
                 if info.get("new"):
+                    has_new = True
                     telegram.notify_info(
                         s, f"🔍 自动发现 [{name}]：新增 {info['new']} 条素材"
                            f"（候选 {info['found']}，跳过 {info['skipped']}）")
+            # 发现新素材后立刻唤醒下一轮推进，无需死等 poll_interval_min 超时
+            if has_new and wakeup is not None:
+                log.info("发现新素材，唤醒主循环立刻推进流水线")
+                wakeup.set()
         except Exception:
             log.exception("自动发现失败（不影响发布主流程）")
 
@@ -1427,7 +1434,7 @@ def main() -> None:
     try:
         while True:
             try:
-                cycle(s, db, args.dry_run, args.headed, args.stage)
+                cycle(s, db, args.dry_run, args.headed, args.stage, wakeup=pipeline_wakeup)
             except Exception as e:
                 log.exception("主循环异常")
                 telegram.notify_info(s, f"🔴 主循环异常（已自动恢复）\n{str(e)[:300]}")

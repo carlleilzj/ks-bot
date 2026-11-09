@@ -21,6 +21,8 @@ Environment=PYTHONUNBUFFERED=1
 # faster-whisper 模型缓存（本地 ASR；原 /root/.cache/huggingface 已迁出）
 Environment=HF_HOME=/var/cache/ksbot/huggingface
 Environment=XDG_CACHE_HOME=/var/cache/ksbot
+# Playwright 浏览器缓存（2026-11-10 修复：systemd 以 ksbot 用户运行且开启 ProtectHome，需指向 /var/cache/ksbot）
+Environment=PLAYWRIGHT_BROWSERS_PATH=/var/cache/ksbot/ms-playwright
 
 # ---- 沙箱加固（2026-10-28）----
 NoNewPrivileges=yes
