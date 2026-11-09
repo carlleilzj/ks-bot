@@ -77,8 +77,14 @@ def _base_opts(url: str = "") -> tuple[dict, str]:
     opts.setdefault("retries", 2)
     opts["extractor_args"] = {
         "youtube": {
-            # mweb：实测可绕过 SABR 流限制拿到完整音视频 URL（web_safari 会被 SABR 全灭）
-            "player_client": ["mweb"],
+            # android：实测能直接拿到 format 18（mp4 音视频合一），无需合并。
+            # 2026-11-09 实测 7 个 client：
+            #   mweb / web / ios / web_safari → Requested format is not available
+            #   tv                           → The page needs to be reloaded
+            #   android                      → ✅ format 18（mp4，含音频）
+            #   tv_embedded                  → ✅ 但要 135+251 合并成 mkv，多一道转码
+            # 优先 android 是因为单文件流最省事，也避免依赖 ffmpeg 的合并步骤。
+            "player_client": ["android"],
         },
     }
     return opts, acct
