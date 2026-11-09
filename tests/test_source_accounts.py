@@ -21,9 +21,16 @@ from bot.source import source_accounts as sa
 
 
 @pytest.fixture(autouse=True)
-def _isolate(tmp_path, monkeypatch):
-    """每个测试用独立的白名单文件，绝不碰生产 data/。"""
-    monkeypatch.setattr(sa, "ACCOUNTS_FILE", tmp_path / "src.json")
+def _no_whitelist(tmp_path, monkeypatch):
+    """所有测试都不碰真实白名单文件。
+
+    2026-11-09 踩过：线上部署时测试失败而本地通过，因为线上
+    data/source_accounts.json 里有真实 IG 账号，run_discovery 的测试
+    会读到它并真的去开 Playwright 抓 IG，把测试从 0.2 秒拖到 3 分钟。
+    测试必须与运行数据完全隔离。
+    """
+    from bot.source import source_accounts as sa2
+    monkeypatch.setattr(sa2, "ACCOUNTS_FILE", tmp_path / "no_such_src.json")
 
 
 # ---------- 链接/用户名解析 ----------

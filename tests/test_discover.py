@@ -19,6 +19,18 @@ import pytest
 from bot.source import discover as dc
 
 
+@pytest.fixture(autouse=True)
+def _isolate_whitelist(tmp_path, monkeypatch):
+    """测试绝不能读到真实白名单。
+
+    2026-11-09 踩过：线上部署时 test_discover 有 2 条失败而本地通过 ——
+    线上 data/source_accounts.json 里有真实 IG 账号，run_discovery 会真的
+    去开 Playwright 抓 IG，测试从 0.2 秒变成 3 分钟并超时。
+    """
+    from bot.source import source_accounts as sa
+    monkeypatch.setattr(sa, "ACCOUNTS_FILE", tmp_path / "no_src.json")
+
+
 def _cand(title="", desc="", dur=30.0, url="https://x/1"):
     return dc.Candidate(url=url, title=title, description=desc,
                         source="youtube", duration=dur)
