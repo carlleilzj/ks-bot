@@ -36,6 +36,7 @@ import logging
 import random
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 log = logging.getLogger(__name__)
 
@@ -100,6 +101,45 @@ def discover_instagram_profile(username: str, limit: int = 12,
     返回 [{"url": "https://www.instagram.com/reel/XXX/", "code": "XXX"}]，
     失败返回空列表（不抛异常，发现层失败不应影响发布主流程）。
     """
+    handle = username.lstrip("@").strip("/")
+    path = f"https://www.instagram.com/{handle}/"
+    return _scrape_links(path, limit, cookiefile, cookie_dir, label=f"@{handle}")
+
+
+def discover_instagram_tag(tag: str, limit: int = 24,
+                           cookiefile: Path | None = None,
+                           cookie_dir: Path | None = None) -> list[dict]:
+    """打开 hashtag 页，取该话题下的帖子链接。
+
+    2026-11-09 实测可用：explore/tags/bedroomdecor 与中文 #床品 都能拿到
+    24 条链接。这才是「关键词搜索」的正确形态 —— 之前我误判成不可用，
+    是因为只测了 API 接口（429/404），没测网页。
+    """
+    t = tag.lstrip("#").strip().replace(" ", "")
+    path = f"https://www.instagram.com/explore/tags/{quote(t)}/"
+    return _scrape_links(path, limit, cookiefile, cookie_dir, label=f"#{t}")
+
+
+def discover_instagram_keyword(query: str, limit: int = 24,
+                               cookiefile: Path | None = None,
+                               cookie_dir: Path | None = None) -> list[dict]:
+    """打开关键词搜索结果页。
+
+    与 hashtag 的区别：hashtag 是「有人主动打了这个标签」，
+    关键词搜索是「平台按内容匹配」。实测两者返回的集合不同
+    （keyword 页首条与 hashtag 页不重合），可以互补。
+    """
+    q = quote(query.strip())
+    path = f"https://www.instagram.com/explore/search/keyword/?q={q}"
+    return _scrape_links(path, limit, cookiefile, cookie_dir,
+                         label=f"kw:{query}")
+
+
+def _scrape_links(path: str, limit: int,
+                  cookiefile: Path | None,
+                  cookie_dir: Path | None,
+                  label: str = "") -> list[dict]:
+    """打开 path，从 DOM 取 /reel/ 与 /p/ 链接。三个入口共用。"""
     from playwright.sync_api import sync_playwright
 
     if cookiefile is None:
@@ -113,7 +153,6 @@ def discover_instagram_profile(username: str, limit: int = 12,
     if not cks:
         return []
 
-    handle = username.lstrip("@").strip("/")
     found: list[dict] = []
     try:
         with sync_playwright() as pw:
@@ -126,8 +165,7 @@ def discover_instagram_profile(username: str, limit: int = 12,
             try:
                 ctx.add_cookies(cks)
                 page = ctx.new_page()
-                page.goto(f"https://www.instagram.com/{handle}/",
-                          wait_until="domcontentloaded", timeout=45000)
+                page.goto(path, wait_until="domcontentloaded", timeout=45000)
                 page.wait_for_timeout(7000)
 
                 links = page.evaluate("""() => {
@@ -142,7 +180,6 @@ def discover_instagram_profile(username: str, limit: int = 12,
                 for href in (links or []):
                     if len(found) >= limit:
                         break
-                    # /harun_home/reel/XXX/ 或 /reel/XXX/
                     parts = [p for p in href.split("/") if p]
                     if "reel" in parts:
                         code = parts[parts.index("reel") + 1]
@@ -159,8 +196,8 @@ def discover_instagram_profile(username: str, limit: int = 12,
             finally:
                 browser.close()
     except Exception as e:
-        log.warning("IG 主页抓取失败（%s）：%s", handle, str(e)[:140])
+        log.warning("IG 页面抓取失败（%s）：%s", label or path, str(e)[:140])
         return []
 
-    log.info("IG 发现：@%s 取到 %d 条作品链接", handle, len(found))
+    log.info("IG 发现：%s 取到 %d 条作品链接", label or path, len(found))
     return found

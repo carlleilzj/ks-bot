@@ -177,16 +177,11 @@ def discover_youtube(query: str, limit: int = 8,
 # ---------------------------------------------------------------------------
 
 def discover_instagram(query: str, limit: int = 8) -> list[Candidate]:
-    """IG 账号发现。
+    """IG 发现（白名单账号路径）。query 是账号名。
 
-    query 是账号名（白名单路径传入），走真实浏览器抓主页作品链接。
-    关键词/hashtag 搜索暂不支持（IG 的 hashtag 页需要额外签名）。
-
-    2026-11-09 实测结论：
-    - httpx + 正确 cookie → API 429/404（缺浏览器指纹）
-    - yt-dlp instagram:user → 官方标记 broken
-    - Playwright + 同一份 cookie → **正常，DOM 里能拿到作品链接**
-    所以这里委托给 bot/source/ig_discover.py。
+    hashtag / 关键词搜索走独立入口（discover_instagram_tag /
+    discover_instagram_keyword），由 run_ig_search 调度 —— 两者语义不同，
+    混在一个函数里靠字符串前缀猜格式太脆。
     """
     from pathlib import Path
 
@@ -202,6 +197,56 @@ def discover_instagram(query: str, limit: int = 8) -> list[Candidate]:
         source="instagram",
         channel=query,
     ) for it in items]
+
+
+def run_ig_search(tags: list[str], keywords: list[str],
+                  limit_per_entry: int = 24,
+                  per_run: int = 10) -> list[Candidate]:
+    """跑 IG hashtag + 关键词搜索，返回候选。
+
+    2026-11-09 实测三种入口都可用（各拿到 24 条链接）：
+        explore/tags/bedroomdecor              ✅
+        explore/tags/床品（URL 编码）            ✅
+        explore/search/keyword/?q=bedroom decor ✅
+
+    为什么这条路比 YouTube 搜索值得做：
+    - IG 上是「真实卖家/用户拍的使用场景」，YouTube 搜出来多是
+      10~25 分钟测评教程或 Amazon 联盟推广
+    - hashtag 天然带题材语义（#床品 下面不会有修眉教程）
+    - 中文 hashtag 也能用（#床品 ✅），不依赖英文关键词
+    """
+    from pathlib import Path
+
+    from .ig_discover import discover_instagram_keyword, discover_instagram_tag
+    from ..config import DATA_DIR
+
+    cdir = Path(DATA_DIR) / "cookies.d"
+    seen: set[str] = set()
+    picked: list[Candidate] = []
+
+    for tag in tags:
+        for it in discover_instagram_tag(tag, limit=limit_per_entry,
+                                         cookie_dir=cdir):
+            if it["url"] in seen:
+                continue
+            seen.add(it["url"])
+            picked.append(Candidate(url=it["url"], title=f"#{tag.lstrip('#')}",
+                                    source="instagram_tag", channel=tag))
+            if len(picked) >= per_run:
+                return picked
+
+    for kw in keywords:
+        for it in discover_instagram_keyword(kw, limit=limit_per_entry,
+                                             cookie_dir=cdir):
+            if it["url"] in seen:
+                continue
+            seen.add(it["url"])
+            picked.append(Candidate(url=it["url"], title=f"kw:{kw}",
+                                    source="instagram_kw", channel=kw))
+            if len(picked) >= per_run:
+                return picked
+
+    return picked
 
 
 SOURCES = {
@@ -414,14 +459,25 @@ def run_discovery(s, db, force: bool = False) -> dict:
 
         srcs = sources_from_config(conf)
         try:
-            # 白名单账号优先（质量可控），关键词搜索补覆盖面。
-            # 两者合并后统一去重，白名单的候选排在前面。
+            # 三条供给线，按质量优先级：
+            #   1. 白名单账号（人工确认过质量）
+            #   2. IG hashtag / 关键词搜索（题材语义天然对齐）
+            #   3. 其它来源（目前只剩停用中的 YouTube）
             cands = run_whitelist(
                 lane, name,
                 per_account=int(conf.get("whitelist_per_account", 10)),
                 per_run=lane.per_run,
             )
             if len(cands) < lane.per_run:
+                tags = [str(t) for t in (conf.get("ig_tags") or []) if str(t).strip()]
+                kws = [str(k) for k in (conf.get("ig_keywords") or []) if str(k).strip()]
+                if tags or kws:
+                    cands += run_ig_search(
+                        tags, kws,
+                        limit_per_entry=int(conf.get("ig_limit_per_entry", 24)),
+                        per_run=lane.per_run - len(cands),
+                    )
+            if len(cands) < lane.per_run and srcs:
                 cands += run_lane(lane, sources=srcs,
                                   per_query=int(conf.get("per_query", 8)))
             # 合并后去重：白名单与搜索可能命中同一条

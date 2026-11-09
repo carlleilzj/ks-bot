@@ -309,6 +309,93 @@ class TestLaneFromConfig:
         assert called == [], "空 sources 时不得调用任何来源"
 
 
+class TestIgSearch:
+    """IG hashtag / 关键词搜索（2026-11-09 新增）。
+
+    此前我误判「IG 只能靠白名单」——因为只测了 API 接口（429/404），
+    没测网页。Playwright 打开 explore/tags/ 和 explore/search/keyword/
+    都能拿到 24 条链接。
+    """
+
+    def test_tag_entry_calls_tag_scraper(self, monkeypatch):
+        from bot.source import discover as dc
+        from bot.source import ig_discover as igd
+        called = []
+
+        def fake_tag(tag, limit=24, cookiefile=None, cookie_dir=None):
+            called.append(("tag", tag))
+            return [{"url": f"https://www.instagram.com/p/{tag}1/", "code": f"{tag}1"}]
+
+        monkeypatch.setattr(igd, "discover_instagram_tag", fake_tag)
+        out = dc.run_ig_search(["床品"], [], per_run=5)
+        assert called == [("tag", "床品")]
+        assert len(out) == 1
+        assert out[0].source == "instagram_tag"
+
+    def test_keyword_entry_calls_kw_scraper(self, monkeypatch):
+        from bot.source import discover as dc
+        from bot.source import ig_discover as igd
+        called = []
+
+        def fake_kw(kw, limit=24, cookiefile=None, cookie_dir=None):
+            called.append(("kw", kw))
+            return [{"url": "https://www.instagram.com/p/x1/", "code": "x1"}]
+
+        monkeypatch.setattr(igd, "discover_instagram_keyword", fake_kw)
+        out = dc.run_ig_search([], ["cozy bedroom"], per_run=5)
+        assert called == [("kw", "cozy bedroom")]
+        assert out[0].source == "instagram_kw"
+
+    def test_dedupes_across_entries(self, monkeypatch):
+        from bot.source import discover as dc
+        from bot.source import ig_discover as igd
+        same = [{"url": "https://www.instagram.com/p/SAME/", "code": "SAME"}]
+        monkeypatch.setattr(igd, "discover_instagram_tag", lambda *a, **k: list(same))
+        monkeypatch.setattr(igd, "discover_instagram_keyword", lambda *a, **k: list(same))
+        out = dc.run_ig_search(["a"], ["b"], per_run=10)
+        assert len(out) == 1, "同一链接在多个入口出现只能收一次"
+
+    def test_respects_per_run(self, monkeypatch):
+        from bot.source import discover as dc
+        from bot.source import ig_discover as igd
+        monkeypatch.setattr(
+            igd, "discover_instagram_tag",
+            lambda *a, **k: [{"url": f"https://www.instagram.com/p/{i}/", "code": str(i)}
+                             for i in range(30)])
+        out = dc.run_ig_search(["a"], [], per_run=4)
+        assert len(out) == 4
+
+    def test_empty_config_returns_empty(self):
+        from bot.source import discover as dc
+        assert dc.run_ig_search([], []) == []
+
+
+class TestIgConfig:
+    def _conf(self, platform):
+        import yaml
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        data = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+        return data["platforms"][platform]["discover"]
+
+    def test_home_lane_has_ig_tags(self):
+        conf = self._conf("kuaishou2")
+        tags = conf.get("ig_tags") or []
+        assert len(tags) >= 5, f"B 号 IG 标签太少：{tags}"
+        assert any(any("\u4e00" <= c <= "\u9fff" for c in t) for t in tags), \
+            "至少要有一个中文标签（实测 #床品 可用）"
+
+    def test_animal_lane_has_ig_tags(self):
+        conf = self._conf("kuaishou")
+        assert len(conf.get("ig_tags") or []) >= 5
+
+    def test_youtube_disabled_but_lane_enabled(self):
+        """A 号恢复自动发现，但不再走 YouTube 关键词搜索。"""
+        conf = self._conf("kuaishou")
+        assert conf.get("enabled") is True
+        assert conf.get("sources") == [], "YouTube 搜索应停用"
+
+
 class TestConfigYamlQueries:
     """真实 config.yaml 的查询词必须能被完整读出来。
 
