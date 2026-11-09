@@ -203,21 +203,39 @@ def pick_cookiefile(rotate_every: int = DEFAULT_ROTATE_EVERY) -> Path | None:
         return sorted(pairs, key=lambda t: (t[0].get("use_count", 0) >= rotate_every,
                                             t[0].get("use_count", 0)))
 
-    for group in (logged_in, anonymous):
-        if group:
-            acct, cf = _order(group)[0]
-            log.debug("IG 账号池选中：%s（已用 %d 次，登录态=%s）",
-                      acct["username"], acct.get("use_count", 0),
-                      "是" if group is logged_in else "否")
-            return cf
+    # 优先用**登录态**账号。只有在完全没有登录态账号时才退化为匿名。
+    #
+    # 2026-11-09 修正：此前逻辑是「池里有匿名账号就直接用它」，导致新加的
+    # 两份带 sessionid 的 IG cookie（data/cookies.d/ig_*.txt，不在账号池
+    # accounts.json 里）永远选不上 —— 一直在用无 sessionid 的
+    # carllei2026.txt 走 yt-dlp 匿名兜底。
+    if logged_in:
+        acct, cf = _order(logged_in)[0]
+        log.debug("IG 账号池选中：%s（已用 %d 次，登录态=是）",
+                  acct["username"], acct.get("use_count", 0))
+        return cf
 
-    # 池内无可用账号：扫目录，但排除已禁用的用户名
+    # 账号池里没有登录态账号：先扫目录找带 sessionid 的文件
+    # （用户手工放进来的 cookie 常常不登记进 accounts.json）
+    scanned: list[Path] = []
     for cf in sorted(_COOKIE_DIR.glob("*.txt")):
-        if cf.stem in disabled:
+        if cf.name.endswith(".bak") or cf.stem in disabled:
             continue
         if cf.stat().st_size > 0 and _has_sessionid(cf):
-            log.info("账号池无可用账号，兜底选用带 sessionid 的 cookie：%s", cf.name)
-            return cf
+            scanned.append(cf)
+    if scanned:
+        # 按 use_count 均衡：优先用得少的
+        counts = {a.get("username"): a.get("use_count", 0) for a in accounts}
+        scanned.sort(key=lambda p: counts.get(p.stem, 0))
+        log.info("账号池无登录态账号，选用目录中带 sessionid 的 cookie：%s",
+                 scanned[0].name)
+        return scanned[0]
+
+    # 最后才退化成匿名账号（yt-dlp 兜底仍可抓公开 Reel）
+    if anonymous:
+        acct, cf = _order(anonymous)[0]
+        log.info("IG 无登录态账号，降级为匿名：%s（仅能走 yt-dlp）", acct["username"])
+        return cf
 
     # 兜底：遗留单 cookie
     if _LEGACY_COOKIE.exists() and _LEGACY_COOKIE.stat().st_size > 0:
