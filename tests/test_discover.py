@@ -86,6 +86,19 @@ class TestMatchKeywords:
     def test_russian_text(self):
         assert dc.match_keywords("Постельное бельё", ["постель"]) == ["постель"]
 
+    def test_japanese_text(self):
+        """实测被误判过：ベッドメイキング（bed making）不含英文字母。"""
+        assert dc.match_keywords("冬のベッドメイキング", ["ベッド"]) == ["ベッド"]
+        assert dc.match_keywords("掛け布団カバー", ["掛け布団"]) == ["掛け布団"]
+
+    def test_spanish_text(self):
+        """实测被误判过：Cubrecolchon（床垫套）。"""
+        assert dc.match_keywords("Cubrecolchon EXTRA grueso", ["colchon"]) == ["colchon"]
+        assert dc.match_keywords("sabana bajera", ["sabana"]) == ["sabana"]
+
+    def test_korean_text(self):
+        assert dc.match_keywords("겨울 이불 세트", ["이불"]) == ["이불"]
+
     def test_mixed_language_text(self):
         """实际 caption 常是阿语混英文品牌名。"""
         text = "لحاف جاكار Lace OekoTex مع شهاده"
@@ -474,6 +487,13 @@ class TestConfigYamlQueries:
 
         assert has_script("\u0600", "\u06ff"), "缺少阿拉伯语关键词"
         assert has_script("\u0400", "\u04ff"), "缺少俄语关键词"
+        # 日语假名 / 韩语谚文（2026-11-09 实测都出现过误判）
+        assert has_script("\u3040", "\u30ff"), "缺少日语关键词"
+        assert has_script("\uac00", "\ud7af"), "缺少韩语关键词"
+        # 西班牙语用拉丁字母，靠具体词判断
+        joined_all = " ".join(req).lower()
+        for w in ("colchon", "sabana", "almohada"):
+            assert w in joined_all, f"缺少西班牙语关键词 {w}"
         # 抽查几个真会用到的词
         joined = " ".join(req)
         for w in ("لحاف", "غطاء", "постель", "одеяло"):
