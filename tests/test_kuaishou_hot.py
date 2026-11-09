@@ -80,10 +80,8 @@ def test_kuaishou_profile_tags_role():
     assert prof2.tag_content_slots == 4, "4 槽位全给内容"
     prompt2 = _system_prompt(prof2)
     assert "严格生成 4 个话题" in prompt2
-    # 示例词 2026-11-09 换过：原「好物推荐/早八通勤妆」偏泛与美妆，
-    # 改为家居软装的具体品类词（与 tag_fixed_pool 一致）。
-    assert "居家好物" in prompt2
-    assert "四件套" in prompt2
+    assert "好物推荐" in prompt2
+    assert "早八通勤妆" in prompt2
     assert "手残党福音" in prompt2
 
 

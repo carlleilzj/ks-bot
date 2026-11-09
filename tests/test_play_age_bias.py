@@ -169,6 +169,83 @@ class TestStratifiedCompare:
         assert "无法分层对比" in text
 
 
+# ---------- 话题必须分测量年龄层比较（2026-11-09 真实事故）----------
+
+class TestTagMustBeStratified:
+    """跨年龄层比话题 = 拿「测量时机」当「话题效果」。
+
+    真实事故：B 号「家居生活」整体中位 86、「居家好物」2683，看起来差
+    31 倍，据此把「家居生活」列为禁用词并部署。同年龄层内实际是 78 vs 83。
+    原因是两者完美共线——「家居生活」只出现在账号低谷期（测量年龄短）。
+
+    这条测试钉住：报表必须提供分层视图，且分层后能看出「不是话题问题」。
+    """
+
+    def test_cross_age_comparison_is_misleading(self):
+        """构造事故数据：同一话题在两层表现相同，但整体看起来极差。"""
+        works = [
+            # 老层（250h）：两个话题都是 3000
+            _w(3000, age=250, tags=["居家好物"], day="2026-10-25"),
+            _w(3000, age=250, tags=["居家好物"], day="2026-10-26"),
+            _w(3000, age=250, tags=["居家好物"], day="2026-10-27"),
+            # 新层（80h）：两个话题都是 80（3 条才够一层）
+            _w(80, age=80, tags=["家居生活"], day="2026-11-05"),
+            _w(80, age=80, tags=["居家好物"], day="2026-11-05"),
+            _w(80, age=80, tags=["家居生活", "居家好物"], day="2026-11-06"),
+        ]
+        # 整体看：家居生活 80 vs 居家好物 1540 —— 看起来差 19 倍
+        rows = rp.group_by_tag(works)
+        by = {g.name: g for g in rows}
+        assert by["家居生活"].median == 80
+        assert by["居家好物"].median > 1000
+
+        # 分层看：同一层内「家居生活 80 vs 居家好物 80」——没有差别
+        strata = dict(rp.group_by_tag_by_age(works))
+        assert "72~120h" in strata
+        low = {t: m for t, n, m in strata["72~120h"]}
+        assert low["家居生活"] == low["居家好物"] == 80
+
+    def test_report_contains_stratified_table(self):
+        works = [
+            _w(3000, age=250, tags=["居家好物"], day="2026-10-25"),
+            _w(3000, age=250, tags=["居家好物"], day="2026-10-26"),
+            _w(3000, age=250, tags=["居家好物"], day="2026-10-27"),
+            _w(80, age=80, tags=["家居生活"], day="2026-11-05"),
+            _w(80, age=80, tags=["居家好物"], day="2026-11-05"),
+            _w(80, age=80, tags=["家居生活", "居家好物"], day="2026-11-06"),
+        ]
+        text = rp.render_report(works, "kuaishou2")
+        assert "按话题 × 测量年龄" in text
+        assert "同一层内比较才是比较话题" in text
+        assert "所有层" in text, "必须说明判据：所有层都落后才算话题差"
+
+    def test_warns_against_cross_age_tag_comparison(self):
+        works = [_w(100, age=80, tags=["x"])]
+        text = rp.render_report(works, "kuaishou2")
+        assert "不能跨测量年龄比较" in text
+
+    def test_stratified_table_skips_thin_layers(self):
+        """某层样本 <3 条时不输出（中位数不稳）。"""
+        works = [_w(100, age=80, tags=["a"]), _w(200, age=80, tags=["a"])]
+        assert rp.group_by_tag_by_age(works) == []
+
+    def test_stratified_table_requires_min_works_per_tag(self):
+        """话题在该层只出现 1 次时不列出。"""
+        works = [
+            _w(100, age=80, tags=["rare"]),
+            _w(100, age=80, tags=["common"]),
+            _w(100, age=80, tags=["common"]),
+        ]
+        strata = dict(rp.group_by_tag_by_age(works))
+        tags = {t for t, _, _ in strata["72~120h"]}
+        assert "common" in tags
+        assert "rare" not in tags
+
+    def test_render_empty_when_no_layers(self):
+        text = "\n".join(rp.render_tag_by_age([]))
+        assert "无法分层看话题" in text
+
+
 # ---------- 报表必须点出这个问题 ----------
 
 class TestReportWarnsOnAgeBias:

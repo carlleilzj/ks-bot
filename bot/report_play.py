@@ -440,6 +440,13 @@ def group_by_tag(works: list[WorkRow], min_works: int = 2) -> list[GroupStat]:
     """按话题聚合，按中位播放降序。
 
     min_works: 至少出现在多少个作品里才纳入（避免单次出现的长尾词干扰）。
+
+    ⚠️ 这张表**不能跨测量年龄直接比较**。2026-11-09 的真实事故：
+    「家居生活」整体中位 86，「居家好物」2683，看起来差 31 倍，
+    于是把「家居生活」当成差话题禁用了。但两者测量年龄完全共线
+    （77h vs 238h），同一年龄层内其实是 78 vs 83，没有差别。
+
+    要比较话题效果，必须先看 group_by_tag_by_age()。
     """
     groups: dict[str, GroupStat] = {}
     for w in works:
@@ -451,6 +458,76 @@ def group_by_tag(works: list[WorkRow], min_works: int = 2) -> list[GroupStat]:
                 g.plays.append(w.play)
     picked = [g for g in groups.values() if g.total_works >= min_works]
     return sorted(picked, key=lambda g: (-g.median, -g.n))
+
+
+def group_by_tag_by_age(works: list[WorkRow], min_works: int = 2,
+                        max_rows: int = 25) -> list[tuple[str, list[tuple[str, int, float]]]]:
+    """按测量年龄层分组，再在每层内按话题统计。
+
+    为什么话题必须分年龄层
+    --------------------
+    话题的使用天然带时间相关性：运营中途换了话题池，新话题就只出现在
+    最近的作品里，而最近的作品测量年龄最短、播放量最低（还没跑起来）。
+    跨层比较会把「话题」和「测量时机」混成一个变量，得出「新话题差」
+    的错误结论——2026-11-09 就据此误禁了「家居生活」。
+
+    分层的意义：同一层内的作品测量时机相近，此时比较话题才是比较话题。
+
+    返回 [(年龄层标签, [(话题, n, 中位), ...]), ...]
+    """
+    buckets = [(0, 72), (72, 120), (120, 180), (180, 240),
+               (240, 300), (300, 400), (400, 10**9)]
+    out: list[tuple[str, list[tuple[str, int, float]]]] = []
+    for lo, hi in buckets:
+        chunk = [w for w in works
+                 if w.play >= 0 and w.age_hours is not None
+                 and lo <= w.age_hours < hi]
+        if len(chunk) < 3:
+            continue
+        groups: dict[str, list[int]] = {}
+        for w in chunk:
+            for tag in dict.fromkeys(w.tags):
+                groups.setdefault(tag, []).append(w.play)
+        rows = [(t, len(ps), float(median(ps)))
+                for t, ps in groups.items() if len(ps) >= min_works]
+        if not rows:
+            continue
+        rows.sort(key=lambda r: -r[2])
+        label = f"{int(lo)}~{int(hi)}h" if hi < 10**9 else f">{int(lo)}h"
+        out.append((label, rows[:max_rows]))
+    return out
+
+
+def render_tag_by_age(rows: list[tuple[str, list[tuple[str, int, float]]]]) -> list[str]:
+    """渲染「年龄层 × 话题」表。"""
+    lines: list[str] = []
+    lines.append("\n【按话题 × 测量年龄】同一层内比较才是比较话题")
+    lines.append("-" * 78)
+    if not rows:
+        lines.append("  （每个年龄层样本都不足，无法分层看话题）")
+        return lines
+
+    # 每个话题在各层的表现并排，便于看出「是话题差还是时机差」
+    all_tags: list[str] = []
+    for _, items in rows:
+        for t, _, _ in items:
+            if t not in all_tags:
+                all_tags.append(t)
+
+    labels = [label for label, _ in rows]
+    header = f"{'话题':<12}" + "".join(f"{lb:>14}" for lb in labels)
+    lines.append(header)
+    lines.append("-" * 78)
+    for t in all_tags[:20]:
+        cells = []
+        for _, items in rows:
+            hit = next((r for r in items if r[0] == t), None)
+            cells.append(f"{hit[2]:>8.0f}({hit[1]:>2})" if hit else " " * 11 + "-")
+        lines.append(f"{t:<12}" + "".join(f"{c:>14}" for c in cells))
+    lines.append("-" * 78)
+    lines.append("  读法：某话题若在**所有层**都落后，才是真的差；")
+    lines.append("        若只在最年轻的层落后，那是因为它出现在低谷期，不是话题问题。")
+    return lines
 
 
 def overall(works: list[WorkRow]) -> GroupStat:
@@ -792,6 +869,8 @@ def render_report(works: list[WorkRow], platform: str, top: int = 20,
 
     lines.extend(render_table(group_by_category(works), "【按分区】", top=top))
     lines.extend(render_table(group_by_tag(works), "【按话题】", top=top))
+    # 话题必须再按测量年龄分层看一遍：跨层比较话题是本项目踩过的真坑
+    lines.extend(render_tag_by_age(group_by_tag_by_age(works)))
 
     lines.append("\n" + "=" * 78)
     lines.append("读法：")
@@ -801,5 +880,7 @@ def render_report(works: list[WorkRow], platform: str, top: int = 20,
     lines.append("  · 零播数 >0 要警惕：可能是内容不推荐，也可能是被限流")
     lines.append("  · 覆盖 <60% 时，该组结论可能只代表「能回流出数据的那部分」")
     lines.append("  · 测量年龄不一致时，日趋势会显示假的暴跌 —— 用 --mature-only")
+    lines.append("  · 【按话题】表不能跨测量年龄比较！看【按话题 × 测量年龄】那张")
+    lines.append("    （2026-11-09 曾因跨层比话题误禁「家居生活」，实际同层无差别）")
     lines.append("=" * 78)
     return "\n".join(lines)

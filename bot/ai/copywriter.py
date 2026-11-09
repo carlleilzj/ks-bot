@@ -53,10 +53,6 @@ class PlatformProfile:
     tag_base: str = "无声视频"
     tag_content_slots: int = 2
     tag_fixed_pool: tuple[str, ...] = ()
-    # 明确禁用的话题词（数据上明显拖后腿的泛词）。
-    # 作用有两层：提示词里明确告知模型不要用；_validate 阶段再做一次剔除，
-    # 因为实测模型会照抄提示里的示例词，光说「别用」不够（2026-11-09）。
-    banned_tags: tuple[str, ...] = ()
 
 
 PLATFORM_PROFILES: dict[str, PlatformProfile] = {
@@ -94,16 +90,7 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
         ),
         tag_base="",
         tag_content_slots=4,
-        # 2026-11-09 按真实播放数据调整（B 号 11-03 之后的 31 条样本）：
-        #   家居生活  9 条  中位 86    ← 最差，且是泛主题词，用户不会这样搜
-        #   居家好物  9 条  中位 1671  ← 保留
-        #   好物分享 19 条  中位 1287  ← 保留
-        #   梦中情房  8 条  中位 334   ← 保留但降权（不再进固定池）
-        # 换入「四件套」「卧室焕新」这类具体品类词：它们在拐点前是主力
-        # （中位 2098/3180），有明确搜索心智。
-        tag_fixed_pool=("好物分享", "居家好物", "卧室焕新", "四件套"),
-        # 明确禁止的泛词：这些词在数据上明显拖后腿，且模型会照抄提示里的示例。
-        banned_tags=("家居生活", "生活记录", "梦中情房"),
+        tag_fixed_pool=("好物分享", "变美日常", "居家好物", "梦中情房"),
     ),
     "douyin": PlatformProfile(
         name="douyin", display_name="抖音", max_title_len=55, max_tags=5,
@@ -314,8 +301,8 @@ def _system_prompt(profile: PlatformProfile) -> str:
     if profile.name in ("kuaishou", "kuaishou2"):
         if profile.name == "kuaishou2":
             example_roles = (
-                "  1. 行业垂直赛道词（如：居家好物、好物分享、家居软装、卧室焕新、穿搭分享）—— 负责进入垂类分发池；\n"
-                "  2. 画面场景/角色主体词（如：四件套、毛绒床品、暖被、睡衣、梳妆台、氛围灯）—— 提取画面里的具体物件，吃精准搜索；\n"
+                "  1. 行业垂直赛道词（如：好物推荐、变美干货、家居生活、美妆教程、穿搭分享）—— 负责进入垂类分发池；\n"
+                "  2. 画面场景/角色主体词（如：纯棉四件套、早八通勤妆、丝绸睡衣、梦中情房、法式盘发）—— 提取画面核心主体，吃精准搜索；\n"
                 "  3. 情绪动机/互动钩子词（如：手残党福音、高级感拉满、显白必备、平价好物、沉浸式开箱）—— 激发完播动机与评论共鸣；\n"
                 "  4. 平台热门/破圈标签（重点：优先从用户提示词给出的【快手今日热门话题榜】中，挑选与本视频最匹配、最具流量热度的话题；若无直接吻合的热搜词，则选用该领域大盘爆款常青词）—— 借势破圈引入增量。\n"
             )
@@ -349,9 +336,6 @@ def _system_prompt(profile: PlatformProfile) -> str:
             "必须输出恰好 4 个贴合视频的话题词（不带 #，按以下 4 个角色分工顺序排列）：\n"
             f"{example_roles}"
             "每个标签不超过 8 个字，4 个词严禁词根重叠（例如赛道用了好物推荐/搞笑动画，情绪就用高级感拉满/脑洞大开，不要重复同义词根）。"
-            + (f"\n**绝对禁止使用这些话题词**：{'、'.join(profile.banned_tags)}"
-               f"（实测中位播放远低于同类，写了会被系统剔除）\n"
-               if profile.banned_tags else "")
         )
         tag_json_sample = '["赛道词", "主体词", "情绪词", "平台热门词"]'
         comment_json_sample = '\n  "first_comment": "作者首评神补刀/自嘲/互动问句（10~25 字，留作置顶神评）",'
@@ -502,16 +486,6 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     else:
         tags = [str(t).lstrip("#").strip()[:10] for t in tags_raw if str(t).strip()]
 
-    # 剔除模型禁用词：实测模型会照抄提示里的示例词，光在 prompt 里说「别用」
-    # 不够（B 号 2026-11-09 数据：「家居生活」用了 9 次，中位播放仅 86）。
-    # 这里做硬剔除，即使模型返回了也不让进最终话题。
-    if profile.banned_tags:
-        before_n = len(tags)
-        tags = [t for t in tags if t not in profile.banned_tags]
-        dropped = before_n - len(tags)
-        if dropped:
-            log.info("[%s] 已剔除 %d 个禁用话题", profile.name, dropped)
-
     # 基础 IP 标签保障（tag_base 为空 = 该平台不锚基础话题，
     # 如 kuaishou2 女性生活号：教程类有人声，不挂「无声视频」）
     if profile.tag_base and profile.tag_base not in tags:
@@ -526,7 +500,6 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
                       base_tag=profile.tag_base,
                       content_slots=profile.tag_content_slots,
                       fixed_pool=profile.tag_fixed_pool or None,
-                      banned=profile.banned_tags,
                       latin=is_ig)
 
     category = str(obj.get("category", "")).strip()
@@ -625,7 +598,6 @@ def merge_tags(model_tags: list[str], max_tags: int, title: str = "",
                base_tag: str = "无声视频",
                content_slots: int = 2,
                fixed_pool: tuple[str, ...] | list[str] | None = None,
-               banned: tuple[str, ...] | list[str] | None = None,
                latin: bool = False) -> list[str]:
     """话题组合：锚 1 个 + AI 内容话题 + 固定池补齐。
 
@@ -639,37 +611,22 @@ def merge_tags(model_tags: list[str], max_tags: int, title: str = "",
     中文 tag_family 的词根（「动画」「3d」等）对英文无效，而且
     `3danimation` 里含 `3d` 会被误判进「动画」家族、把同一条的
     `animation` 误删——所以英文按「标签是否为另一标签的子串」去重。
-
-    banned：禁用词，进入内容话题和固定池补齐时都跳过。
-    为什么还要在这里拦：固定池本身可能含禁用词（配置演进时容易遗留），
-    只在 _validate 拦不够——补齐阶段会把池里的词重新塞回来。
     """
-    banned_set = {str(b).strip() for b in (banned or ()) if str(b).strip()}
-
     if latin:
-        # 英文标签路径目前没有 profile 配 banned，但接口保持一致：
-        # 调用方传了就要生效，否则以后给 IG 号加禁用词会静默失效。
-        src = [t for t in (model_tags or [])
-               if str(t or "").strip().lower() not in
-               {b.lower() for b in banned_set}]
-        pool = [f for f in (fixed_pool or ())
-                if str(f).strip().lower() not in {b.lower() for b in banned_set}]
-        return _merge_tags_latin(src, max_tags, content_slots,
-                                 tuple(pool), base_tag)
+        return _merge_tags_latin(model_tags, max_tags, content_slots,
+                                 fixed_pool or (), base_tag)
 
     from .tag_quality import tag_family
     pool = list(fixed_pool) if fixed_pool else [
         "搞笑日常", "沙雕视频", "搞笑动画", "笑到肚子疼",
     ]
-    if banned_set:
-        pool = [f for f in pool if f not in banned_set]
     base = (base_tag or "").strip()
 
     picked: list[str] = []
     seen_families: set[str] = set()
     for t in model_tags or []:
         n = re.sub(r"\s+", "", (t or "").lstrip("#").strip())
-        if not n or n == base or n in picked or n in banned_set:
+        if not n or n == base or n in picked:
             continue
         fam = tag_family(n)
         if fam:
@@ -795,18 +752,6 @@ def _check_first_comment(comment: str) -> list[str]:
     return []
 
 
-def _filter_banned_topics(topics: list[dict], banned) -> list[dict]:
-    """从快手实时热榜里剔掉禁用词。
-
-    热榜是外部数据，某天可能刚好把「家居生活」这类泛词推上榜；
-    若不禁，prompt 会明确要求模型优先选热搜 —— 等于亲手把它喂回去。
-    """
-    ban = {str(b).strip() for b in (banned or ()) if str(b).strip()}
-    if not ban:
-        return topics
-    return [h for h in topics if str(h.get("topic") or "").strip() not in ban]
-
-
 def generate_copy(transcript: str, caption: str, categories: list[str], s: Settings,
                   platform: str = "kuaishou", content: dict | None = None) -> dict:
     """生成具备统一 IP 标识并与视频画面高度相关的文案。
@@ -850,10 +795,8 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     try:
         from ..db import Database
         from .hot_tags import format_for_prompt, top_tags
-        # 禁用词也要从榜单里剔掉：否则「家居生活」这类低播放泛词会经由
-        # 历史数据回流再次进入 prompt（它曾经发过 9 次，足够进榜）。
-        avoid = {"无声视频"} | set(profile.banned_tags or ())
-        ranked = top_tags(Database(), min_play=500, limit=10, exclude=avoid)
+        ranked = top_tags(Database(), min_play=500, limit=10,
+                          exclude={"无声视频"})
         hot_block = format_for_prompt(ranked)
     except Exception as e:
         # 榜单失败绝不阻塞生成 —— 打日志后按无榜单处理
@@ -893,7 +836,6 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
             try:
                 from ..monitor.kuaishou_hot import format_hot_topics_for_prompt, load_cached_hot_topics
                 ks_hots = load_cached_hot_topics()
-                ks_hots = _filter_banned_topics(ks_hots, profile.banned_tags)
                 if ks_hots:
                     hot_text = format_hot_topics_for_prompt(ks_hots, limit=30)
                     if hot_text:
