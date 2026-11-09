@@ -112,14 +112,15 @@ platforms:
       # A 号是搞笑/萌宠号，不限题材，只排除明显不符的
       require_any: []
       block_any: [makeup tutorial, cooking recipe, news report]
-    # 2026-11-02 星火下架（收益过低），改挂「作者服务」推广：
-    #   主营业务 = 关联推广任务（星任务/短剧 CPS），发布页实时选任务，无需 App 收藏；
-    #   池空/失败时兜底挂关联商品（日用百货 CPS，佣金低但稳定）；
-    #   挂载失败软降级（记日志照常发布），不用再担心硬阻断。
-    # 关掉推广挂载：attach_service 留空即可。
-    attach_service: "关联推广任务"
-    attach_prefer: "短剧"        # 短剧 CPS 单价最高，受众（家庭主妇）重合度最高
-    attach_fallback: "关联商品"
+    # 2026-11-10 取消全部变现挂载（用户核验快手 App 收益账单）：
+    #   累计收益 248.23 元中：星火 208.10 元、磁力万合 40.13 元，磁力聚星近 30 天收益为 0.00 元！
+    #   短剧 CPS 需要用户充值转化，搞笑萌宠受众与短剧完全割裂，转化率为 0；
+    #   挂载反而被打上商业营销标签压制自然推荐池，还抑制了磁力万合的自然播放分成。
+    #   与 B 号一致，彻底取消挂载，回归纯公域自然流，吃磁力万合纯播放收益。
+    #   代码侧判定：attach_service 为空且 spark_task 为 false → 整段挂载逻辑跳过。
+    attach_service: ""
+    attach_prefer: ""
+    attach_fallback: ""
     cover_title: false           # 2026-11-02 关闭 A 号封面大字报（与窗口同批上线无法归因，先撤）
     spark_task: false            # 星火已下架；留着字段便于日后星火恢复
     # spark_task_title 留空 = 按收益加权轮换（权重见 bot/publish/kuaishou.py

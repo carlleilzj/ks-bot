@@ -148,11 +148,17 @@ class TestConfigLevel:
         found = monet_keys & set(p.anchors or {})
         assert not found, f"kuaishou2 的 anchors 里仍有变现项：{found}"
 
-    def test_kuaishou_a_still_has_monetization(self):
-        """A 号不该被误伤：它仍应挂推广任务。"""
+    def test_kuaishou_a_monetization_disabled(self):
+        """2026-11-10 核验用户快手账单后明确：A 号取消全部变现挂载。
+
+        实测聚星近 30 天收益为 0.00 元（受众完全不匹配充值短剧），
+        挂载反而被打上营销标签压制公域推荐池、影响磁力万合分成。
+        A/B 两号均彻底取消商业挂载，回归纯净发布。
+        """
         from bot.config import load_settings
         s = load_settings()
         p = s.platforms.get("kuaishou")
         if p is None:
             pytest.skip("当前配置没有 kuaishou")
-        assert p.attach_service != "", "A 号的变现挂载被误删了"
+        assert p.attach_service == "", "A 号应已取消 attach_service 变现挂载"
+        assert p.spark_task is False, "A 号应已关闭 spark_task"
