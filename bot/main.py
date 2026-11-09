@@ -731,6 +731,36 @@ def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "
 
 # ---------- 子命令 ----------
 
+def cmd_play_report(db: Database, target: str, days: int | None = None) -> None:
+    """按分区 / 话题统计播放效果。
+
+    只读报表，不改任何发布行为。用于回答「哪类内容真的有效」，
+    而不是靠感觉调选题。
+    """
+    from .report_play import load_works, render_report
+
+    target = (target or "all").strip().lower()
+    if target in ("all", ""):
+        platforms = ["kuaishou", "kuaishou2", "douyin", "toutiao"]
+    else:
+        platforms = [target]
+
+    printed = 0
+    for plat in platforms:
+        try:
+            works = load_works(db, plat, days=days)
+        except Exception as e:
+            print(f"⚠️ {plat}: 读取失败 {str(e)[:120]}")
+            continue
+        if not works:
+            continue
+        print(render_report(works, plat))
+        printed += 1
+
+    if not printed:
+        print("尚无已发布作品。先跑 --fetch-stats 回填播放量，或确认平台名正确。")
+
+
 def cmd_audit_env(s: Settings, db: Database) -> None:
     """账号环境隔离诊断：回答「几个号会不会被平台判定成同一环境」。"""
     from .audit_env import analyze, collect_envs
@@ -1055,6 +1085,11 @@ def main() -> None:
                              "供话题优化使用")
     parser.add_argument("--stats-report", action="store_true",
                         help="只看已回流数据的话题效果报表，不抓取")
+    parser.add_argument("--play-report", nargs="?", const="all", default=None,
+                        metavar="PLATFORM",
+                        help="按分区/话题统计播放效果报表（all 或指定平台，不抓取只分析）")
+    parser.add_argument("--report-days", type=int, default=None, metavar="N",
+                        help="--play-report 只看最近 N 天（默认全部历史）")
     parser.add_argument("--reply-comments", nargs="?", const="kuaishou", default=None,
                         metavar="PLATFORM",
                         help="自动嗅探拉取作品评论并进行 AI 互动回复（默认 dry-run 校验，配合 --execute 真实发送）")
@@ -1182,6 +1217,10 @@ def main() -> None:
                 tag_s = r["tags"] or ""
             print(f"{r['play_count']:>7}  {r['like_count'] or 0:>5}  "
                   f"{(r['published_at'] or '')[:16]:<17} {tag_s}")
+        sys.exit(0)
+
+    if args.play_report is not None:
+        cmd_play_report(db, str(args.play_report), days=args.report_days)
         sys.exit(0)
 
     if args.reply_comments is not None:
