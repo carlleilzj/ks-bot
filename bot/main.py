@@ -731,6 +731,43 @@ def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "
 
 # ---------- 子命令 ----------
 
+def cmd_drift_report(db: Database, target: str, cut_date: str | None = None,
+                     recent_days: int = 7) -> None:
+    """内容主题漂移检测：最近的内容和以前比变了吗。
+
+    只读报表。核心价值是回答「播放掉了是因为内容变了吗」这个
+    最容易归因错误的问题（2026-11-09 B 号排查时靠手写脚本才发现）。
+    """
+    from .report_drift import auto_cut_date, detect_drift, render_drift, split_by_date
+    from .report_play import load_works
+
+    target = (target or "all").strip().lower()
+    if target in ("all", ""):
+        platforms = ["kuaishou", "kuaishou2", "douyin", "toutiao"]
+    else:
+        platforms = [target]
+
+    printed = 0
+    for plat in platforms:
+        try:
+            works = load_works(db, plat)
+        except Exception as e:
+            print(f"⚠️ {plat}: 读取失败 {str(e)[:120]}")
+            continue
+        if not works:
+            continue
+
+        cut = cut_date or auto_cut_date(works, recent_days=recent_days)
+        if not cut:
+            continue
+        before, after = split_by_date(works, cut)
+        print(render_drift(detect_drift(before, after), cut_date=cut))
+        printed += 1
+
+    if not printed:
+        print("尚无已发布作品，或无法确定分界日期。")
+
+
 def cmd_play_report(db: Database, target: str, days: int | None = None) -> None:
     """按分区 / 话题统计播放效果。
 
@@ -1088,6 +1125,13 @@ def main() -> None:
     parser.add_argument("--play-report", nargs="?", const="all", default=None,
                         metavar="PLATFORM",
                         help="按分区/话题统计播放效果报表（all 或指定平台，不抓取只分析）")
+    parser.add_argument("--drift-report", nargs="?", const="all", default=None,
+                        metavar="PLATFORM",
+                        help="内容主题漂移检测：最近的内容和以前比变了吗（all 或指定平台）")
+    parser.add_argument("--drift-cut", default=None, metavar="YYYY-MM-DD",
+                        help="--drift-report 的手动分界日期（默认按最近 N 天自动切）")
+    parser.add_argument("--drift-recent-days", type=int, default=7, metavar="N",
+                        help="--drift-report 自动分界时「最近」的天数（默认 7）")
     parser.add_argument("--report-days", type=int, default=None, metavar="N",
                         help="--play-report 只看最近 N 天（默认全部历史）")
     parser.add_argument("--reply-comments", nargs="?", const="kuaishou", default=None,
@@ -1221,6 +1265,12 @@ def main() -> None:
 
     if args.play_report is not None:
         cmd_play_report(db, str(args.play_report), days=args.report_days)
+        sys.exit(0)
+
+    if args.drift_report is not None:
+        cmd_drift_report(db, str(args.drift_report),
+                         cut_date=args.drift_cut,
+                         recent_days=args.drift_recent_days)
         sys.exit(0)
 
     if args.reply_comments is not None:
