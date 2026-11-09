@@ -97,8 +97,15 @@ def match_keywords(text: str, keywords: list[str]) -> list[str]:
     return out
 
 
-def evaluate(cand: Candidate, lane: LaneConfig) -> tuple[bool, str]:
-    """判断候选是否可进入该赛道。返回 (是否通过, 原因)。"""
+def evaluate(cand: Candidate, lane: LaneConfig,
+             allow_empty_hint: bool = False) -> tuple[bool, str]:
+    """判断候选是否可进入该赛道。返回 (是否通过, 原因)。
+
+    allow_empty_hint：搜索阶段的候选常常只有 URL、没有标题
+    （ytsearch 偶发返回空 title）。此时不该在搜索阶段判死 ——
+    真实信息要等 extract_meta 拿到。传 True 时「无题材证据」不拦，
+    由元数据阶段（拿到真实 title/description 后）再做最终判断。
+    """
     if cand.duration and not (lane.min_duration <= cand.duration <= lane.max_duration):
         return False, f"时长 {cand.duration:.0f}s 不在 {lane.min_duration:.0f}~{lane.max_duration:.0f}s"
 
@@ -109,6 +116,8 @@ def evaluate(cand: Candidate, lane: LaneConfig) -> tuple[bool, str]:
     if lane.require_any:
         hit = match_keywords(cand.hint_text, lane.require_any)
         if not hit:
+            if allow_empty_hint and not (cand.title or cand.description or "").strip():
+                return True, "标题为空，留到元数据阶段判断"
             return False, "未命中赛道关键词"
         cand.matched_keywords = hit
 
@@ -286,10 +295,15 @@ def run_discovery(s, db, force: bool = False) -> dict:
             if meta.duration and not (lane.min_duration <= meta.duration <= lane.max_duration):
                 skipped += 1
                 continue
-            # 二次题材校验：用平台真实 caption 再确认一次
-            # （搜索标题可能是频道自定义的，真实 caption 才反映内容）
-            check = Candidate(url=c.url, title=c.title,
-                              description=meta.caption or "", duration=meta.duration)
+            # 二次题材校验：用平台真实元数据再确认一次。
+            # 搜索标题可能是频道自定义的，真实元数据才反映内容。
+            # 注意必须同时带上 meta.title：很多短视频只有标题、没有 description
+            # （实测 2026-11-09：一条 cozy bedroom 视频 description 为空，
+            # 只靠 caption 会误判成「无题材证据」）。
+            check = Candidate(url=c.url,
+                              title=f"{c.title} {meta.title or ''}".strip(),
+                              description=meta.caption or "",
+                              duration=meta.duration)
             ok, why = evaluate(check, lane)
             if not ok:
                 skipped += 1
@@ -313,6 +327,14 @@ def run_discovery(s, db, force: bool = False) -> dict:
                 added += 1
                 log.info("[%s] 自动发现新素材 tid=%d %s（命中 %s）",
                          name, tid, c.title[:40], ",".join(check.matched_keywords[:3]))
+                # caption 为空的视频在流水线里拿不到任何文案输入
+                # （文案生成靠 caption + 转录，两者都空就只能靠画面探针）。
+                # 这里把标题补进 caption，至少给下游一个语义线索。
+                if not (meta.caption or "").strip() and (meta.title or "").strip():
+                    try:
+                        db.update(tid, caption=meta.title)
+                    except Exception:
+                        pass
             else:
                 skipped += 1
 
@@ -362,7 +384,9 @@ def run_lane(lane: LaneConfig, sources: list[str] | None = None,
             for cand in fn(q, per_query):
                 if cand.url in seen_urls:
                     continue
-                ok, why = evaluate(cand, lane)
+                # 允许搜索阶段标题为空：真实信息在元数据阶段才拿得到，
+                # 那里会用 require_any 做最终闸门（见 run_discovery）。
+                ok, why = evaluate(cand, lane, allow_empty_hint=True)
                 if not ok:
                     log.debug("[%s] 丢弃 %s：%s", lane.name, cand.title[:40], why)
                     continue

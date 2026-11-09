@@ -122,6 +122,26 @@ class TestEvaluate:
         dc.evaluate(c, HOME_LANE)
         assert set(c.matched_keywords) >= {"duvet", "pillow"}
 
+    def test_empty_title_passes_only_when_allowed(self):
+        """搜索阶段标题为空时放行到元数据阶段判断，但不配 allow 时仍拦截。
+
+        ytsearch 偶发返回空 title；此时在搜索阶段判死会误杀正常素材，
+        所以 run_lane 用 allow_empty_hint=True，最终闸门在元数据阶段。
+        """
+        c = _cand("", url="u1")
+        ok, _ = dc.evaluate(c, HOME_LANE)
+        assert not ok, "默认不允许空标题通过"
+        ok2, why = dc.evaluate(c, HOME_LANE, allow_empty_hint=True)
+        assert ok2
+        assert "元数据" in why
+
+    def test_empty_title_still_blocked_by_block_any(self):
+        """即使允许空标题，命中排除词也不能放行（排除词优先）。"""
+        c = _cand("makeup tutorial", url="u1")
+        ok, why = dc.evaluate(c, HOME_LANE, allow_empty_hint=True)
+        assert not ok
+        assert "排除词" in why
+
 
 # ---------- 跑一条 lane ----------
 
@@ -399,7 +419,7 @@ class TestRunDiscovery:
         assert db.inserted == []
 
     def test_rejects_candidate_without_genre_evidence(self, monkeypatch):
-        """搜索标题和真实 caption 都拿不到题材证据时丢弃。
+        """搜索标题和真实元数据都拿不到题材证据时丢弃。
 
         实测确有这种视频（caption 为空或只有外链）。B 号有 require_any 闸门，
         不能因为「不知道是什么」就放行 —— 那正是漂移的起点。
@@ -414,6 +434,47 @@ class TestRunDiscovery:
         out = dc.run_discovery(self._settings(), db, force=True)
         assert out["kuaishou2"]["new"] == 0
         assert db.inserted == []
+
+    def test_accepts_when_only_title_has_evidence(self, monkeypatch):
+        """很多短视频只有标题、description 为空 —— 不能因此丢掉。
+
+        实测 2026-11-09：一条「15+cozy bedroom decor ideas」视频
+        description 是空串，只有 title 命中关键词。若校验只看 caption
+        就会误杀；若不校验又会放进无关内容。正确做法是两个都看。
+        """
+        monkeypatch.setattr(dc, "_last_run", {})
+        monkeypatch.setitem(dc.SOURCES, "youtube",
+                            lambda q, n: [dc.Candidate(url="u1", title="",
+                                                       source="youtube")])
+        monkeypatch.setattr("bot.source.downloader.extract_meta",
+                            lambda url: _meta(url, caption=""))
+        # 元数据里的 title 有 evidence，但 _meta 的 title 默认等于 caption；
+        # 这里显式构造只有 title 的 meta
+        m = _meta("u1", caption="")
+        m.title = "15+cozy bedroom decor ideas"
+        monkeypatch.setattr("bot.source.downloader.extract_meta", lambda url: m)
+        db = _FakeDB()
+        out = dc.run_discovery(self._settings(), db, force=True)
+        assert out["kuaishou2"]["new"] == 1
+
+    def test_blank_caption_falls_back_to_title(self, monkeypatch):
+        """入库时 caption 为空要用 title 兜底，否则下游拿不到任何文案线索。"""
+        monkeypatch.setattr(dc, "_last_run", {})
+        monkeypatch.setitem(dc.SOURCES, "youtube",
+                            lambda q, n: [dc.Candidate(url="u1", title="",
+                                                       source="youtube")])
+        m = _meta("u1", caption="")
+        m.title = "cozy bedroom duvet ideas"
+        monkeypatch.setattr("bot.source.downloader.extract_meta", lambda url: m)
+
+        updates = []
+
+        class _DB(_FakeDB):
+            def update(self, tid, **fields):
+                updates.append(fields)
+
+        dc.run_discovery(self._settings(), _DB(), force=True)
+        assert updates and updates[0].get("caption") == "cozy bedroom duvet ideas"
 
     def test_one_bad_candidate_does_not_stop_batch(self, monkeypatch):
         monkeypatch.setattr(dc, "_last_run", {})
