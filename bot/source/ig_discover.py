@@ -98,10 +98,20 @@ def discover_instagram_profile(username: str, limit: int = 12,
                                cookie_dir: Path | None = None) -> list[dict]:
     """打开账号主页，从 DOM 取作品链接。
 
+    优先访问 `/{handle}/reels/`（Reels 专属页）：
+    2026-11-10 实测发现，账号主页常包含大量纯图片图文帖（/p/），
+    抓回来在 extract_meta 阶段会报「纯图文帖无视频可下载」，浪费配额且占坑。
+    Reels 标签页内 100% 全是可下载的短视频，零图文干扰。
+    若该账号没有 Reels 专页，自动回退到普通主页。
+
     返回 [{"url": "https://www.instagram.com/reel/XXX/", "code": "XXX"}]，
     失败返回空列表（不抛异常，发现层失败不应影响发布主流程）。
     """
     handle = username.lstrip("@").strip("/")
+    reels_path = f"https://www.instagram.com/{handle}/reels/"
+    found = _scrape_links(reels_path, limit, cookiefile, cookie_dir, label=f"@{handle}/reels")
+    if found:
+        return found
     path = f"https://www.instagram.com/{handle}/"
     return _scrape_links(path, limit, cookiefile, cookie_dir, label=f"@{handle}")
 
