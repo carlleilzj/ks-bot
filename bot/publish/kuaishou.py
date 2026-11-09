@@ -2373,10 +2373,26 @@ def post_first_comment(
     title: str = "",
     pin: bool = True,
     timeout_sec: float = 25.0,
+    settle_sec: float = 45.0,
 ) -> bool:
     """在快手创作者中心互动管理-评论管理页，发表作者首评并置顶（神评互动引导）。
 
     失败静默打 warning，绝不阻断发布主流程。
+
+    settle_sec：发布后先等作品进入评论管理页的作品列表，再动手发首评。
+    为什么需要（2026-11-09 实测）
+    ---------------------------
+    发布接口回包直接带 photoId，所以发布函数返回极快；但平台侧把作品
+    同步到「评论管理」的作品列表要 30~90 秒。此前首评在发布后 0~2 秒
+    就开始找作品，于是日志里反复出现
+        「快手新作品尚未同步到列表（第 4/10 次）」
+    之后紧接着就是
+        「未出现在评论区，重试 → 放弃置顶」
+
+    11-03 起 43 次发布里 5 次（12%）因此判失败。那 5 次的首评其实
+    多半已经发出去了，只是校验在错误的时机做。
+
+    参数为 0 表示不等（测试用）。
     """
     first_comment = (first_comment or "").strip()
     if not first_comment:
@@ -2389,6 +2405,10 @@ def post_first_comment(
         log.warning("首评目标标题过短或为空（%r），放弃发表首评", title[:20])
         return False
 
+    if settle_sec > 0:
+        log.info("首评等待作品同步到评论管理页（最多 %.0f 秒）…", settle_sec)
+        page.wait_for_timeout(int(settle_sec * 1000))
+
     log.info("准备发表快手作者首评: %s", first_comment)
     try:
         page.goto(COMMENT_URL, wait_until="domcontentloaded", timeout=int(timeout_sec * 1000))
@@ -2396,7 +2416,10 @@ def post_first_comment(
 
         # 1. 核对当前页面是否已选中该作品，未选中则通过「选择视频」抽屉精准定位（严格防错位）
         def _norm(s: str) -> str:
-            return re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", s or "").lower()
+            # inner_text() 可能返回 None，直接 re.sub 会抛 TypeError
+            if not isinstance(s, str):
+                s = "" if s is None else str(s)
+            return re.sub(r"[【】《》#\s\-_，。！？、“”\"'']", "", s).lower()
 
         def _same_work(shown: str) -> bool:
             """两侧都必须非空且足够长才比较 —— 空串 in 任意串 恒为真，
@@ -2480,27 +2503,90 @@ def post_first_comment(
         btn = page.locator(".author-comment-input__row__btn").first
 
         def _comment_shown() -> bool:
-            return bool(
-                page.locator(".comment-item, [class*='comment-item']")
-                .filter(has_text=first_comment[:8]).count())
+            """刚发的首评是否已出现在评论区。
+
+            匹配用**前 8 字**（首评可能被平台截断或加省略号）。
+            但前 8 字匹配有两个假阴性来源，2026-11-09 实测 43 次尝试里
+            有 5 次（12%）误判为「没发出去」，而实际已发送成功：
+
+            1. 评论列表还在加载：刚点发送后列表要 1~3 秒才渲染出新条目，
+               只等 2 秒常常不够（尤其评论区已有几百条时）。
+            2. 首评里有全角/半角、emoji、引号等字符时，页面渲染的文本
+               可能与输入的字符串不完全一致，前 8 字也比不上。
+
+            这里改成：优先精确前缀匹配；同时接受「长得像」的宽松匹配
+            （去标点空白后比较前 6 字）。宁可判成「已发送、跳过重试」，
+            也不要重复点击发送——评论区出现两条一模一样的置顶首评，
+            比漏置顶难看得多，也更容易被判机器操作。
+            """
+            try:
+                items = page.locator(".comment-item, [class*='comment-item']")
+                if not items.count():
+                    return False
+                want_prefix = _norm(first_comment)[:8]
+                want_loose = _norm(first_comment)[:6]
+                if not want_loose:
+                    return False
+                for i in range(min(items.count(), 30)):
+                    try:
+                        txt = _norm(items.nth(i).inner_text() or "")
+                    except Exception:
+                        continue
+                    if txt.startswith(want_prefix) or want_loose in txt[:40]:
+                        return True
+            except Exception:
+                pass
+            return False
+
+        def _box_empty() -> bool:
+            """输入框是否已被清空。
+
+            发送成功后平台会清空输入框，这是「确实发出去了」的最强信号。
+            必须同时读 inner_text 和 input_value：
+            - input/textarea 元素的 inner_text() 恒为空串
+            - contenteditable 的 input_value() 会抛异常
+            只读其中一个会把「读不到」误判成「已清空」，
+            于是不再重试、也不再等待，直接判失败（2026-11-09 实测踩到）。
+            """
+            has_text = False
+            try:
+                if (box.inner_text() or "").strip():
+                    has_text = True
+            except Exception:
+                pass
+            try:
+                if (box.input_value() or "").strip():
+                    has_text = True
+            except Exception:
+                pass
+            return not has_text
+
+        def _wait_comment_shown(total_ms: int = 9000) -> bool:
+            """轮询等待评论出现，而不是固定等 2 秒就下结论。
+
+            实测评论区已有几百条时，新评论渲染要 1~3 秒甚至更久。
+            固定 2 秒会把「还没渲染完」误判成「没发出去」，接着重复点发送。
+            """
+            waited = 0
+            while waited < total_ms:
+                if _comment_shown():
+                    return True
+                page.wait_for_timeout(500)
+                waited += 500
+            return False
 
         for send_attempt in range(1, 4):
             if send_attempt > 1:
-                # 重试前必须确认「上一次真的没发出去」：评论列表渲染可能比接口慢，
-                # 盲目再点一次发送会在视频下留下两条一模一样的置顶首评。
-                if _comment_shown():
+                # 重试前必须确认「上一次真的没发出去」：评论列表渲染比接口慢，
+                # 盲目再点发送会在视频下留下两条一模一样的置顶首评。
+                if _wait_comment_shown(5000):
                     sent_ok = True
                     break
-                box_text = ""
-                try:
-                    box_text = (box.inner_text() or "").strip()
-                except Exception:
-                    pass
-                if not box_text:
-                    # 输入框已被清空 ⇒ 上一次点击其实生效了，等渲染即可
-                    log.info("首评输入框已清空，等待评论渲染（不再重复点击发送）")
-                    page.wait_for_timeout(2500)
-                    sent_ok = _comment_shown()
+                if _box_empty():
+                    # 输入框已空 ⇒ 上一次点击生效了，只是列表还没渲染出来。
+                    # 绝不再点发送（会造成重复首评），继续等渲染。
+                    log.info("首评输入框已清空，判定已发送，继续等待评论渲染")
+                    sent_ok = _wait_comment_shown(12000)
                     break
 
             page.wait_for_timeout(600)
@@ -2516,11 +2602,50 @@ def post_first_comment(
                     page.wait_for_timeout(300)
                     btn.click(force=True)
 
-            page.wait_for_timeout(2000)
-            if _comment_shown():
+            if _wait_comment_shown(9000):
                 sent_ok = True
                 break
+            # 列表没渲染出来，但输入框已空 —— 点击其实生效了，再给一轮时间。
+            # 这一支必须**不点发送**，否则会留下重复首评。
+            if _box_empty():
+                log.info("首评输入框已清空但列表未刷新，追加等待（不再点发送）")
+                sent_ok = _wait_comment_shown(12000)
+                break
             log.warning("作者首评未出现在评论区，重试点击发送 (第 %d 次)...", send_attempt)
+
+        if not sent_ok and _box_empty():
+            # 三次都查不到，但输入框是空的：极可能是评论已经发出、只是列表
+            # 尚未渲染（或评论项结构变了导致匹配不到）。
+            # 此时判「失败」会导致后续置顶被跳过；判「成功」又可能置顶不到。
+            # 折中：记为已发送但明确告警，交由人工核对，且**绝不重复发送**。
+            log.warning(
+                "首评输入框已清空但三次查询都未匹配到评论项，"
+                "判定为已发送（列表可能未渲染或选择器需更新）：%s", first_comment)
+            sent_ok = True
+
+        def _my_comment_locator():
+            """定位「本条款首评」所在的评论项，找不到返回 None。
+
+            与 _comment_shown 用同一套归一化匹配：直接对 DOM 用
+            has_text=first_comment[:8] 在首评含全角标点/emoji 时会定位失败，
+            导致「发送成功但置顶被跳过」（2026-11-09 实测 43 次里 5 次）。
+            """
+            try:
+                items = page.locator(".comment-item, [class*='comment-item']")
+                n = items.count()
+            except Exception:
+                return None
+            want_prefix = _norm(first_comment)[:8]
+            want_loose = _norm(first_comment)[:6]
+            for i in range(min(n, 30)):
+                try:
+                    it = items.nth(i)
+                    txt = _norm(it.inner_text() or "")
+                except Exception:
+                    continue
+                if txt.startswith(want_prefix) or (want_loose and want_loose in txt[:40]):
+                    return it
+            return None
 
         shot(page, "ks_comment_sent")
         if not sent_ok:
@@ -2536,9 +2661,8 @@ def post_first_comment(
                 # 严格锁定到「本条款首评」所在行；找不到就放弃置顶。
                 # 曾经回退到 page.locator("text=置顶").first —— 那是页面上
                 # 任意一条评论的置顶按钮，会把别的评论顶上去。
-                target_item = page.locator(".comment-item, [class*='comment-item']").filter(
-                    has_text=first_comment[:8]).first
-                if not target_item.count():
+                target_item = _my_comment_locator()
+                if target_item is None:
                     log.warning("未定位到刚发表的首评行，放弃置顶（避免置错评论）")
                     return True
                 pin_btn = target_item.locator("text=置顶").first
