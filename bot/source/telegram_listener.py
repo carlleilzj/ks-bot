@@ -18,6 +18,7 @@ from ..db import Database, State
 from ..notify import telegram
 from ..publish import enabled_publishers
 from .downloader import extract_meta, parse_url
+from .source_accounts import parse_account_ref
 
 log = logging.getLogger(__name__)
 
@@ -78,10 +79,19 @@ class TelegramListener(threading.Thread):
         # 注册命令菜单：TG 客户端输入 / 弹出快捷列表，点选即发
         if telegram.set_commands(self.s, [
             ("login", "重新扫码登录（用法：/login weixin）"),
+            ("src", "源账号白名单（直接发账号链接即可添加）"),
             ("help", "使用帮助"),
             ("start", "使用帮助"),
         ]):
-            log.info("TG 命令菜单已注册：/login /help /start")
+            log.info("TG 命令菜单已注册：/login /src /help /start")
+        # 首次启动写入预置白名单（已有内容则不动）
+        try:
+            from .source_accounts import seed_if_empty
+            n = seed_if_empty()
+            if n:
+                log.info("源账号白名单已预置 %d 个（可从 TG 直接补充）", n)
+        except Exception as e:
+            log.debug("预置白名单跳过：%s", e)
         telegram.notify_info(self.s, "🎧 投链监听已启动\n直接发视频链接给我即可（IG/YouTube/Facebook/TikTok 等）")
         # 解析重试放独立线程：extract_meta 是同步网络请求（单条可达几十秒），
         # 若在 poll 循环里跑，期间按钮回调全部排队，等处理时 answerCallbackQuery
@@ -242,6 +252,20 @@ class TelegramListener(threading.Thread):
             self._handle_login_cmd(t)
             return
 
+        # /src 指令：源账号白名单管理（2026-11-09）
+        if t.lower().startswith("/src") or t.startswith("/源"):
+            self._handle_source_cmd(t)
+            return
+
+        # 源账号链接：形如 https://www.instagram.com/xxx/ 或 youtube.com/@xxx
+        # 与「视频链接」区分：视频链接带 /reel/ 或 /watch。
+        # 判据是 parse_account_ref 能否解析：reel/watch 路径会被它的正则排除。
+        if not _URL_RE.search(t) or not _looks_like_video_url(t):
+            ref = parse_account_ref(t)
+            if ref:
+                self._handle_source_add(ref, t)
+                return
+
         # 提取 URL（末尾英文标点单独剥离，见 _URL_RE 注释）
         urls = [u.rstrip(_URL_TRAILING_PUNCT) for u in _URL_RE.findall(text)]
         urls = [u for u in urls if u]
@@ -270,7 +294,13 @@ class TelegramListener(threading.Thread):
                     "  可直接粘贴抖音/小红书分享文案，会自动抠出链接\n\n"
                     "🔑 /login —— 平台扫码重登（不带参数弹菜单）\n"
                     "   /login weixin / kuaishou / douyin / toutiao\n"
-                    "   中文别名也行：/login 快手、/login 快手2\n",
+                    "   中文别名也行：/login 快手、/login 快手2\n\n"
+                    "📚 源账号白名单（自动发现的优质素材来源）\n"
+                    "  直接把账号主页链接发给我即可添加：\n"
+                    "    https://www.instagram.com/账号名/\n"
+                    "    https://www.youtube.com/@频道名\n"
+                    "   /src list        查看白名单\n"
+                    "   /src del <赛道> <平台> <账号>   删除\n",
                 )
             return
 
@@ -457,6 +487,113 @@ class TelegramListener(threading.Thread):
             return
         telegram.answer_callback(self.s, cq_id, f"已触发 {key} 扫码登录")
         self._handle_login_cmd(f"/login {key}")
+
+    def _handle_source_add(self, ref: tuple[str, str, str], raw: str) -> None:
+        """把用户发来的源账号加入白名单。
+
+        ref = (platform, account, canonical_url)，platform 可能为空
+        （用户只发了裸用户名），此时要求其带上 /src <赛道> 前缀。
+        """
+        from . import source_accounts as sa
+
+        platform, account, url = ref
+        if not platform:
+            telegram.send_text(
+                self.s,
+                f"⚠️ 认不出「{raw[:40]}」是哪个平台。\n"
+                f"请发完整链接：\n"
+                f"  https://www.instagram.com/账号名/\n"
+                f"  https://www.youtube.com/@频道名\n\n"
+                f"或指定赛道：/src kuaishou2 instagram 账号名",
+            )
+            return
+
+        lanes = [n for n, p in self.s.platforms.items() if p.discover]
+        if not lanes:
+            telegram.send_text(self.s, "⚠️ 没有任何平台启用自动发现，先检查 config.yaml")
+            return
+        # 默认加到 lane 名与平台关键字段匹配的那个；无法判断时提示用户指定
+        lane = "kuaishou2" if "kuaishou2" in lanes else lanes[0]
+        ok, msg = sa.add_account(lane, platform, account, url)
+        icon = "✅" if ok else "ℹ️"
+        telegram.send_text(
+            self.s,
+            f"{icon} 源账号{msg}\n"
+            f"账号：{account}\n"
+            f"平台：{platform}\n"
+            f"赛道：{lane}\n"
+            f"链接：{url}\n\n"
+            f"下次自动发现会优先从该账号拉素材。\n"
+            f"查看白名单：/src list",
+        )
+
+    def _handle_source_cmd(self, text: str) -> None:
+        """/src 白名单管理。
+
+        /src list                       列出所有白名单账号
+        /src add kuaishou2 instagram xxx  手动指定赛道添加
+        /src del kuaishou2 instagram xxx  删除
+        """
+        from . import source_accounts as sa
+
+        parts = text.strip().split()
+        sub = parts[1].lower() if len(parts) > 1 else "list"
+
+        if sub in ("list", "ls", ""):
+            data = sa.list_accounts()
+            if not data:
+                telegram.send_text(
+                    self.s,
+                    "📋 源账号白名单为空\n\n"
+                    "把账号主页链接直接发给我即可添加，如：\n"
+                    "  https://www.instagram.com/harun_home/\n"
+                    "  https://www.youtube.com/@HomeDecor",
+                )
+                return
+            lines = ["📋 源账号白名单"]
+            for lane, plats in data.items():
+                lines.append(f"\n【{lane}】")
+                for plat, items in plats.items():
+                    lines.append(f"  {plat}（{len(items)} 个）")
+                    for it in items:
+                        lines.append(f"    · {it.get('account')}"
+                                     f"  {it.get('note') or ''}")
+            lines.append("\n添加：直接发账号链接")
+            lines.append("删除：/src del <赛道> <平台> <账号>")
+            telegram.send_text(self.s, "\n".join(lines))
+            return
+
+        if sub in ("add", "del", "rm", "remove"):
+            if len(parts) < 5:
+                telegram.send_text(
+                    self.s,
+                    "用法：/src add <赛道> <平台> <账号>\n"
+                    "例如：/src add kuaishou2 instagram harun_home\n"
+                    "平台可选：instagram / youtube",
+                )
+                return
+            lane, plat, acct = parts[2], parts[3].lower(), parts[4]
+            if sub == "add":
+                url = (f"https://www.instagram.com/{acct}/"
+                       if plat == "instagram"
+                       else f"https://www.youtube.com/@{acct}")
+                ok, msg = sa.add_account(lane, plat, acct, url, "手动添加")
+                telegram.send_text(self.s, f"{'✅' if ok else 'ℹ️'} {msg}：{acct} → {lane}/{plat}")
+            else:
+                ok = sa.remove_account(lane, plat, acct)
+                telegram.send_text(
+                    self.s,
+                    f"{'🗑 已删除' if ok else '未找到'}：{acct}（{lane}/{plat}）")
+            return
+
+        telegram.send_text(
+            self.s,
+            "/src 用法：\n"
+            "  /src list                     查看白名单\n"
+            "  /src add <赛道> <平台> <账号>   添加\n"
+            "  /src del <赛道> <平台> <账号>   删除\n\n"
+            "更简单的方式：直接把账号主页链接发给我",
+        )
 
     def _handle_login_cmd(self, text: str) -> None:
         """远程触发平台扫码重登。二维码由发布端脚本推到 TG。
@@ -647,6 +784,31 @@ _PUBLISH_PLATFORM_CN = {
     "ig_anim": "IG·动画",
     "ig_home": "IG·家居",
 }
+
+
+_VIDEO_PATH_RE = re.compile(
+    r"instagram\.com/(?:reel|reels|p|tv)/"
+    r"|youtube\.com/(?:watch|shorts)"
+    r"|youtu\.be/"
+    r"|douyin\.com/video/"
+    r"|tiktok\.com/@[^/]+/video/"
+    r"|(?:v|vm)\.douyin\.com/"
+    r"|xiaohongshu\.com/(?:explore|discovery)"
+    r"|bilibili\.com/video/"
+    r"|facebook\.com/(?:watch|reel)",
+    re.I,
+)
+
+
+def _looks_like_video_url(text: str) -> bool:
+    """判断文本里是否含**单条视频**的链接（而非账号主页）。
+
+    为什么要区分：用户既会发视频链接，也会发源账号主页链接。
+    账号主页（instagram.com/xxx/、youtube.com/@xxx）不含这些路径，
+    误判成视频去 extract_meta 会得到「该链接是播放列表/无法解析」，
+    用户看到的是莫名其妙的报错。
+    """
+    return bool(_VIDEO_PATH_RE.search(text or ""))
 
 
 def _split_disabled_targets(s: Settings,

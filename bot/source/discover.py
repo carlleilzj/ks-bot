@@ -197,6 +197,103 @@ SOURCES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 来源：白名单账号（质量优先，与关键词搜索互补）
+# ---------------------------------------------------------------------------
+
+def discover_youtube_channel(handle: str, limit: int = 10) -> list[Candidate]:
+    """拉某个 YouTube 频道的最新视频。
+
+    handle 支持 @名字 或 UCxxx 频道 ID。用 yt-dlp 的频道列表，
+    extract_flat 足够拿到 id/title/duration，不用逐条解析。
+    """
+    import yt_dlp
+
+    if handle.startswith("UC") and len(handle) > 20:
+        url = f"https://www.youtube.com/channel/{handle}/videos"
+    else:
+        url = f"https://www.youtube.com/@{handle.lstrip('@')}/videos"
+
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+        "playlistend": max(1, limit),
+        "skip_download": True,
+        "socket_timeout": 20,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=False)
+    except Exception as e:
+        log.warning("YouTube 频道拉取失败（%s）：%s", handle, str(e)[:140])
+        return []
+
+    out: list[Candidate] = []
+    for e in (info.get("entries") or []):
+        vid = e.get("id") or ""
+        if not vid:
+            continue
+        out.append(Candidate(
+            url=f"https://www.youtube.com/watch?v={vid}",
+            title=e.get("title") or "",
+            description=e.get("description") or "",
+            source="youtube_whitelist",
+            channel=e.get("channel") or handle,
+            duration=float(e.get("duration") or 0),
+        ))
+    return out
+
+
+WHITELIST_SOURCES = {
+    "youtube": discover_youtube_channel,
+}
+
+
+def run_whitelist(lane: LaneConfig, platform: str,
+                  per_account: int = 10,
+                  per_run: int | None = None) -> list[Candidate]:
+    """从白名单账号拉候选。
+
+    白名单是「已知质量好的源」，所以放宽题材要求：
+    账号本身垂直，不必再用关键词卡一遍（否则会漏掉标题没写品类词的好素材）。
+    但仍然执行 block_any —— 带货/美妆要挡。
+
+    per_run 默认取 lane.per_run —— 布局配额应该只有一个来源，
+    两处各写一份必然会出现「改了 lane 不生效」的困惑。
+    """
+    from .source_accounts import accounts_for
+
+    if per_run is None:
+        per_run = lane.per_run
+    picked: list[Candidate] = []
+    seen: set[str] = set()
+
+    for platform_key, fn in WHITELIST_SOURCES.items():
+        for acct in accounts_for(lane.name, platform_key):
+            handle = str(acct.get("account") or "").strip()
+            if not handle:
+                continue
+            # 每个账号只取「还差多少条」，避免头一个账号就把配额吃光 ——
+            # 否则白名单只有第一个账号真正生效，后面几个形同虚设。
+            need = per_run - len(picked)
+            if need <= 0:
+                return picked
+            for cand in fn(handle, min(per_account, max(need, 1) * 2)):
+                if cand.url in seen:
+                    continue
+                blocked = match_keywords(cand.hint_text, lane.block_any)
+                if blocked:
+                    log.debug("[%s] 白名单丢弃（排除词 %s）：%s",
+                              lane.name, ",".join(blocked), cand.title[:40])
+                    continue
+                seen.add(cand.url)
+                picked.append(cand)
+                if len(picked) >= per_run:
+                    return picked
+    return picked
+
+
 def lane_from_config(name: str, conf: dict) -> LaneConfig:
     """把 config.yaml 的 platforms.<name>.discover 段转成 LaneConfig。
 
@@ -273,8 +370,24 @@ def run_discovery(s, db, force: bool = False) -> dict:
 
         srcs = sources_from_config(conf)
         try:
-            cands = run_lane(lane, sources=srcs,
-                             per_query=int(conf.get("per_query", 8)))
+            # 白名单账号优先（质量可控），关键词搜索补覆盖面。
+            # 两者合并后统一去重，白名单的候选排在前面。
+            cands = run_whitelist(
+                lane, name,
+                per_account=int(conf.get("whitelist_per_account", 10)),
+                per_run=lane.per_run,
+            )
+            if len(cands) < lane.per_run:
+                cands += run_lane(lane, sources=srcs,
+                                  per_query=int(conf.get("per_query", 8)))
+            # 合并后去重：白名单与搜索可能命中同一条
+            deduped, seen = [], set()
+            for c in cands:
+                if c.url in seen:
+                    continue
+                seen.add(c.url)
+                deduped.append(c)
+            cands = deduped[:lane.per_run]
         except Exception as e:
             log.warning("[%s] 发现失败：%s", name, str(e)[:160])
             summary.setdefault(name, {"found": 0, "new": 0,
