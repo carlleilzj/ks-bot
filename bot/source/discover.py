@@ -523,8 +523,7 @@ def run_discovery(s, db, force: bool = False) -> dict:
             if not ok:
                 skipped += 1
                 log.debug("[%s] 元数据阶段丢弃 %s：%s", name, c.url, why)
-                continue
-            # 有 require_any 的 lane 必须能证明题材对口。
+                continue            # 有 require_any 的 lane 必须能证明题材对口。
             # 若搜索标题和真实 caption 都是空的（实测有这种视频：caption 只有
             # 外链或被平台清空），说明拿不到任何题材证据 —— 宁可不要，
             # 也不要把「不知道是什么」的内容发出去。B 号漂移就是这样开始的。

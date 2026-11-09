@@ -201,38 +201,47 @@ def _scrape_links(path: str, limit: int,
             added += 1
         return added
 
-    try:
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
-            ctx = browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                user_agent=_UA,
-                locale="en-US",
-            )
-            try:
-                ctx.add_cookies(cks)
-                page = ctx.new_page()
-                page.goto(path, wait_until="domcontentloaded", timeout=45000)
-                page.wait_for_timeout(7000)
-                _collect(page)
+    # 页面偶发加载超时（实测 #四件套 一次 0 条、重跑 24 条），
+    # 单次失败不该让整个标签作废 —— 给一次重试，仍失败才放弃。
+    for attempt in range(1, 3):
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                ctx = browser.new_context(
+                    viewport={"width": 1280, "height": 900},
+                    user_agent=_UA,
+                    locale="en-US",
+                )
+                try:
+                    ctx.add_cookies(cks)
+                    page = ctx.new_page()
+                    page.goto(path, wait_until="domcontentloaded", timeout=45000)
+                    page.wait_for_timeout(7000)
+                    _collect(page)
 
-                for _ in range(max(0, pages - 1)):
-                    if len(found) >= limit:
-                        break
-                    try:
-                        page.evaluate(
-                            "window.scrollTo(0, document.body.scrollHeight)")
-                        page.wait_for_timeout(2500)
-                    except Exception:
-                        break
-                    if _collect(page) == 0:
-                        # 滚不动了（内容到底或被限流），停止
-                        break
-            finally:
-                browser.close()
-    except Exception as e:
-        log.warning("IG 页面抓取失败（%s）：%s", label or path, str(e)[:140])
-        return []
+                    for _ in range(max(0, pages - 1)):
+                        if len(found) >= limit:
+                            break
+                        try:
+                            page.evaluate(
+                                "window.scrollTo(0, document.body.scrollHeight)")
+                            page.wait_for_timeout(2500)
+                        except Exception:
+                            break
+                        if _collect(page) == 0:
+                            break
+                finally:
+                    browser.close()
+            if found or attempt == 2:
+                break
+            log.info("IG 抓取 %s 首轮空结果，重试一次", label or path)
+        except Exception as e:
+            if attempt == 2:
+                log.warning("IG 页面抓取失败（%s）：%s",
+                            label or path, str(e)[:140])
+                return found
+            log.debug("IG 抓取 %s 第 %d 次异常，重试：%s",
+                      label or path, attempt, str(e)[:100])
 
     log.info("IG 发现：%s 取到 %d 条作品链接", label or path, len(found))
     return found
