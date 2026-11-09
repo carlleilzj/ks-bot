@@ -768,13 +768,20 @@ def cmd_drift_report(db: Database, target: str, cut_date: str | None = None,
         print("尚无已发布作品，或无法确定分界日期。")
 
 
-def cmd_play_report(db: Database, target: str, days: int | None = None) -> None:
+def cmd_play_report(db: Database, target: str, days: int | None = None,
+                    mature_only: bool = False, align: bool = False,
+                    cut_date: str | None = None) -> None:
     """按分区 / 话题统计播放效果。
 
     只读报表，不改任何发布行为。用于回答「哪类内容真的有效」，
     而不是靠感觉调选题。
+
+    mature_only：只统计发布满 MATURE_HOURS 的样本。同一批作品在不同
+    测量年龄下播放量能差几十倍，不控年龄的日趋势会显示假的暴跌。
+    align：用 play_snapshots 历史，把每条作品都对齐到「发布满 72 小时」
+    那一次测量。mature_only 只是丢弃太新的样本，align 才真正让样本可比。
     """
-    from .report_play import load_works, render_report
+    from .report_play import MATURE_HOURS, align_by_age, load_works, render_report
 
     target = (target or "all").strip().lower()
     if target in ("all", ""):
@@ -784,14 +791,23 @@ def cmd_play_report(db: Database, target: str, days: int | None = None) -> None:
 
     printed = 0
     for plat in platforms:
+        note = ""
         try:
-            works = load_works(db, plat, days=days)
+            if align:
+                works, note = align_by_age(db, plat, days=days)
+            else:
+                works = load_works(
+                    db, plat, days=days,
+                    min_age_hours=MATURE_HOURS if mature_only else None)
         except Exception as e:
             print(f"⚠️ {plat}: 读取失败 {str(e)[:120]}")
             continue
         if not works:
+            if note:
+                print(f"{plat}: {note}")
             continue
-        print(render_report(works, plat))
+        print(render_report(works, plat, mature_only=mature_only or align,
+                            extra_note=note, cut_date=cut_date or ""))
         printed += 1
 
     if not printed:
@@ -1125,6 +1141,15 @@ def main() -> None:
     parser.add_argument("--play-report", nargs="?", const="all", default=None,
                         metavar="PLATFORM",
                         help="按分区/话题统计播放效果报表（all 或指定平台，不抓取只分析）")
+    parser.add_argument("--mature-only", action="store_true",
+                        help="--play-report 只统计发布满 72 小时的样本"
+                             "（测量年龄不一致时日趋势会显示假暴跌）")
+    parser.add_argument("--align-age", action="store_true",
+                        help="--play-report 用播放快照历史把每条作品对齐到"
+                             "「发布满 72 小时」的那次测量（需先积累快照）")
+    parser.add_argument("--play-cut", default=None, metavar="YYYY-MM-DD",
+                        help="--play-report 的分层对比分界日期"
+                             "（默认取检测到的第一个拐点）")
     parser.add_argument("--drift-report", nargs="?", const="all", default=None,
                         metavar="PLATFORM",
                         help="内容主题漂移检测：最近的内容和以前比变了吗（all 或指定平台）")
@@ -1264,7 +1289,9 @@ def main() -> None:
         sys.exit(0)
 
     if args.play_report is not None:
-        cmd_play_report(db, str(args.play_report), days=args.report_days)
+        cmd_play_report(db, str(args.play_report), days=args.report_days,
+                        mature_only=args.mature_only, align=args.align_age,
+                        cut_date=args.play_cut)
         sys.exit(0)
 
     if args.drift_report is not None:

@@ -98,6 +98,18 @@ CREATE TABLE IF NOT EXISTS publish_jobs (
     UNIQUE(task_id, platform)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_task ON publish_jobs(task_id);
+CREATE TABLE IF NOT EXISTS play_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    play_count INTEGER NOT NULL,
+    like_count INTEGER,
+    measured_at TEXT NOT NULL,
+    age_hours REAL
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_task ON play_snapshots(task_id, platform);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshot_unique
+    ON play_snapshots(task_id, platform, measured_at);
 """
 
 
@@ -250,6 +262,25 @@ class Database:
                WHERE state IN (?, ?) AND published_at IS NOT NULL AND ks_url IS NULL"""
             + backfill_guard,
             (State.PUBLISHED, State.NOTIFIED),
+        )
+
+        # 播放快照回填（2026-11-09）：tasks 里现有的 play_count/stats_at
+        # 就是「最后一次测量」，先把它当成第一条历史落进 play_snapshots，
+        # 这样按年龄对齐从第一天就有数据可用，不用等下一轮抓取。
+        # 用 INSERT OR IGNORE + 唯一索引保证幂等（重复启动不会写两条）。
+        self.conn.execute(
+            """INSERT OR IGNORE INTO play_snapshots
+               (task_id, platform, play_count, like_count, measured_at, age_hours)
+               SELECT pj.task_id, pj.platform, t.play_count, t.like_count,
+                      t.stats_at,
+                      CASE
+                        WHEN t.published_at IS NOT NULL AND t.stats_at IS NOT NULL
+                        THEN (julianday(t.stats_at) - julianday(t.published_at)) * 24.0
+                        ELSE NULL
+                      END
+               FROM tasks t
+               JOIN publish_jobs pj ON pj.task_id = t.id
+               WHERE t.play_count IS NOT NULL AND t.stats_at IS NOT NULL"""
         )
 
     # ---------- publish_jobs ----------
@@ -447,6 +478,53 @@ class Database:
         with self._lock:
             row = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return dict(row) if row else None
+
+    # ---------- 播放快照（bot/monitor/stats.py） ----------
+
+    def add_play_snapshot(self, task_id: int, platform: str, play_count: int,
+                          like_count: int | None, measured_at: str,
+                          age_hours: float | None) -> bool:
+        """记一条播放快照。同一 (task, platform, measured_at) 只存一次。
+
+        为什么需要历史而不只留最新值
+        --------------------------
+        2026-11-09 排查时发现：tasks 只存「最后一次测量值」，而各条作品的
+        最后测量时间并不相同（10-30 的作品测于 237h 后，11-09 的作品测于
+        6h 后）。拿这些数字直接比，等于把「长尾曲线上的不同点」当成
+        「账号的兴衰」，虚报出 4 倍跌幅。
+
+        只有保留时间序列，才能问出正确的问题：
+        「发布满 72 小时的播放量，最近比之前低了吗」。
+        返回 True 表示新插入，False 表示重复（幂等）。
+        """
+        with self._lock:
+            cur = self.conn.execute(
+                """INSERT OR IGNORE INTO play_snapshots
+                   (task_id, platform, play_count, like_count, measured_at, age_hours)
+                   VALUES (?,?,?,?,?,?)""",
+                (task_id, platform, int(play_count),
+                 int(like_count) if like_count is not None else None,
+                 measured_at,
+                 float(age_hours) if age_hours is not None else None),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def play_snapshots(self, platform: str | None = None,
+                       task_id: int | None = None) -> list[dict]:
+        """读播放快照，按测量时间升序。"""
+        sql = "SELECT * FROM play_snapshots WHERE 1=1"
+        params: list = []
+        if platform:
+            sql += " AND platform=?"
+            params.append(platform)
+        if task_id is not None:
+            sql += " AND task_id=?"
+            params.append(task_id)
+        sql += " ORDER BY measured_at"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
 
     # ---------- 平台风控状态（bot/risk.py） ----------
 

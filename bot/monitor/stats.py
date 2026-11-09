@@ -496,9 +496,19 @@ def match_task(st: WorkStat, tasks: list[dict], tolerance_min: int = 90) -> dict
 
 
 def persist(db, stats: list[WorkStat], platform: str = "douyin") -> dict:
-    """把抓到的平台数据写回 tasks 表。
+    """把抓到的平台数据写回 tasks 表，并留存历史快照。
 
-    返回 {"matched": n, "updated": n, "unmatched": n}
+    返回 {"matched": n, "updated": n, "unmatched": n, "snapshots": n}
+
+    为什么要留快照（2026-11-09）
+    ---------------------------
+    tasks.play_count 只保留「最后一次测量值」，而各条作品的最后测量时间
+    并不相同。实测数据里，10-30 发布的测于 237h 后（中位 382），
+    11-09 发布的测于 6h 后（中位 20）—— 直接比会得出「暴跌 19 倍」，
+    其中很大一部分只是长尾曲线上的位置差。
+
+    所以每次测量都落一条 play_snapshots，之后才能按「发布满 N 小时」
+    对齐比较，或看同一条作品的增长曲线。
     """
     from datetime import datetime
 
@@ -516,27 +526,44 @@ def persist(db, stats: list[WorkStat], platform: str = "douyin") -> dict:
         ).fetchall()
     tasks = [dict(r) for r in rows]
 
-    matched = updated = 0
+    matched = updated = snapshots = 0
+    measured_at = datetime.now().isoformat(timespec="seconds")
     for st in stats:
         t = match_task(st, tasks)
         if not t:
             continue
         matched += 1
+        # 测量时距发布已过多少小时 —— 后面按年龄对齐全靠它
+        age_hours = None
+        try:
+            pub = _parse_dt(t.get("published_at") or "")
+            if pub:
+                age_hours = (datetime.now() - pub).total_seconds() / 3600
+        except Exception:
+            age_hours = None
         try:
             db.update(
                 t["id"],
                 play_count=st.play_count,
                 like_count=st.like_count,
-                stats_at=datetime.now().isoformat(timespec="seconds"),
+                stats_at=measured_at,
             )
             updated += 1
-            log.debug("回写播放量：task=%s play=%s", t["id"], st.play_count)
+            log.debug("回写播放量：task=%s play=%s age=%.0fh",
+                      t["id"], st.play_count, age_hours or 0)
         except Exception as e:
             log.warning("回写播放量失败 task=%s：%s", t["id"], str(e)[:100])
+        # 快照独立于 tasks 更新：即使 tasks 更新失败也值得留档
+        try:
+            if db.add_play_snapshot(t["id"], platform, st.play_count,
+                                    st.like_count, measured_at, age_hours):
+                snapshots += 1
+        except Exception as e:
+            log.debug("播放快照写入跳过 task=%s：%s", t["id"], str(e)[:80])
 
     result = {"matched": matched, "updated": updated,
-              "unmatched": len(stats) - matched}
-    log.info("播放量回流（%s）：抓到 %d 条，匹配 %d，回写 %d，未匹配 %d",
-             platform, len(stats), matched, updated, result["unmatched"])
+              "unmatched": len(stats) - matched, "snapshots": snapshots}
+    log.info("播放量回流（%s）：抓到 %d 条，匹配 %d，回写 %d，未匹配 %d，新快照 %d",
+             platform, len(stats), matched, updated, result["unmatched"], snapshots)
     return result
 

@@ -575,6 +575,9 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
 _last_audit_at: float = 0.0
 AUDIT_INTERVAL = 30 * 60  # 30 分钟兜底巡检
 STATS_INTERVAL = 6 * 3600  # 播放量回流：6 小时一次足够（播放数据变化慢）
+# 为什么 6 小时：play_snapshots 要能画出「发布后 6h/12h/24h/48h/72h」的
+# 增长曲线，间隔太长会在关键窗口留空。抓取只覆盖管理页首屏约 60 条，
+# 所以更老的快照要靠历史累积，不能指望事后补抓。
 _last_stats_at: float = 0.0
 INCOME_INTERVAL = 6 * 3600  # 星火收益快照：6 小时一次（收益结算慢，无需频繁）
 _last_income_at: float = 0.0

@@ -110,16 +110,35 @@ class WorkRow:
     category: str
     tags: list[str]
     published_at: str
+    # 测量时距发布已过多少小时。None = 没有播放数据或无 stats_at。
+    # 为什么必须带着它：play 是「某一时刻的快照」，不是「作品的最终成绩」。
+    # 不同作品的快照年龄可能差 300 小时，直接比会得出完全错误的结论
+    # （2026-11-09 实测：原始比 3180→146 是 22 倍，同年龄对齐后只有 5.4 倍）。
+    age_hours: float | None = None
 
 
-def load_works(db, platform: str, days: int | None = None) -> list[WorkRow]:
+# 一条作品要「成熟」需要多少小时的曝光。
+# 依据：实测播放量在发布后 72 小时内基本完成主要增长，之后是长尾
+# （见 2026-11-09 分析：36~72h 中位 2109，72~120h 2403，120h 后骤降到 309）。
+MATURE_HOURS = 72.0
+
+# 年龄跨度超过这个倍数时，才提示「不可直接比较」。
+# 取 3：年龄 24h 与 72h 混在一起会明显失真，而 60h 与 72h 基本可比。
+AGE_SPREAD_WARN_RATIO = 3.0
+
+
+def load_works(db, platform: str, days: int | None = None,
+               min_age_hours: float | None = None) -> list[WorkRow]:
     """取出某平台已发布作品的文案字段与播放数据。
 
     只取 PUBLISHED 的 job；play_count 可能为 NULL（回流未匹配到），
     这类作品计入 total_works 但不计入样本（覆盖率据此计算）。
+
+    min_age_hours：只要「测量时已满 N 小时」的样本。None = 不过滤。
     """
     sql = """
-        SELECT j.platform, t.title, t.play_count, t.copy_json, j.published_at
+        SELECT j.platform, t.title, t.play_count, t.copy_json, j.published_at,
+               t.stats_at
         FROM publish_jobs j JOIN tasks t ON t.id = j.task_id
         WHERE j.state = 'PUBLISHED' AND j.platform = ?
     """
@@ -141,6 +160,9 @@ def load_works(db, platform: str, days: int | None = None) -> list[WorkRow]:
             copy = {}
         category = str(copy.get("category") or "").strip()
         tags = [str(t) for t in (copy.get("tags") or []) if str(t).strip()]
+        age = _age_hours(r["published_at"], r["stats_at"])
+        if min_age_hours is not None and (age is None or age < min_age_hours):
+            continue
         out.append(WorkRow(
             platform=platform,
             title=r["title"] or "",
@@ -148,8 +170,254 @@ def load_works(db, platform: str, days: int | None = None) -> list[WorkRow]:
             category=category,
             tags=tags,
             published_at=r["published_at"] or "",
+            age_hours=age,
         ))
     return out
+
+
+def _age_hours(published_at: str | None, stats_at: str | None) -> float | None:
+    """测量时刻距发布时刻的小时数。任一缺失返回 None。"""
+    if not published_at or not stats_at:
+        return None
+    try:
+        from datetime import datetime
+        pub = datetime.fromisoformat(str(published_at).replace("Z", ""))
+        st = datetime.fromisoformat(str(stats_at).replace("Z", ""))
+    except Exception:
+        return None
+    delta = (st - pub).total_seconds() / 3600
+    return delta if delta >= 0 else None
+
+
+def age_breakdown(works: list[WorkRow]) -> list[tuple[str, int, float]]:
+    """按「测量年龄」分桶统计中位播放，用于揭示测量偏差。
+
+    为什么这件事必须显式呈现
+    ----------------------
+    播放量是长尾增长，6 小时测和 7 天测能差几十倍。如果报表只给一个
+    总体中位数，读者会把它当成「账号水平」，而实际上它是
+    「不同年龄样本的混合值」——年龄越新的样本越多，总体中位就越低。
+
+    2026-11-09 的真实教训：A 号最近 45 条作品的播放量全部在同一秒
+    （11-09T16:47）批量回填，于是 11-09 发布的视频只测了 0~6 小时。
+    把日期当横轴做趋势，必然看到一条「暴跌曲线」——那是测量节奏，
+    不是账号表现。
+    """
+    buckets = [(0, 12), (12, 36), (36, 72), (72, 120),
+               (120, 180), (180, 240), (240, 400), (400, 10**9)]
+    out: list[tuple[str, int, float]] = []
+    for lo, hi in buckets:
+        v = [w.play for w in works
+             if w.play >= 0 and w.age_hours is not None
+             and lo <= w.age_hours < hi]
+        if v:
+            label = f"{lo}~{hi}h" if hi < 10**9 else f">{lo}h"
+            out.append((label, len(v), float(median(v))))
+    return out
+
+
+def age_spread(works: list[WorkRow]) -> tuple[float, float, bool]:
+    """样本的年龄跨度，以及是否大到不可直接比较。
+
+    返回 (最小小时, 最大小时, 是否需要警告)。
+    """
+    ages = [w.age_hours for w in works
+            if w.play >= 0 and w.age_hours is not None]
+    if not ages:
+        return (0.0, 0.0, False)
+    lo, hi = min(ages), max(ages)
+    warn = lo > 0 and hi / lo >= AGE_SPREAD_WARN_RATIO and hi - lo >= 24
+    return (lo, hi, warn)
+
+
+# ---------------------------------------------------------------------------
+# 分层对比：在每个测量年龄桶内部比较「早期 vs 近期」
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StratumCompare:
+    """某个测量年龄桶内，「分界前」与「分界后」的中位播放对比。"""
+    age_label: str
+    age_lo: float
+    age_hi: float
+    before_median: float
+    before_n: int
+    after_median: float
+    after_n: int
+
+    @property
+    def ratio(self) -> float:
+        """after / before。<1 表示近期更低。"""
+        return self.after_median / self.before_median if self.before_median > 0 else 0.0
+
+    @property
+    def comparable(self) -> bool:
+        return self.before_n >= 3 and self.after_n >= 3
+
+
+def stratified_compare(works: list[WorkRow], cut_date: str,
+                       min_age_hours: float = 12.0) -> list[StratumCompare]:
+    """在**同一测量年龄桶内**比较分界日前后，剥离测量偏差后的真实变化。
+
+    为什么这是正解
+    -------------
+    单点对齐（align_by_age）要求每条作品都有「刚好 72 小时」那次测量。
+    但抓取是每 6 小时一轮、且只覆盖管理页首屏（约最近 60 条），
+    老作品的第一条快照往往就已经是 200+ 小时——单点对齐会丢掉大半样本。
+
+    分层对比放宽了这个要求：只在「年龄相近」的作品之间比。
+    年龄 200h 的老作品与年龄 200h 的新作品，仍然可比；
+    年龄 200h 与年龄 20h 的不可比，但它们落在不同的层，不会互相污染。
+
+    这正好对应 2026-11-09 手工分析时的做法：
+    锁定 72~180h 窗口后，B 号拐点从「22 倍」修正为「5.4 倍」。
+
+    min_age_hours：低于此年龄的样本不参与（预热期波动太大）。
+    """
+    buckets = [(12, 36), (36, 72), (72, 120), (120, 180),
+               (180, 240), (240, 300), (300, 400), (400, 10**9)]
+    out: list[StratumCompare] = []
+    for lo, hi in buckets:
+        if lo < min_age_hours:
+            continue
+        chunk = [w for w in works
+                 if w.play >= 0 and w.age_hours is not None
+                 and lo <= w.age_hours < hi]
+        before = [w.play for w in chunk if (w.published_at or "")[:10] < cut_date]
+        after = [w.play for w in chunk if (w.published_at or "")[:10] >= cut_date]
+        if not before or not after:
+            continue
+        label = f"{int(lo)}~{int(hi)}h" if hi < 10**9 else f">{int(lo)}h"
+        out.append(StratumCompare(
+            age_label=label, age_lo=lo, age_hi=hi,
+            before_median=float(median(before)), before_n=len(before),
+            after_median=float(median(after)), after_n=len(after),
+        ))
+    return out
+
+
+def render_stratified(rows: list[StratumCompare], cut_date: str) -> list[str]:
+    """渲染分层对比。"""
+    lines: list[str] = []
+    lines.append(f"\n【分层对比】同一测量年龄内，{cut_date} 前后各是什么水平")
+    lines.append("-" * 78)
+    if not rows:
+        lines.append("  （每个年龄层都缺一侧样本，无法分层对比）")
+        return lines
+    lines.append(f"{'年龄层':>12} {'前n':>4} {'前中位':>9} "
+                 f"{'后n':>4} {'后中位':>9} {'倍数':>7}")
+    lines.append("-" * 78)
+    for r in rows:
+        if not r.comparable:
+            lines.append(f"{r.age_label:>12} {r.before_n:>4} {r.before_median:>9.0f} "
+                         f"{r.after_n:>4} {r.after_median:>9.0f}   （样本少）")
+            continue
+        arrow = "↓" if r.ratio < 1 else ("↑" if r.ratio > 1 else "=")
+        factor = (1 / r.ratio if 0 < r.ratio < 1 else r.ratio)
+        lines.append(f"{r.age_label:>12} {r.before_n:>4} {r.before_median:>9.0f} "
+                     f"{r.after_n:>4} {r.after_median:>9.0f} "
+                     f"{arrow}{factor:>5.1f}x")
+    lines.append("-" * 78)
+    good = [r for r in rows if r.comparable]
+    if good:
+        # 各层方向一致才有说服力：如果有的层跌有的层涨，说明差异不是时间造成的
+        downs = sum(1 for r in good if r.ratio < 0.6)
+        ups = sum(1 for r in good if r.ratio > 1.5)
+        if downs and not ups:
+            lines.append(f"  ✅ {downs} 个年龄层一致下跌 —— 排除测量偏差后，下滑是真实的")
+        elif ups and not downs:
+            lines.append(f"  ✅ {ups} 个年龄层一致上涨")
+        elif downs and ups:
+            lines.append("  ⚠️ 各层方向不一致 —— 更像是样本噪声，不宜据此下结论")
+        else:
+            lines.append("  ✅ 各层基本持平 —— 之前看到的暴跌很可能是测量偏差")
+    return lines
+
+# 目标年龄附近允许多大偏差。取 ±36h：
+# 太窄会大量丢样本（测量间隔 6h，但作品可能错过窗口）；
+# 太宽又会重新掺入增长差异（36~72h 与 72~108h 的中位已相差 1.3 倍）。
+AGE_ALIGN_TOLERANCE_HOURS = 36.0
+
+
+def align_by_age(db, platform: str, target_age_hours: float = MATURE_HOURS,
+                 tolerance_hours: float = AGE_ALIGN_TOLERANCE_HOURS,
+                 days: int | None = None) -> tuple[list[WorkRow], str]:
+    """每条作品取「最接近 target_age_hours」的那次快照，使样本可比。
+
+    为什么需要这一步
+    ---------------
+    播放量随时间增长。要比较「最近的内容 vs 之前的内容」，必须保证
+    两边测的是同一时刻的成绩，否则测到的是「年龄差」而不是「内容差」。
+
+    2026-11-09 实测：不控年龄时 B 号 11-03 前后是 3180→146（22 倍），
+    锁定在 120~180h 后是 1923→356（5.4 倍）。差的那 4 倍纯属测量偏差。
+
+    返回 (works, 说明文本)。
+    说明文本会写清实际用了多少次快照、多少条作品没有合适的快照，
+    因为「悄悄丢掉一半样本」是最容易骗过自己的做法。
+    """
+    snaps = db.play_snapshots(platform=platform)
+    if not snaps:
+        return [], "（无播放快照历史，无法按年龄对齐。跑一次 --fetch-stats 后即可累积）"
+
+    # 每 (task) 取最接近目标年龄的一条
+    best: dict[int, dict] = {}
+    for s in snaps:
+        age = s.get("age_hours")
+        if age is None:
+            continue
+        diff = abs(float(age) - target_age_hours)
+        if diff > tolerance_hours:
+            continue
+        tid = int(s["task_id"])
+        cur = best.get(tid)
+        if cur is None or diff < abs(float(cur["age_hours"]) - target_age_hours):
+            best[tid] = s
+
+    if not best:
+        return [], (f"（没有一条快照落在 {target_age_hours:.0f}±"
+                    f"{tolerance_hours:.0f}h 窗口内，无法对齐）")
+
+    # 补上文案/分区/tags 与发布日
+    placeholders = ",".join("?" * len(best))
+    sql = f"""
+        SELECT j.platform, t.id, t.title, t.copy_json, j.published_at
+        FROM publish_jobs j JOIN tasks t ON t.id = j.task_id
+        WHERE j.state = 'PUBLISHED' AND j.platform = ?
+          AND t.id IN ({placeholders})
+    """
+    params: list = [platform, *best.keys()]
+    if days:
+        sql += " AND j.published_at >= datetime('now', ?)"
+        params.append(f"-{int(days)} days")
+    with db._lock:
+        rows = db.conn.execute(sql, params).fetchall()
+
+    out: list[WorkRow] = []
+    for r in rows:
+        s = best.get(int(r["id"]))
+        if not s:
+            continue
+        copy = {}
+        try:
+            copy = (json.loads(r["copy_json"] or "{}").get(platform) or {})
+        except Exception:
+            copy = {}
+        out.append(WorkRow(
+            platform=platform,
+            title=r["title"] or "",
+            play=int(s["play_count"]),
+            category=str(copy.get("category") or "").strip(),
+            tags=[str(t) for t in (copy.get("tags") or []) if str(t).strip()],
+            published_at=r["published_at"] or "",
+            age_hours=float(s["age_hours"]),
+        ))
+
+    out.sort(key=lambda w: w.published_at)
+    total_tasks = len({int(s["task_id"]) for s in snaps})
+    note = (f"（按年龄对齐：目标 {target_age_hours:.0f}h ±{tolerance_hours:.0f}h；"
+            f"命中 {len(out)} 条 / 有快照的 {total_tasks} 条作品）")
+    return out, note
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +726,8 @@ def render_table(stats: list[GroupStat], title: str, top: int = 20) -> list[str]
 
 
 def render_report(works: list[WorkRow], platform: str, top: int = 20,
-                  show_trend: bool = True) -> str:
+                  show_trend: bool = True, mature_only: bool = False,
+                  extra_note: str = "", cut_date: str = "") -> str:
     """完整报表文本。"""
     total = overall(works)
     lines: list[str] = []
@@ -468,12 +737,33 @@ def render_report(works: list[WorkRow], platform: str, top: int = 20,
 
     missing = total.total_works - total.n
     lines.append(
-        f"\n样本：{total.n} 条有播放数据 / 共 {total.total_works} 条已发布"
-        f"（覆盖 {total.coverage * 100:.0f}%）")
+        "\n样本：{0} 条有播放数据 / 共 {1} 条已发布（覆盖 {2:.0f}%）".format(
+            total.n, total.total_works, total.coverage * 100))
     if missing:
         lines.append(
             f"  ⚠️ {missing} 条缺播放数据（回流未匹配），"
             f"各组「覆盖」列已标注，低于 60% 的结论要谨慎")
+
+    # 测量年龄诊断必须放在最前：它决定后面所有数字能不能直接比。
+    lo, hi, spread_warn = age_spread(works)
+    if mature_only:
+        lines.append(f"\n样本已按成熟度过滤：仅含发布满 {MATURE_HOURS:.0f} 小时的测量")
+        if extra_note:
+            lines.append(f"  {extra_note}")
+    elif spread_warn:
+        lines.append("")
+        lines.append("⚠️ 测量年龄不一致 —— 下面的日趋势与分组统计都不可直接比较：")
+        lines.append(f"    样本的「发布→测量」时长从 {lo:.0f}h 到 {hi:.0f}h，"
+                     f"相差 {hi / max(1.0, lo):.0f} 倍。")
+        lines.append("    播放量是长尾增长，6 小时测和 7 天测能差几十倍，"
+                     "按发布日期做趋势会得到假的暴跌。")
+        lines.append(f"    解决：加 --mature-only 只看发布满 {MATURE_HOURS:.0f} 小时的样本。")
+        breakdown = age_breakdown(works)
+        if breakdown:
+            lines.append("")
+            lines.append("    【按测量年龄】中位播放（同样内容，测得越久数字越大）")
+            for label, n, med_v in breakdown:
+                lines.append(f"      {label:>10}  n={n:>3}  中位 {med_v:>8.0f}")
 
     if total.n:
         lines.append(
@@ -492,6 +782,13 @@ def render_report(works: list[WorkRow], platform: str, top: int = 20,
                 "\n   结论只反映整体平均，**不能代表当前内容效果**。"
                 "\n   建议配合 --report-days N 只看拐点之后的区间。")
         lines.extend(render_trend(days, points, bar_max=36))
+        # 分层对比放在趋势后面：趋势会因测量偏差失真，分层对比能校正
+        if cut_date:
+            lines.extend(render_stratified(
+                stratified_compare(works, cut_date), cut_date))
+        elif points:
+            lines.extend(render_stratified(
+                stratified_compare(works, points[0].date), points[0].date))
 
     lines.extend(render_table(group_by_category(works), "【按分区】", top=top))
     lines.extend(render_table(group_by_tag(works), "【按话题】", top=top))
@@ -503,5 +800,6 @@ def render_report(works: list[WorkRow], platform: str, top: int = 20,
     lines.append("  · P25/P75 看稳定性：区间越窄，这类内容表现越可预期")
     lines.append("  · 零播数 >0 要警惕：可能是内容不推荐，也可能是被限流")
     lines.append("  · 覆盖 <60% 时，该组结论可能只代表「能回流出数据的那部分」")
+    lines.append("  · 测量年龄不一致时，日趋势会显示假的暴跌 —— 用 --mature-only")
     lines.append("=" * 78)
     return "\n".join(lines)
