@@ -297,18 +297,61 @@ def detect_change_points(days: list[DayStat],
     if not points:
         return []
 
-    # 合并相邻拐点：同一段下跌会被检测出多个，只保留最剧烈的一个
-    merged: list[ChangePoint] = []
+    # 合并同一段趋势的相邻拐点。
+    # 问题：长期下行趋势会在每个分割点都触发检测，A 号真实数据报出 8 个
+    # 「拐点」（9-15/9-19/9-24/9-30/10-18/10-24/10-29/11-08），
+    # 但它们指向同一段衰退，逐个列出只会淹没真正的突变。
+    #
+    # 合并方式：同方向、间隔 <= max_span_days 的连续拐点视为一段趋势，
+    # 合成一条 —— **date 取起点**（趋势从哪天开始，这是最有用的信息），
+    # before 取首段的基线，after 取末段的最新水平。
+    spans: list[ChangePoint] = []
     for p in points:
-        if merged and _days_close(merged[-1].date, p.date, max_gap=3):
-            # 保留偏离 1.0 更远的那个
-            if abs(p.ratio - 1) > abs(merged[-1].ratio - 1):
-                merged[-1] = p
-            continue
-        merged.append(p)
+        if spans:
+            prev = spans[-1]
+            same_direction = (p.ratio < 1) == (prev.ratio < 1)
+            if same_direction and _days_close(prev.date, p.date, max_gap=30):
+                # 扩展这段趋势：保持起点与前基线，更新终点与最新水平。
+                # before_n/after_n 取合并后两端的实际样本数 —— 直接用 p 的
+                # 会缩成最后一个分割点附近的小样本，把 confident 判成 False
+                # （真实数据里明明有 100+ 条样本却报「样本偏少」）。
+                spans[-1] = ChangePoint(
+                    date=prev.date,
+                    before_median=prev.before_median,
+                    after_median=p.after_median,
+                    before_n=prev.before_n,
+                    after_n=p.after_n,
+                    ratio=(p.after_median / prev.before_median
+                           if prev.before_median > 0 else 0.0),
+                    confident=(prev.before_n >= 10 and p.after_n >= 10),
+                )
+                continue
+        spans.append(p)
 
     # 按偏离程度排序（最严重的在前）
-    return sorted(merged, key=lambda p: abs(p.ratio - 1), reverse=True)
+    # 合并后重算 before_n / after_n：用最终确定的 date 重新切分，
+    # 否则会沿用最后一个分割点的样本数（那一段往往只有几天数据），
+    # 把明明有上百条样本的趋势误标成「样本偏少」。
+    day_map = {d.date: d for d in days}
+    recalculated: list[ChangePoint] = []
+    for sp in spans:
+        idx = next((i for i, d in enumerate(days) if d.date >= sp.date), None)
+        if idx is None:
+            recalculated.append(sp)
+            continue
+        b = sum((len(d.plays) for d in days[:idx]), 0)
+        a = sum((len(d.plays) for d in days[idx:]), 0)
+        recalculated.append(ChangePoint(
+            date=sp.date,
+            before_median=sp.before_median,
+            after_median=sp.after_median,
+            before_n=b,
+            after_n=a,
+            ratio=sp.ratio,
+            confident=(b >= 10 and a >= 10),
+        ))
+
+    return sorted(recalculated, key=lambda p: abs(p.ratio - 1), reverse=True)
 
 
 def _days_close(a: str, b: str, max_gap: int = 3) -> bool:

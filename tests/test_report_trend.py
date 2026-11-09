@@ -130,12 +130,18 @@ class TestDetectChangePoints:
         assert len(points) == 1, f"相邻拐点应合并，实际 {len(points)} 个"
 
     def test_confident_flag(self):
+        """两侧样本都够（>=10 条）时标记为可信。"""
+        # 12 天 × 4 条 = 48 条样本，拐点在第 7 天
         days = _mk_days([
-            *[(f"2026-10-{d:02d}", [3000, 3100, 2900, 3050]) for d in range(10, 20)],
-            *[(f"2026-10-{d:02d}", [100, 90, 110, 95]) for d in range(20, 30)],
+            *[(f"2026-10-{d:02d}", [3000, 3100, 2900, 3050]) for d in range(10, 22)],
+            *[(f"2026-11-{d:02d}", [100, 90, 110, 95]) for d in range(1, 8)],
         ])
         points = rp.detect_change_points(days)
-        assert points and points[0].confident is True
+        assert points, "应当检出拐点"
+        # 合并后跨度为「10-10 起下跌」，前 48 条 / 后 28 条
+        assert points[0].before_n >= 10
+        assert points[0].after_n >= 10
+        assert points[0].confident is True
 
     def test_not_confident_on_thin_sample(self):
         days = _mk_days([
