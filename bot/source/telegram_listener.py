@@ -263,7 +263,7 @@ class TelegramListener(threading.Thread):
         if not _URL_RE.search(t) or not _looks_like_video_url(t):
             ref = parse_account_ref(t)
             if ref:
-                self._handle_source_add(ref, t)
+                self._handle_source_add(ref, t, text=t)
                 return
 
         # 提取 URL（末尾英文标点单独剥离，见 _URL_RE 注释）
@@ -296,11 +296,16 @@ class TelegramListener(threading.Thread):
                     "   /login weixin / kuaishou / douyin / toutiao\n"
                     "   中文别名也行：/login 快手、/login 快手2\n\n"
                     "📚 源账号白名单（自动发现的优质素材来源）\n"
-                    "  直接把账号主页链接发给我即可添加：\n"
-                    "    https://www.instagram.com/账号名/\n"
-                    "    https://www.youtube.com/@频道名\n"
-                    "   /src list        查看白名单\n"
-                    "   /src del <赛道> <平台> <账号>   删除\n",
+                    "  ⚠️ 必须指定加到哪个号，两个号定位不同：\n"
+                    "    @快手2  → 家居带货（四件套、女性睡衣）\n"
+                    "    @快手   → 搞笑动画、萌宠\n"
+                    "  发法：账号链接 + 空格 + @标记\n"
+                    "    https://www.instagram.com/账号名/ @快手2\n"
+                    "    https://www.youtube.com/@频道名 @快手\n"
+                    "  不加标记会问你选哪个，不会猜。\n"
+                    "  /src list                        查看白名单\n"
+                    "  /src add kuaishou2 instagram 账号名  命令式添加\n"
+                    "  /src del kuaishou2 instagram 账号名  删除\n",
                 )
             return
 
@@ -474,10 +479,35 @@ class TelegramListener(threading.Thread):
     # ---------- callback_query 处理（登录菜单按钮） ----------
 
     def _handle_callback(self, cq: dict) -> None:
-        """处理内联按钮回调。callback_data 格式：login:<platform>。"""
+        """处理内联按钮回调。callback_data 格式：
+            login:<platform>                 扫码登录
+            src:<lane>:<platform>:<account>  把源账号加到指定赛道
+        """
         data = cq.get("data") or ""
-        action, _, platform = data.partition(":")
         cq_id = cq.get("id", "")
+
+        if data.startswith("src:"):
+            parts = data.split(":", 3)
+            if len(parts) < 4:
+                telegram.answer_callback(self.s, cq_id, "参数不完整")
+                return
+            _, lane, platform, account = parts
+            from . import source_accounts as sa
+            url = (f"https://www.instagram.com/{account}/"
+                   if platform == "instagram"
+                   else f"https://www.youtube.com/@{account}")
+            ok, msg = sa.add_account(lane, platform, account, url)
+            telegram.answer_callback(
+                self.s, cq_id,
+                f"{account} → {_PUBLISH_PLATFORM_CN.get(lane, lane)}")
+            telegram.send_text(
+                self.s,
+                f"{'✅' if ok else 'ℹ️'} 源账号{msg}\n"
+                f"账号：{account}（{platform}）\n"
+                f"加到：{_PUBLISH_PLATFORM_CN.get(lane, lane)}（{lane}）")
+            return
+
+        action, _, platform = data.partition(":")
         if action != "login":
             telegram.answer_callback(self.s, cq_id, "不支持的操作")
             return
@@ -488,11 +518,16 @@ class TelegramListener(threading.Thread):
         telegram.answer_callback(self.s, cq_id, f"已触发 {key} 扫码登录")
         self._handle_login_cmd(f"/login {key}")
 
-    def _handle_source_add(self, ref: tuple[str, str, str], raw: str) -> None:
+    def _handle_source_add(self, ref: tuple[str, str, str], raw: str,
+                           text: str = "") -> None:
         """把用户发来的源账号加入白名单。
 
         ref = (platform, account, canonical_url)，platform 可能为空
-        （用户只发了裸用户名），此时要求其带上 /src <赛道> 前缀。
+        （用户只发了裸用户名）。
+
+        赛道（lane）必须**显式指定**，不再默认塞给 B 号：
+        A 号是搞笑萌宠、B 号是四件套睡衣，账号定位完全不同，
+        猜错了会把动物号塞进家居池（反之亦然），而且很难事后发现。
         """
         from . import source_accounts as sa
 
@@ -500,11 +535,12 @@ class TelegramListener(threading.Thread):
         if not platform:
             telegram.send_text(
                 self.s,
-                f"⚠️ 认不出「{raw[:40]}」是哪个平台。\n"
-                f"请发完整链接：\n"
-                f"  https://www.instagram.com/账号名/\n"
-                f"  https://www.youtube.com/@频道名\n\n"
-                f"或指定赛道：/src kuaishou2 instagram 账号名",
+                f"⚠️ 认不出「{raw[:40]}」是哪个平台。\n\n"
+                f"请发完整链接，并带上要加到哪个号：\n"
+                f"  https://www.instagram.com/账号名/ @快手2\n"
+                f"  https://www.youtube.com/@频道名 @快手\n\n"
+                f"或直接用命令：\n"
+                f"  /src add kuaishou2 instagram 账号名",
             )
             return
 
@@ -512,16 +548,38 @@ class TelegramListener(threading.Thread):
         if not lanes:
             telegram.send_text(self.s, "⚠️ 没有任何平台启用自动发现，先检查 config.yaml")
             return
-        # 默认加到 lane 名与平台关键字段匹配的那个；无法判断时提示用户指定
-        lane = "kuaishou2" if "kuaishou2" in lanes else lanes[0]
+
+        # 从整条消息里找 @赛道 标记（复用投链的平台别名表）
+        lane, unknown = _parse_lane_marker(text, lanes)
+        if not lane:
+            # 没指定 → 让用户选，绝不自作主张
+            keyboard = {"inline_keyboard": [[
+                {"text": f"加到 {_PUBLISH_PLATFORM_CN.get(n, n)}",
+                 "callback_data": f"src:{n}:{platform}:{account}"}
+                for n in lanes
+            ]]}
+            name_hint = "、".join(
+                f"{_PUBLISH_PLATFORM_CN.get(n, n)}=@{n}" for n in lanes)
+            telegram.send_text(
+                self.s,
+                f"📚 识别到源账号：{account}（{platform}）\n\n"
+                f"要加到哪个号？请在链接后面加上标记再发一次，例如：\n"
+                f"  链接 @快手2   ← 家居/带货号（四件套、睡衣）\n"
+                f"  链接 @快手     ← 搞笑/萌宠号\n\n"
+                f"可用标记：{name_hint}\n"
+                f"或直接用命令：/src add <赛道> {platform} {account}",
+            )
+            return
+
         ok, msg = sa.add_account(lane, platform, account, url)
         icon = "✅" if ok else "ℹ️"
+        warn = f"\n⚠️ 未识别的标记：{', '.join(unknown)}" if unknown else ""
         telegram.send_text(
             self.s,
             f"{icon} 源账号{msg}\n"
             f"账号：{account}\n"
             f"平台：{platform}\n"
-            f"赛道：{lane}\n"
+            f"加到：{_PUBLISH_PLATFORM_CN.get(lane, lane)}（{lane}）{warn}\n"
             f"链接：{url}\n\n"
             f"下次自动发现会优先从该账号拉素材。\n"
             f"查看白名单：/src list",
@@ -558,7 +616,7 @@ class TelegramListener(threading.Thread):
                     for it in items:
                         lines.append(f"    · {it.get('account')}"
                                      f"  {it.get('note') or ''}")
-            lines.append("\n添加：直接发账号链接")
+            lines.append("\n添加：账号链接 + @标记（@快手2 家居 / @快手 萌宠）")
             lines.append("删除：/src del <赛道> <平台> <账号>")
             telegram.send_text(self.s, "\n".join(lines))
             return
@@ -567,9 +625,16 @@ class TelegramListener(threading.Thread):
             if len(parts) < 5:
                 telegram.send_text(
                     self.s,
-                    "用法：/src add <赛道> <平台> <账号>\n"
-                    "例如：/src add kuaishou2 instagram harun_home\n"
-                    "平台可选：instagram / youtube",
+                    "用法：/src add <赛道> <平台> <账号>\n\n"
+                    "赛道（两个号定位不同）：\n"
+                    "  kuaishou2  家居带货（四件套、女性睡衣）\n"
+                    "  kuaishou   搞笑动画、萌宠\n\n"
+                    "平台：instagram / youtube\n\n"
+                    "例如：\n"
+                    "  /src add kuaishou2 instagram harun_home\n"
+                    "  /src add kuaishou youtube @FunnyAnimals\n\n"
+                    "更简单：直接发账号链接 + @标记\n"
+                    "  https://www.instagram.com/harun_home/ @快手2",
                 )
                 return
             lane, plat, acct = parts[2], parts[3].lower(), parts[4]
@@ -809,6 +874,31 @@ def _looks_like_video_url(text: str) -> bool:
     用户看到的是莫名其妙的报错。
     """
     return bool(_VIDEO_PATH_RE.search(text or ""))
+
+
+def _parse_lane_marker(text: str, lanes: list[str]) -> tuple[str | None, list[str]]:
+    """从消息里找 @赛道 标记，返回 (lane, 未识别的词)。
+
+    与投链的 @平台 语法保持一致（用户不用记两套）：
+        https://... @快手2   → kuaishou2
+        https://... @快手     → kuaishou
+        https://... @ks2     → kuaishou2
+
+    只在 lanes（启用了自动发现的平台）范围内匹配 ——
+    把账号加到没开发现的平台毫无意义。
+    """
+    toks = re.findall(r"@([^\s@,，]+)", text or "")
+    unknown: list[str] = []
+    for tok in toks:
+        key = (_PUBLISH_PLATFORM_ALIASES.get(tok)
+               or _PUBLISH_PLATFORM_ALIASES.get(tok.lower()))
+        if key and key in lanes:
+            return key, unknown
+        if key and key not in lanes:
+            unknown.append(f"{tok}（该平台未启用自动发现）")
+        else:
+            unknown.append(tok)
+    return None, unknown
 
 
 def _split_disabled_targets(s: Settings,
