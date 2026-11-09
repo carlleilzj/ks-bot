@@ -177,18 +177,31 @@ def discover_youtube(query: str, limit: int = 8,
 # ---------------------------------------------------------------------------
 
 def discover_instagram(query: str, limit: int = 8) -> list[Candidate]:
-    """IG hashtag/账号发现。当前不可用，返回空并说明原因。
+    """IG 账号发现。
 
-    阻塞点（2026-11-09 实测）：
-    - /api/v1/users/web_profile_info/  → HTTP 429（无 sessionid 视为匿名）
-    - /api/v1/web/search/topsearch/    → HTTP 404 返回 HTML 登录页
-    - yt-dlp 的 instagram:user 提取器被官方标记 broken
-    只有单条 Reel 的解析（bot/source/ig_api.py）是正常的。
+    query 是账号名（白名单路径传入），走真实浏览器抓主页作品链接。
+    关键词/hashtag 搜索暂不支持（IG 的 hashtag 页需要额外签名）。
 
-    要恢复需重新导出一个**含 sessionid** 的 cookie 文件。
+    2026-11-09 实测结论：
+    - httpx + 正确 cookie → API 429/404（缺浏览器指纹）
+    - yt-dlp instagram:user → 官方标记 broken
+    - Playwright + 同一份 cookie → **正常，DOM 里能拿到作品链接**
+    所以这里委托给 bot/source/ig_discover.py。
     """
-    log.debug("IG 发现跳过（缺 sessionid，见模块 docstring）")
-    return []
+    from pathlib import Path
+
+    from .ig_discover import discover_instagram_profile
+    from ..config import DATA_DIR
+
+    items = discover_instagram_profile(
+        query, limit=limit, cookie_dir=Path(DATA_DIR) / "cookies.d")
+    return [Candidate(
+        url=it["url"],
+        title=f"@{query}",
+        description="",
+        source="instagram",
+        channel=query,
+    ) for it in items]
 
 
 SOURCES = {
@@ -262,6 +275,7 @@ def _yt_tab(url: str, limit: int) -> list[Candidate]:
 
 WHITELIST_SOURCES = {
     "youtube": discover_youtube_channel,
+    "instagram": discover_instagram,
 }
 
 
