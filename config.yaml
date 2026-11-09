@@ -161,7 +161,11 @@ platforms:
         - 床单
         - 卧室
       # 命中即丢弃，优先级高于 require_any。
-      # 用途：挡住「在卧室里化妆」这类 require 会命中、但题材完全不相关的内容。
+      # 用途1：挡住「在卧室里化妆」这类 require 会命中、但题材完全不相关的内容。
+      # 用途2：挡住带货/推广视频 —— YouTube 上大量「fluffy duvet」视频其实是
+      #        Amazon 联盟推广（caption 里带 SHOP: amzn.to 或 Check price on
+      #        Amazon），2026-11-09 实测混进来 3 条。这类内容自带外链与促销话术，
+      #        直接发到快手有违规风险，而且不是真实使用体验。
       block_any:
         - makeup
         - eyebrow
@@ -175,6 +179,16 @@ platforms:
         - 护肤
         - 电竞
         - 游戏
+        - amzn.to
+        - amazon
+        - check price
+        - shop now
+        - "shop:"
+        - "buy link"
+        - affiliate
+        - promo code
+        - discount code
+        - order now
     daily_limit: 6              # 与 A 号相同节奏（间隔 2h，全天分散）
     min_gap_hours: 2            # 覆盖全局，与 A 号一致
     # 2026-11-09 起：**取消全部变现挂载**（用户要求）。

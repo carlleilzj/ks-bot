@@ -58,6 +58,10 @@ class TestMatchKeywords:
     def test_empty_keywords(self):
         assert dc.match_keywords("anything", []) == []
 
+    def test_non_string_items_are_skipped(self):
+        """YAML 的 `- shop:` 会解析成 {'shop': None}，不能让它炸掉整条链路。"""
+        assert dc.match_keywords("shop now", [{"shop": None}, "shop now"]) == ["shop now"]
+
 
 # ---------- 赛道过滤 ----------
 
@@ -276,6 +280,25 @@ class TestConfigYamlQueries:
         blocked = " ".join(conf["block_any"]).lower()
         for word in ("makeup", "gaming", "修眉", "电竞"):
             assert word in blocked, f"排除词缺少 {word}"
+
+    def test_block_any_are_all_strings(self):
+        """YAML 里 `- shop:` 会被解析成 {'shop': None}，不是字符串。
+
+        2026-11-09 踩过：写了 `- shop:` 想挡带货话术，结果变成 dict，
+        下游 match_keywords 对着 dict 调 lower() 会炸。
+        所以这里钉住「排除词必须全是字符串」，并要求带上带货相关词。
+        """
+        import yaml
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        data = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+        blocked = data["platforms"]["kuaishou2"]["discover"]["block_any"]
+        bad = [x for x in blocked if not isinstance(x, str)]
+        assert not bad, f"block_any 里有非字符串项（YAML 类型坑）：{bad}"
+        # 带货/推广类：实测 YouTube 上大量「fluffy duvet」视频其实是 Amazon 联盟推广
+        joined = " ".join(blocked).lower()
+        for word in ("amazon", "amzn.to", "affiliate", "shop"):
+            assert word in joined, f"排除词缺少带货关键词 {word}"
 
 
 # ---------- 调度器 ----------

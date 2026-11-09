@@ -81,9 +81,20 @@ def _norm_text(s: str) -> str:
 
 
 def match_keywords(text: str, keywords: list[str]) -> list[str]:
-    """返回 text 里命中的关键词（大小写不敏感，支持中英文）。"""
+    """返回 text 里命中的关键词（大小写不敏感，支持中英文）。
+
+    防御非字符串项：config.yaml 里 `- shop:` 会被 YAML 解析成
+    {'shop': None}，直接 .lower() 会抛 AttributeError，
+    把整条发现链路带崩。这种情况跳过该项即可。
+    """
     low = _norm_text(text)
-    return [k for k in keywords if k and _norm_text(k) in low]
+    out: list[str] = []
+    for k in keywords or []:
+        if not isinstance(k, str) or not k:
+            continue
+        if _norm_text(k) in low:
+            out.append(k)
+    return out
 
 
 def evaluate(cand: Candidate, lane: LaneConfig) -> tuple[bool, str]:
