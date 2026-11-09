@@ -161,6 +161,21 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_resolve_next "
             "ON resolve_queue(state, next_attempt_at)"
         )
+        # 平台风控冷却状态（bot/risk.py 用）。
+        # 为什么单独建表而不是塞进 tasks：风控状态是「平台维度」的，
+        # 与具体任务无关；一条任务失败要影响后续所有任务。
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS platform_risk (
+                platform TEXT PRIMARY KEY,
+                risk_level INTEGER NOT NULL DEFAULT 0,
+                cooldown_until TEXT,
+                recovery_successes INTEGER NOT NULL DEFAULT 0,
+                last_risk_at TEXT,
+                last_risk_reason TEXT,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )"""
+        )
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
         if "copy_json" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN copy_json TEXT")
@@ -427,6 +442,60 @@ class Database:
         with self._lock:
             row = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         return dict(row) if row else None
+
+    # ---------- 平台风控状态（bot/risk.py） ----------
+
+    def get_risk_state(self, platform: str):
+        """读某平台的风控状态；无记录返回 None（视为健康）。"""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM platform_risk WHERE platform=?", (platform,)
+            ).fetchone()
+        if not row:
+            return None
+        from .risk import RiskState
+        d = dict(row)
+        return RiskState(
+            platform=d["platform"],
+            risk_level=int(d.get("risk_level") or 0),
+            cooldown_until=d.get("cooldown_until") or "",
+            recovery_successes=int(d.get("recovery_successes") or 0),
+            last_risk_at=d.get("last_risk_at") or "",
+            last_risk_reason=d.get("last_risk_reason") or "",
+            consecutive_failures=int(d.get("consecutive_failures") or 0),
+            updated_at=d.get("updated_at") or "",
+        )
+
+    def save_risk_state(self, state) -> None:
+        """写入/更新某平台的风控状态（upsert）。"""
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO platform_risk
+                   (platform, risk_level, cooldown_until, recovery_successes,
+                    last_risk_at, last_risk_reason, consecutive_failures, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(platform) DO UPDATE SET
+                     risk_level=excluded.risk_level,
+                     cooldown_until=excluded.cooldown_until,
+                     recovery_successes=excluded.recovery_successes,
+                     last_risk_at=excluded.last_risk_at,
+                     last_risk_reason=excluded.last_risk_reason,
+                     consecutive_failures=excluded.consecutive_failures,
+                     updated_at=excluded.updated_at""",
+                (state.platform, state.risk_level, state.cooldown_until or None,
+                 state.recovery_successes, state.last_risk_at or None,
+                 state.last_risk_reason or None, state.consecutive_failures,
+                 state.updated_at or now_iso()),
+            )
+            self.conn.commit()
+
+    def all_risk_states(self) -> list[dict]:
+        """全部平台的风控状态（诊断/报表用）。"""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM platform_risk ORDER BY risk_level DESC, platform"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def pending(self, limit: int = 50, states: list[str] | None = None) -> list[dict]:
         """返回本轮要推进的任务。

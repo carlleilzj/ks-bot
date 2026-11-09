@@ -26,6 +26,7 @@ from .ai.asr import transcribe
 from .ai.copywriter import generate_copy
 from .ai.vision import inspect_video_frames, watermark_only_block
 from .config import (
+    DATA_DIR,
     ENV_PATH,
     FINAL_DIR,
     LOGS_DIR,
@@ -533,11 +534,25 @@ def publish_gate(s: Settings, db: Database, platform: str | None = None) -> str 
     停用平台（platforms.<name>.enabled=false）一律拦截：停用期间已存在的
     PENDING job 不再被发布端领取（2026-10-12，此前停用只挡新建 job，
     存量 job 仍会被派发并每条烧 15 分钟超时）。恢复 enabled 后自动继续。
+
+    风控冷却（2026-11-09 新增）：如果该平台已命中过平台风控，
+    冷却期内一律拦截 —— 这是「日限/间隔」之外的第四道闸，
+    解决「刚被警告完又照常发下一条」的问题（见 bot/risk.py）。
     """
     if platform:
         plat = s.platforms.get(platform)
         if plat is None or not plat.enabled:
             return f"{platform} 已停用（platforms.{platform}.enabled=false）"
+        # 第四道闸：平台风控冷却（优先级最高——被警告时任何节奏都不该发）
+        try:
+            from .risk import evaluate_publish_gate
+            risk_state = db.get_risk_state(platform)
+            decision = evaluate_publish_gate(risk_state)
+            if not decision.allowed:
+                return decision.reason
+        except Exception as e:
+            # 风控状态读取失败不能阻断发布（表缺失/迁移未跑时不至于全停）
+            log.debug("风控状态检查失败（按放行处理）：%s", str(e)[:120])
     pub = s.publish
     now = datetime.now()
     plat = s.platforms.get(platform) if platform else None
@@ -715,6 +730,118 @@ def cycle(s: Settings, db: Database, dry_run: bool, headed: bool, stage: str = "
 
 
 # ---------- 子命令 ----------
+
+def cmd_audit_env(s: Settings, db: Database) -> None:
+    """账号环境隔离诊断：回答「几个号会不会被平台判定成同一环境」。"""
+    from .audit_env import analyze, collect_envs
+
+    print("=" * 68)
+    print(" 账号环境隔离诊断")
+    print("=" * 68)
+
+    envs = collect_envs(DATA_DIR, s.platforms)
+    if not envs:
+        print("没有启用的平台")
+        return
+
+    report = analyze(envs)
+
+    print(f"\n共检查 {len(envs)} 个账号：\n")
+    header = f"{'平台':<16} {'登录态':<8} {'凭据指纹':<18} {'出口IP':<18} 环境ID"
+    print(header)
+    print("-" * 68)
+    for a in envs:
+        state_mark = "✓" if a.profile_exists else "✗"
+        fp = a.credential_fp or "(无)"
+        ip = a.exit_ip or "(未知)"
+        print(f"{a.platform:<16} {state_mark:<8} {fp:<18} {ip:<18} {a.environment_id}")
+
+    print()
+    if report.warnings:
+        print("诊断结论：")
+        for w in report.warnings:
+            print(f"  {w}")
+    else:
+        print("✅ 未发现环境关联风险（各账号 Profile / 凭据 / 出口均独立）")
+
+    # 分组明细：同一出口 / 同一凭据
+    net_groups = report.same_network_groups()
+    if net_groups:
+        print("\n同出口 IP 分组：")
+        for ip, plats in net_groups.items():
+            print(f"  {ip}: {', '.join(plats)}")
+
+    dup = report.duplicate_credentials()
+    if dup:
+        print("\n重复凭据分组（高危）：")
+        for fp, plats in dup.items():
+            print(f"  {fp}: {', '.join(plats)}")
+
+    print("\n" + "=" * 68)
+    print("说明：")
+    print("  · 浏览器型平台（快手/抖音/小红书等）靠 state 文件区分登录态")
+    print("  · IG 走 Meta 官方 API，无浏览器 Profile，「登录态」是 token")
+    print("  · 环境 ID 相同 = 平台可能视为同一操作者（连坐风险）")
+    print("=" * 68)
+
+
+def cmd_risk_status(db: Database) -> None:
+    """查看各平台风控冷却状态。"""
+    from .risk import format_duration
+
+    rows = db.all_risk_states()
+    print("=" * 68)
+    print(" 平台风控冷却状态")
+    print("=" * 68)
+    if not rows:
+        print("\n✅ 所有平台健康（无风控记录）")
+        return
+
+    print(f"\n{'平台':<16} {'风险等级':<10} {'剩余冷却':<12} 最近原因")
+    print("-" * 68)
+    for r in rows:
+        from .risk import RiskState
+        st = RiskState(
+            platform=r["platform"],
+            risk_level=int(r.get("risk_level") or 0),
+            cooldown_until=r.get("cooldown_until") or "",
+            recovery_successes=int(r.get("recovery_successes") or 0),
+            last_risk_at=r.get("last_risk_at") or "",
+            last_risk_reason=r.get("last_risk_reason") or "",
+            consecutive_failures=int(r.get("consecutive_failures") or 0),
+            updated_at=r.get("updated_at") or "",
+        )
+        remaining = st.cooldown_remaining_sec()
+        left = format_duration(remaining) if remaining > 0 else "无"
+        reason = (st.last_risk_reason or "")[:32]
+        print(f"{st.platform:<16} {st.risk_level}/4{'':<7} {left:<12} {reason}")
+
+    print("\n冷却期内 publish_gate 会直接拦截该平台，无需人工干预。")
+    print("平台侧问题已处理时可手动解除：python -m bot.main --clear-risk <平台>")
+
+
+def cmd_clear_risk(db: Database, target: str) -> None:
+    """人工解除平台风控冷却。"""
+    from .risk import RiskState, manual_clear
+
+    target = (target or "").strip()
+    if not target:
+        print("用法：python -m bot.main --clear-risk <平台名|all>")
+        return
+
+    rows = db.all_risk_states()
+    names = [r["platform"] for r in rows] if target == "all" else [target]
+    if not names:
+        print("没有风控记录需要清理")
+        return
+
+    for name in names:
+        state = db.get_risk_state(name) or RiskState(platform=name)
+        before = state.risk_level
+        manual_clear(state)
+        db.save_risk_state(state)
+        print(f"✓ {name}: 风险等级 {before} → 0，冷却已解除")
+
 
 def cmd_ig_check(s: Settings) -> None:
     """检查 Instagram 矩阵号配置：凭据 / 发布配额 / 媒体公网链路。
@@ -935,6 +1062,13 @@ def main() -> None:
                         help="与 --reply-comments 配合：执行真实回复（未指定则为安全 dry-run）")
     parser.add_argument("--ig-check", action="store_true",
                         help="检查 Instagram 矩阵号配置：凭据有效性、发布配额、媒体公网链路（不发视频）")
+    parser.add_argument("--audit-env", action="store_true",
+                        help="账号环境隔离诊断：检查是否为同一 Profile/登录态/出口 IP（评估连坐风险）")
+    parser.add_argument("--risk-status", action="store_true",
+                        help="查看各平台风控冷却状态（风险等级/剩余冷却时间/最近原因）")
+    parser.add_argument("--clear-risk", nargs="?", const="all", default=None,
+                        metavar="PLATFORM",
+                        help="人工解除平台风控冷却（平台名或 all）")
     parser.add_argument("--max-replies", type=int, default=3, metavar="N",
                         help="--reply-comments 单轮最大回复条数（默认 3，硬上限 10）")
     parser.add_argument("--retry-failed", action="store_true", help="重置失败任务并续跑")
@@ -1012,6 +1146,18 @@ def main() -> None:
 
     if args.ig_check:
         cmd_ig_check(s)
+        sys.exit(0)
+
+    if args.audit_env:
+        cmd_audit_env(s, db)
+        sys.exit(0)
+
+    if args.risk_status:
+        cmd_risk_status(db)
+        sys.exit(0)
+
+    if args.clear_risk is not None:
+        cmd_clear_risk(db, str(args.clear_risk))
         sys.exit(0)
 
     if args.stats_report:

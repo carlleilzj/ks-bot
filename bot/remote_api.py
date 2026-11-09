@@ -317,6 +317,56 @@ class RemoteApi:
         } for r in rows]
         return {"ok": True, "platform": platform, "count": len(items), "items": items}
 
+    def _record_risk(self, platform: str, *, ok: bool, error: str,
+                     display: str = "") -> None:
+        """更新平台风控状态（成功→渐进恢复 / 风控失败→递增冷却）。
+
+        只有确认是「平台风控」的失败才冷却；登录失效与网络问题不冷却，
+        否则一次网络抖动就停发半小时，属于过度反应。
+        """
+        from .risk import (RiskState, apply_failure, apply_success,
+                           classify_failure, format_duration)
+
+        state = self.db.get_risk_state(platform) or RiskState(platform=platform)
+
+        if ok:
+            before_level = state.risk_level
+            apply_success(state)
+            self.db.save_risk_state(state)
+            if before_level > 0 and state.risk_level < before_level:
+                try:
+                    from .notify import telegram
+                    telegram.notify_info(
+                        self.s,
+                        f"🟢 {display or platform} 风险等级恢复中："
+                        f"{before_level} → {state.risk_level}")
+                except Exception:
+                    pass
+            return
+
+        category, signal = classify_failure(error)
+        apply_failure(state, category, signal)
+        self.db.save_risk_state(state)
+
+        if category == "risk":
+            remaining = state.cooldown_remaining_sec()
+            log.warning("[风控] %s 命中平台风控（level=%d），冷却 %s：%s",
+                        platform, state.risk_level,
+                        format_duration(remaining), signal)
+            try:
+                from .notify import telegram
+                telegram.notify_info(
+                    self.s,
+                    f"🛑 {display or platform} 命中平台风控\n"
+                    f"原因：{signal}\n"
+                    f"已暂停该平台发布 {format_duration(remaining)}"
+                    f"（风险等级 {state.risk_level}/{4}）\n"
+                    f"冷却期内自动跳过，无需人工干预\n"
+                    f"若平台侧问题已处理，可运行：\n"
+                    f"  python -m bot.main --clear-risk {platform}")
+            except Exception:
+                pass
+
     def report_url(self, data: dict) -> dict:
         """补录已发布作品的公开链接（发布端补链接任务回报）。
 
@@ -537,6 +587,14 @@ class RemoteApi:
             display = platform
 
         from .notify import telegram
+        # ---- 平台风控状态记账（bot/risk.py）----
+        # 只在「发布结果」这一层记账：成功 → 渐进恢复；失败 → 分类后决定是否冷却。
+        # 登录失效不算风控（该走重登），网络问题也不算（该退避重试）。
+        try:
+            self._record_risk(platform, ok=ok, error=err, display=display)
+        except Exception as e:
+            log.debug("风控状态记账失败（忽略）：%s", str(e)[:120])
+
         if ok:
             log.info("[%s] %s 发布成功：%s", task["shortcode"], display, url or "-")
             telegram.notify_info(self.s, f"✅ [{task['shortcode']}] {display} 发布成功（远程发布端回报）"
