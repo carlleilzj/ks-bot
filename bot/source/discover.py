@@ -210,9 +210,24 @@ def discover_youtube_channel(handle: str, limit: int = 10) -> list[Candidate]:
     import yt_dlp
 
     if handle.startswith("UC") and len(handle) > 20:
-        url = f"https://www.youtube.com/channel/{handle}/videos"
+        base = f"https://www.youtube.com/channel/{handle}"
     else:
-        url = f"https://www.youtube.com/@{handle.lstrip('@')}/videos"
+        base = f"https://www.youtube.com/@{handle.lstrip('@')}"
+
+    # 优先拉 Shorts 页签：本流水线发布的是竖屏短视频，频道主 feed 里
+    # 大量是 10~30 分钟的长视频（实测 Studio McGee 5 条全在 631~1611 秒），
+    # 拉回来也被时长闸门丢光。Shorts 页签才是真正对口的供给。
+    # 若该频道没有 Shorts 页签，回退到普通 videos 页签。
+    for url in (f"{base}/shorts", f"{base}/videos"):
+        cands = _yt_tab(url, limit)
+        if cands:
+            return cands
+    return []
+
+
+def _yt_tab(url: str, limit: int) -> list[Candidate]:
+    """拉一个 yt-dlp 能识别的列表页（频道 tab / 播放列表）。"""
+    import yt_dlp
 
     opts = {
         "quiet": True,
@@ -226,7 +241,7 @@ def discover_youtube_channel(handle: str, limit: int = 10) -> list[Candidate]:
         with yt_dlp.YoutubeDL(opts) as y:
             info = y.extract_info(url, download=False)
     except Exception as e:
-        log.warning("YouTube 频道拉取失败（%s）：%s", handle, str(e)[:140])
+        log.debug("yt-dlp 列表页失败（%s）：%s", url, str(e)[:120])
         return []
 
     out: list[Candidate] = []
@@ -239,7 +254,7 @@ def discover_youtube_channel(handle: str, limit: int = 10) -> list[Candidate]:
             title=e.get("title") or "",
             description=e.get("description") or "",
             source="youtube_whitelist",
-            channel=e.get("channel") or handle,
+            channel=e.get("channel") or "",
             duration=float(e.get("duration") or 0),
         ))
     return out
@@ -281,6 +296,12 @@ def run_whitelist(lane: LaneConfig, platform: str,
                 return picked
             for cand in fn(handle, min(per_account, max(need, 1) * 2)):
                 if cand.url in seen:
+                    continue
+                # 时长闸门要和白名单一起用：实测 Studio McGee 这类家居频道
+                # 全是 10~27 分钟的长视频（631~1611 秒），不过滤会白拉。
+                if cand.duration and not (lane.min_duration <= cand.duration <= lane.max_duration):
+                    log.debug("[%s] 白名单丢弃（时长 %.0fs）：%s",
+                              lane.name, cand.duration, cand.title[:40])
                     continue
                 blocked = match_keywords(cand.hint_text, lane.block_any)
                 if blocked:
