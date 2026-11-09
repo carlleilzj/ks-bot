@@ -307,7 +307,16 @@ def download(url: str, dest: Path) -> Path:
         "quiet": True,
         "no_warnings": True,
         "outtmpl": f"{out_dir}/{out_name}.%(ext)s",
-        "format": "best[ext=mp4]/bestvideo*+bestaudio/best",
+        # 格式选择（2026-11-09 修正）
+        # ----------------------------
+        # 旧值 "best[ext=mp4]/bestvideo*+bestaudio/best" 会失败：
+        # YouTube 现在把音视频分开给（m4a / mp4 只有画面），没有
+        # 「带音频的 mp4 单流」。而 best[ext=mp4] 会匹配到 233/234 这类
+        # storyboard 占位格式（vcodec=none），yt-dlp 判定不可用后**直接抛错**，
+        # 不再回退到后面的备用选择器。
+        # 实测该视频：best[ext=mp4] 失败、bestvideo*+bestaudio 成功（135+251）。
+        # 所以把「分离流合并」放在第一位，它才是 YouTube 的常规形态。
+        "format": "bestvideo*+bestaudio/best[ext=mp4]/best",
         "merge_output_format": "mp4",
         # 下载后如果格式不是 mp4，自动转码
         "postprocessors": [],
