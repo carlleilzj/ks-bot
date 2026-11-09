@@ -74,6 +74,24 @@ class TestMatchKeywords:
         """YAML 的 `- shop:` 会解析成 {'shop': None}，不能让它炸掉整条链路。"""
         assert dc.match_keywords("shop now", [{"shop": None}, "shop now"]) == ["shop now"]
 
+    def test_arabic_text(self):
+        """B 号 24% 的素材来自阿拉伯语家居号，关键词必须支持阿拉伯语。
+
+        2026-11-09 实测：白名单里的 هارون هوم（n=8 中位 3206，是最好的源）
+        发的全是阿拉伯语文案，只配中英文关键词时 100% 被判「未命中」丢掉。
+        """
+        assert dc.match_keywords("لحاف شتوي نفرين", ["لحاف"]) == ["لحاف"]
+        assert dc.match_keywords("غطاء سرير", ["غطاء"]) == ["غطاء"]
+
+    def test_russian_text(self):
+        assert dc.match_keywords("Постельное бельё", ["постель"]) == ["постель"]
+
+    def test_mixed_language_text(self):
+        """实际 caption 常是阿语混英文品牌名。"""
+        text = "لحاف جاكار Lace OekoTex مع شهاده"
+        hits = dc.match_keywords(text, ["لحاف", "bedding"])
+        assert "لحاف" in hits
+
 
 # ---------- 赛道过滤 ----------
 
@@ -331,6 +349,30 @@ class TestConfigYamlQueries:
         joined = " ".join(blocked).lower()
         for word in ("amazon", "amzn.to", "affiliate", "shop"):
             assert word in joined, f"排除词缺少带货关键词 {word}"
+
+    def test_home_lane_supports_arabic_and_russian(self):
+        """B 号题材闸门必须含阿拉伯语/俄语关键词。
+
+        2026-11-09 真实数据：B 号 24% 的素材来自阿拉伯语家居号
+        （هارون هوم n=8 中位 3206 是最好的源），1 个来自俄语号。
+        只配中英文时，这些账号的素材 100% 被判「未命中」丢掉 ——
+        等于把最好的源全部排除，只剩质量一般的英文内容。
+        """
+        import yaml
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        data = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+        req = data["platforms"]["kuaishou2"]["discover"]["require_any"]
+
+        def has_script(lo, hi):
+            return any(any(lo <= ch <= hi for ch in w) for w in req)
+
+        assert has_script("\u0600", "\u06ff"), "缺少阿拉伯语关键词"
+        assert has_script("\u0400", "\u04ff"), "缺少俄语关键词"
+        # 抽查几个真会用到的词
+        joined = " ".join(req)
+        for w in ("لحاف", "غطاء", "постель", "одеяло"):
+            assert w in joined, f"缺少关键品类词 {w}"
 
 
 # ---------- 调度器 ----------
