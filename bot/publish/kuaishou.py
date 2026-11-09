@@ -261,15 +261,54 @@ def _wait_ks_upload_done(page: Page, timeout: int = UPLOAD_TIMEOUT) -> None:
     raise PublishError(f"等待快手视频上传超时（{timeout // 60} 分钟）")
 
 
+def _upload_via_chooser(page: Page, video, label_candidates=("上传视频",)) -> bool:
+    """通过 file chooser 触发上传（优先），失败返回 False 让调用方回退。
+
+    为什么优于直接 set_input_files：
+    快手发布页同时存在多个 file input（图文一个、视频一个），
+    老实现取 `first` 在页面改版后会塞错到图文的 input（表现为
+    「已提交上传」但编辑器迟迟不出现）。走按钮 + file chooser 能保证
+    选中的是当前可见的那个入口，与真人操作一致。
+    """
+    for label in label_candidates:
+        try:
+            with page.expect_file_chooser(timeout=8000) as fc_info:
+                btn = page.get_by_role("button", name=label, exact=True)
+                clicked = False
+                for i in range(btn.count()):
+                    cand = btn.nth(i)
+                    if cand.is_visible():
+                        cand.click(timeout=4000)
+                        clicked = True
+                        break
+                if not clicked:
+                    raise RuntimeError(f"未找到可见的「{label}」按钮")
+            chooser = fc_info.value
+            chooser.set_files(str(video))
+            log.info("已通过 file chooser 提交上传（按钮「%s」）：%s", label, video.name)
+            return True
+        except Exception as e:
+            log.debug("file chooser 上传未命中（%s）：%s", label, str(e)[:120])
+    return False
+
+
 def _upload_with_retry(page: Page, video, max_attempts: int = 3, timeout: int = UPLOAD_TIMEOUT) -> None:
-    """上传视频；网络抖动导致的上传失败/超时自动重传。"""
+    """上传视频；网络抖动导致的上传失败/超时自动重传。
+
+    上传入口优先级：file chooser（更稳）→ 直接 set_input_files（兜底）。
+    """
     last_err: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         try:
             _wait_file_input_with_retry(page)
-            file_input = page.locator(SELECTORS["file_input"]).first
-            file_input.set_input_files(str(video))
-            log.info("已提交视频上传：%s（第 %d 次）", video.name, attempt)
+            if not _upload_via_chooser(page, video):
+                # 兜底：老方案。仍保留，因为部分账号/灰度版本页面没有
+                # 「上传视频」按钮（只有裸 input）。
+                file_input = page.locator(SELECTORS["file_input"]).first
+                file_input.set_input_files(str(video))
+                log.info("已通过 file input 提交上传（兜底路径）：%s", video.name)
+            else:
+                log.info("已提交视频上传：%s（第 %d 次）", video.name, attempt)
 
             _wait_ks_upload_done(page, timeout=timeout)
             return
@@ -761,11 +800,17 @@ def publish(
             # 5.9 提交前最后防线：断言描述内容非空（防静默发出空标题废片）
             _assert_desc_not_empty(page, desc_full)
 
-            # 6. 点击发布
-            _click_publish(page, title=title)
+            # 6. 点击发布（返回值是接口回包里直接提取的作品链接，最快路径）
+            resp_url = _click_publish(page, title=title)
 
-            # 6.1 先获取视频链接（等待新作品在管理页同步落库，给快手后台留足异步时间）
-            ks_url = _fetch_ks_url(context, title=title)
+            # 6.1 取视频链接：**优先用接口回包的 photoId**（零等待），
+            #     拿不到才回退到爬管理页（30~90 秒异步落库 + 排除置顶干扰）。
+            if resp_url:
+                ks_url = resp_url
+                log.info("作品链接来自发布接口回包（免等待）：%s", ks_url)
+            else:
+                log.info("接口回包未提供 photoId，回退到管理页按标题匹配…")
+                ks_url = _fetch_ks_url(context, title=title)
 
             # 6.5 发表作者首评并置顶（神评互动引导，新作品落库后进行，严格防错位）
             if first_comment:
@@ -1831,7 +1876,85 @@ def _upload_cover(page: Page, cover: Path, title: str = "") -> None:
         shot(page, "ks_cover_fail")
 
 
-def _click_publish(page: Page, title: str = "") -> None:
+def _published_url_from_payload(payload) -> str:
+    """从发布接口回包里提取作品公开地址。
+
+    为什么这条路优于爬管理页（借鉴 CreatorHub 的实践）：
+    快手发布接口（/rest/cp/works/...publish）的成功回包**自带 photoId**，
+    而管理页要看标题匹配、要等 30~90 秒异步落库、还要排除置顶作品干扰。
+    回包直取是零等待、零歧义的。
+
+    photoId 可能是：
+      - 纯数字（内部 id，短链也能用）
+      - 形如 3xabc123 的短链 key（更常见）
+    两种都能拼 https://www.kuaishou.com/short-video/<id>。
+    """
+    import re as _re
+
+    if isinstance(payload, dict):
+        for key in ("photoId", "photo_id", "photoIdStr", "photoID",
+                    "workId", "work_id"):
+            value = str(payload.get(key) or "").strip()
+            if value and _re.fullmatch(r"[0-9A-Za-z_-]{8,}", value):
+                return f"https://www.kuaishou.com/short-video/{value}"
+        # 回包常是嵌套结构，递归找
+        for value in payload.values():
+            found = _published_url_from_payload(value)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _published_url_from_payload(value)
+            if found:
+                return found
+    return ""
+
+
+def _attach_publish_response_probe(page: Page) -> dict:
+    """挂一个响应监听，捕获发布接口的成功回包。
+
+    返回一个可变 dict，调用方轮询 publish_resp["url"] / ["seen"]。
+    为什么不返回值：Playwright 的 response 回调是异步触发的，
+    只能在后续代码里读这个共享状态。
+    """
+    state = {"seen": False, "ok": False, "url": "", "message": ""}
+
+    def _on_response(response):
+        try:
+            if state["seen"]:
+                return
+            if response.request.method != "POST":
+                return
+            path = (response.url or "").lower()
+            if "/rest/cp/works/" not in path or "/publish" not in path:
+                return
+            if any(w in path for w in ("config", "snapshot", "tips")):
+                return
+            payload = response.json()
+            state["seen"] = True
+            state["ok"] = payload.get("result") in (1, "1") if isinstance(payload, dict) else False
+            if isinstance(payload, dict):
+                state["message"] = str(
+                    payload.get("message") or payload.get("error_msg") or "")
+                if state["ok"]:
+                    state["url"] = _published_url_from_payload(payload)
+            log.info("捕获发布接口回包：ok=%s url=%s",
+                     state["ok"], state["url"] or "(无 photoId)")
+        except Exception as e:
+            log.debug("解析发布回包失败（忽略）：%s", str(e)[:100])
+
+    try:
+        page.on("response", _on_response)
+    except Exception as e:
+        log.debug("挂发布响应监听失败（忽略）：%s", str(e)[:100])
+    return state
+
+
+def _click_publish(page: Page, title: str = "") -> str:
+    """点击发布并等待结果。
+
+    返回发布接口回包里的作品链接（拿不到则返回空串，由调用方回退爬管理页）。
+    """
     # 点发布前先关掉话题联想浮层（#标签 注入后快手会弹「推荐话题」浮层，可能挡住底部发布按钮）
     try:
         page.keyboard.press("Escape")
@@ -1849,7 +1972,13 @@ def _click_publish(page: Page, title: str = "") -> None:
     _remove_joyride(page)
     page.wait_for_timeout(500)
 
+    # 点之前就把响应监听挂上：回包可能在点击后几秒内到达
+    publish_resp = _attach_publish_response_probe(page)
+
     def _do_click() -> bool:
+        # 关键改进（借鉴 CreatorHub）：发布按钮在视频转码未完成时是**禁用态**，
+        # 此时点击 DOM .click() 不报错也不生效——表现为「已点击发布」但作品没发出去。
+        # 必须在 evaluate 里显式跳过 disabled / aria-disabled 的元素。
         clicked = page.evaluate("""() => {
             if (!document.getElementById('__ks_joyride_killer')) {
                 const s = document.createElement('style');
@@ -1857,18 +1986,45 @@ def _click_publish(page: Page, title: str = "") -> None:
                 s.textContent = '#react-joyride-portal, .react-joyride__overlay, .react-joyride__spotlight, .ant-tour, [class*="tour"], [class*="guide-step"] { pointer-events: none !important; z-index: -1 !important; display: none !important; }';
                 document.head.appendChild(s);
             }
+            const isDisabled = (el) => {
+                if (el.disabled) return true;
+                if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return true;
+                const cls = String(el.className || '').toLowerCase();
+                if (/(^|[\\s_-])disabled([\\s_-]|$)/.test(cls)) return true;
+                // 向上查 3 层：禁用的样式常挂在父容器上
+                let p = el.parentElement;
+                for (let i = 0; i < 3 && p; i++) {
+                    const pc = String(p.className || '').toLowerCase();
+                    if (/(^|[\\s_-])disabled([\\s_-]|$)/.test(pc)) return true;
+                    if (p.getAttribute && p.getAttribute('aria-disabled') === 'true') return true;
+                    p = p.parentElement;
+                }
+                return false;
+            };
             const els = [...document.querySelectorAll('*')].filter(el => {
                 const t = (el.textContent || '').trim();
                 const cls = (el.className || '').toString();
                 return t === '发布' && (cls.includes('button-primary') || cls.includes('_button-primary'));
             });
-            if (!els.length) return false;
-            const btn = els[els.length - 1];
-            btn.scrollIntoView({block: 'center'});
-            btn.click();
-            return true;
+            if (!els.length) return 'not_found';
+            // 从后往前找第一个可用的（页面上常有隐藏模板）
+            for (let i = els.length - 1; i >= 0; i--) {
+                const btn = els[i];
+                const r = btn.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) continue;
+                if (isDisabled(btn)) return 'disabled';
+                btn.scrollIntoView({block: 'center'});
+                btn.click();
+                return 'ok';
+            }
+            return 'not_found';
         }""")
-        if not clicked:
+        if clicked == 'disabled':
+            # 明确区分「禁用」和「没找到」：前者要等（转码未完成），
+            # 后者是页面改版，重试也没用。
+            log.info("发布按钮当前为禁用态（多在转码未完成），稍后重试")
+            return False
+        if clicked != 'ok':
             # DOM 兜底
             for loc in (
                 page.locator("div[class*='button-primary'], div[class*='_button-primary']").filter(has_text=re.compile(r"^\s*发布\s*$")),
@@ -1885,9 +2041,24 @@ def _click_publish(page: Page, title: str = "") -> None:
                     continue
         return clicked
 
-    if not _do_click():
+    # 发布按钮可能是禁用态（转码未完成/表单未就绪）：等它可用再点，
+    # 而不是立刻判定「未找到按钮」抛错。
+    clicked_ok = False
+    for attempt in range(1, 13):   # 最多等约 60 秒
+        if _do_click():
+            clicked_ok = True
+            break
+        if attempt < 12:
+            log.info("发布按钮暂不可用（第 %d/12 次），2~5 秒后重试", attempt)
+            page.wait_for_timeout(int(2000 + attempt * 250))
+            dismiss_dialogs(page)
+            _remove_joyride(page)
+
+    if not clicked_ok:
         shot(page, "ks_publish_btn_fail")
-        raise KuaishouError("未找到发布按钮，截图见 logs/（页面可能已改版）")
+        raise KuaishouError(
+            "发布按钮持续不可点击（60 秒内始终 disabled 或未找到），"
+            "截图见 logs/ — 常见原因：转码未完成、表单必填项缺失、页面已改版")
     log.info("已点击发布按钮")
 
     # 检查是否有「请在视频上传完成后再点击发布」提示，若有则等待后重试
@@ -1921,9 +2092,14 @@ def _click_publish(page: Page, title: str = "") -> None:
     deadline = time.time() + 60
     while time.time() < deadline:
         page.wait_for_timeout(2000)
+        # 接口回包是最可信的信号：拿到就直接返回（带链接）
+        if publish_resp["seen"] and publish_resp["ok"]:
+            log.info("发布接口确认成功（回包 photoId 提取到链接：%s）",
+                     publish_resp["url"] or "(无)")
+            return publish_resp["url"]
         if "/article/manage" in page.url:
             log.info("已跳转至作品管理页：%s", page.url)
-            return
+            return publish_resp["url"]
         left_form = PUBLISH_URL not in page.url
         toast_text = _visible_toast_text(page)
         if toast_text:
@@ -1943,7 +2119,7 @@ def _click_publish(page: Page, title: str = "") -> None:
                     saw_success = True
                     if left_form:
                         log.info("检测到快手发布成功提示且已离开发布页：%s", text)
-                        return
+                        return publish_resp["url"]
                     log.debug("看到「%s」但仍停在发布页，继续等待跳转", text)
     if saw_success:
         # 见过成功提示，只是没赶上 URL 跳转：再给一次核实机会
@@ -1951,7 +2127,7 @@ def _click_publish(page: Page, title: str = "") -> None:
             page.wait_for_timeout(3000)
             if PUBLISH_URL not in page.url or _title_in_manage_list(page, title):
                 log.info("曾检测到发布成功提示，且已离开发布页/管理页可见新作品 → 判定发布成功")
-                return
+                return publish_resp["url"]
         except Exception:
             pass
     # 未检测到跳转：打开内容管理页核实最新作品是否出现（必须核实标题）
@@ -1960,7 +2136,7 @@ def _click_publish(page: Page, title: str = "") -> None:
         page.wait_for_timeout(4000)
         if _title_in_manage_list(page, title):
             log.info("内容管理页已核实出现新作品「%s」（发布成功）", title[:20])
-            return
+            return publish_resp["url"]
     except Exception:
         pass
     shot(page, "ks_publish_result_unknown")
