@@ -859,6 +859,10 @@ _VIDEO_PATH_RE = re.compile(
     r"|tiktok\.com/@[^/]+/video/"
     r"|(?:v|vm)\.douyin\.com/"
     r"|xiaohongshu\.com/(?:explore|discovery)"
+    r"|xhslink\.(?:com|cn)/"
+    r"|kuaishou\.com/(?:short-video/|photo/)"
+    r"|(?:v|v1)\.kuaishou\.com/"
+    r"|toutiao\.com/(?:video/|item/|a)"
     r"|bilibili\.com/video/"
     r"|facebook\.com/(?:watch|reel)",
     re.I,

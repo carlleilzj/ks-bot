@@ -21,11 +21,25 @@ from bot.source.telegram_listener import (
 from bot.source.source_accounts import parse_account_ref
 
 
-LANES = ["kuaishou", "kuaishou2"]
+LANES = ["kuaishou", "kuaishou2", "ig_pets", "ig_satisfying", "ig_anim", "ig_home"]
 
 
 class TestLaneMarker:
     """@标记 解析：与投链的 @平台 语法一致，用户不用记两套。"""
+
+    def test_overseas_aliases(self):
+        """出海 4 大账号标记测试。"""
+        for marker in ("@ig家居", "@ig好物", "@ig带货", "@ig_home", "@ighome", "@家居ig"):
+            assert _parse_lane_marker(f"https://www.instagram.com/xxx/ {marker}", LANES)[0] == "ig_home"
+
+        for marker in ("@ig萌宠", "@ig宠物", "@ig_pets", "@igpets", "@ig"):
+            assert _parse_lane_marker(f"https://www.instagram.com/xxx/ {marker}", LANES)[0] == "ig_pets"
+
+        for marker in ("@ig解压", "@ig治愈", "@ig_satisfying", "@igsatisfying", "@解压ig"):
+            assert _parse_lane_marker(f"https://www.instagram.com/xxx/ {marker}", LANES)[0] == "ig_satisfying"
+
+        for marker in ("@ig动画", "@ig_anim", "@iganim", "@动画ig"):
+            assert _parse_lane_marker(f"https://www.instagram.com/xxx/ {marker}", LANES)[0] == "ig_anim"
 
     def test_chinese_alias_b2(self):
         lane, unknown = _parse_lane_marker(

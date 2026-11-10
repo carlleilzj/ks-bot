@@ -479,6 +479,45 @@ platforms:
     daily_limit: 2
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
+    discover:
+      enabled: true
+      interval_hours: 6
+      per_run: 4
+      sources: []               # 走 IG 发现与白名单
+      ig_tags:
+        - funnyanimals
+        - cutepets
+        - petmemes
+        - funnycats
+        - dogsofinstagram
+        - catsofinstagram
+        - 萌宠
+        - 搞笑动物
+        - 宠物日常
+        - 橘猫
+      require_any:
+        - cat
+        - dog
+        - pet
+        - puppy
+        - kitten
+        - cute
+        - funny
+        - meow
+        - bark
+        - 猫
+        - 狗
+        - 宠物
+        - 橘猫
+        - 萌宠
+        - 汪星人
+        - 喵星人
+      block_any:
+        - makeup
+        - cooking
+        - recipe
+        - news
+        - 采访
   ig_satisfying:
     enabled: true
     default: false
@@ -487,6 +526,51 @@ platforms:
     daily_limit: 2
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
+    discover:
+      enabled: true
+      interval_hours: 6
+      per_run: 4
+      sources: []
+      ig_tags:
+        - oddlysatisfying
+        - satisfying
+        - asmr
+        - hoofcleaning
+        - deepcleaning
+        - woodworking
+        - soapcutting
+        - restoration
+        - 微缩模型
+        - 沉浸式收纳
+        - 洗地毯
+        - 修蹄
+      require_any:
+        - satisfying
+        - asmr
+        - clean
+        - hoof
+        - carpet
+        - restore
+        - carving
+        - soap
+        - sand
+        - glass
+        - 修蹄
+        - 洗地毯
+        - 木工
+        - 雕刻
+        - 肥皂
+        - 动力沙
+        - 微缩
+        - 修复
+        - 收纳
+      block_any:
+        - makeup
+        - recipe
+        - cooking
+        - dance
+        - tutorial
+        - 采访
   ig_anim:
     enabled: true
     default: false
@@ -495,6 +579,44 @@ platforms:
     daily_limit: 2
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
+    discover:
+      enabled: true
+      interval_hours: 6
+      per_run: 4
+      sources: []
+      ig_tags:
+        - 3danimation
+        - aianimation
+        - blender3d
+        - cgi
+        - animatedshort
+        - 3D动画
+        - AI动画
+        - 搞笑动画
+        - 脑洞动画
+      require_any:
+        - 3d
+        - animation
+        - animated
+        - cgi
+        - blender
+        - cartoon
+        - dragon
+        - dino
+        - ai
+        - 动画
+        - 卡通
+        - 3D
+        - 神反转
+        - 脑洞
+        - 恐龙
+        - 神龙
+      block_any:
+        - makeup
+        - cooking
+        - news
+        - 教程
+        - 教学
   ig_home:
     enabled: true
     default: false
@@ -503,6 +625,57 @@ platforms:
     daily_limit: 2
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
+    discover:
+      enabled: true
+      interval_hours: 6
+      per_run: 4
+      sources: []
+      ig_tags:
+        - homedecor
+        - bedroomdecor
+        - cozyhome
+        - homegadgets
+        - amazonfinds
+        - roommakeover
+        - 氛围灯
+        - 收纳神器
+        - 卧室改造
+        - 厨房好物
+        - 家居美学
+        - 四件套
+        - 睡衣
+      require_any:
+        - home
+        - room
+        - decor
+        - gadget
+        - lamp
+        - light
+        - organizer
+        - storage
+        - cozy
+        - aesthetic
+        - kitchen
+        - bedroom
+        - bedding
+        - pajama
+        - pyjama
+        - 氛围灯
+        - 收纳
+        - 卧室改造
+        - 家居
+        - 懒人
+        - 好物
+        - 小家电
+        - 四件套
+        - 睡衣
+        - 投影灯
+      block_any:
+        - makeup
+        - cooking recipe
+        - 妆容
+        - 美妆
+        - 穿搭教程
 
 # 各平台可选分区列表（发布页有分区选择的平台才需要；抖音/小红书无分区，用话题标签）
 # LLM 会从中选择一个；列表与实际不符时自动降级为不选分类

@@ -254,6 +254,23 @@ SEED_ANIMALS = [
 ]
 
 
+# 海外 4 个矩阵号对应的预置白名单
+SEED_OVERSEAS = [
+    # ig_pets 萌宠
+    {"lane": "ig_pets", "account": "kataicinema", "url": "https://www.instagram.com/kataicinema/", "note": "3D动物搞笑动画"},
+    {"lane": "ig_pets", "account": "mamahentale", "url": "https://www.instagram.com/mamahentale/", "note": "萌宠母鸡历险"},
+    {"lane": "ig_pets", "account": "bingwave123", "url": "https://www.instagram.com/bingwave123/", "note": "动物无声动画"},
+    # ig_anim 动画
+    {"lane": "ig_anim", "account": "aivoxy", "url": "https://www.instagram.com/aivoxy/", "note": "治愈3D动画"},
+    {"lane": "ig_anim", "account": "she_talks_ai", "url": "https://www.instagram.com/she_talks_ai/", "note": "3D脑洞短片"},
+    {"lane": "ig_anim", "account": "cartoonworldtop", "url": "https://www.instagram.com/cartoonworldtop/", "note": "奇幻小剧场"},
+    # ig_home 家居
+    {"lane": "ig_home", "account": "harun_home", "url": "https://www.instagram.com/harun_home/", "note": "家纺四件套实拍"},
+    {"lane": "ig_home", "account": "cilinea", "url": "https://www.instagram.com/cilinea/", "note": "软装与睡衣穿搭"},
+    {"lane": "ig_home", "account": "grand.style", "url": "https://www.instagram.com/grand.style/", "note": "轻奢卧室质感"},
+]
+
+
 def seed_if_empty() -> int:
     """首次运行时写入预置白名单（已有内容则不动）。返回写入条数。"""
     if ACCOUNTS_FILE.exists() and _load():
@@ -265,6 +282,10 @@ def seed_if_empty() -> int:
         n += int(ok)
     for item in SEED_ANIMALS:
         ok, _ = add_account("kuaishou", "instagram",
+                            item["account"], item["url"], item["note"])
+        n += int(ok)
+    for item in SEED_OVERSEAS:
+        ok, _ = add_account(item["lane"], "instagram",
                             item["account"], item["url"], item["note"])
         n += int(ok)
     return n
@@ -279,6 +300,10 @@ def sync_builtin_seeds() -> int:
         n += int(ok)
     for item in SEED_ANIMALS:
         ok, _ = add_account("kuaishou", "instagram",
+                            item["account"], item["url"], item["note"])
+        n += int(ok)
+    for item in SEED_OVERSEAS:
+        ok, _ = add_account(item["lane"], "instagram",
                             item["account"], item["url"], item["note"])
         n += int(ok)
     return n

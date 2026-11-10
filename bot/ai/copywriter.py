@@ -170,19 +170,20 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
     ),
     "ig_home": PlatformProfile(
         name="ig_home", display_name="IG·家居", max_title_len=90, max_tags=8,
-        tone="English, aspirational home-decor voice. First line = the desire hook.",
-        desc_hint="one short line selling the feeling/benefit, max ~100 chars",
+        tone="English, aesthetic home-decor & smart living voice. First line = the instant desire/save hook.",
+        desc_hint="one short line selling the cozy vibe or practical lifehack, max ~100 chars",
         title_style=(
-            "2. Write the CAPTION HOOK in English for a home-decor / gadgets account:\n"
-            "   - Sell the feeling, not the product: \"this is the corner I never leave ✨\",\n"
-            "     \"my dream setup, no notes 🛋️\", \"the coziest 10 seconds of my day\"\n"
-            "   - Or create save-bait: \"saving this for my future apartment\"\n"
+            "2. Write the CAPTION HOOK in English for an aesthetic home-decor / smart living account:\n"
+            "   - Target categories: bedding/pajamas, ambient lighting, space-saving gadgets, room makeovers, kitchen appliances, cozy lazy hacks.\n"
+            "   - Sell the feeling or lifehack: \"the corner I never want to leave ✨\",\n"
+            "     \"saving this for my dream bedroom 🛋️\", \"the space-saving hack nobody told you about\",\n"
+            "     \"the coziest 10 seconds of my day ☁️\", \"aesthetic and actually useful\"\n"
             "   - at most 2 emojis; never invent brand names or prices"
         ),
         tag_base="",
         tag_content_slots=8,
         tag_fixed_pool=("homedecor", "interiordesign", "cozyhome", "amazonfinds",
-                        "reelsviral", "fyp"),
+                        "homegadgets", "bedroommakeover", "roomdecor", "fyp"),
     ),
 }
 

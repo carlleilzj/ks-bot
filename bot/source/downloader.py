@@ -20,17 +20,37 @@ log = logging.getLogger(__name__)
 # cookies 文件（Netscape 格式）：存在则自动启用，解决 IG/YT 对数据中心 IP 的
 # 强制登录风控（"empty media response" / "Sign in to confirm you're not a bot"）。
 _COOKIE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "cookies.txt"
+_COOKIE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "cookies.d"
 
 
 def _pick_cookies(url: str) -> tuple[Path | None, str]:
-    """选 cookie 文件。IG 走多账号池，其余平台用遗留单文件。
+    """选 cookie 文件。
+
+    - Instagram: 走多账号池（轮换 + 冷却）
+    - 国内平台（抖音/小红书/快手/头条）: 优先选用专属 Cookie 文件 (data/cookies.d/*.txt)
+    - 其它平台: 回退到遗留单文件 data/cookies.txt
 
     返回 (cookie 路径 or None, 账号名 or "")。
     """
-    if "instagram.com" in (url or "").lower():
+    u = (url or "").lower()
+    if "instagram.com" in u:
         cf = ig_pool.pick_cookiefile()
         if cf is not None:
             return cf, ig_pool.account_of(cf)
+
+    # 国内主流短视频平台专用 Cookie 文件匹配（2026-11-10 引入）
+    platform_cookie_map = {
+        ("douyin.com", "iesdouyin.com"): "douyin.txt",
+        ("xiaohongshu.com", "xhslink.com", "xhslink.cn"): "xhs.txt",
+        ("kuaishou.com", "kwai.com"): "kuaishou.txt",
+        ("toutiao.com",): "toutiao.txt",
+    }
+    for domains, filename in platform_cookie_map.items():
+        if any(d in u for d in domains):
+            p = _COOKIE_DIR / filename
+            if p.exists() and p.stat().st_size > 0:
+                return p, p.stem
+
     if _COOKIE_FILE.exists() and _COOKIE_FILE.stat().st_size > 0:
         return _COOKIE_FILE, ""
     return None, ""
