@@ -249,6 +249,14 @@ def extract_meta(url: str) -> VideoMeta:
                 raise
             log.warning("自研 IG 解析失败，回退 yt-dlp 兜底：%s", msg[:150])
 
+    # 抖音优先走自研免门禁解析器（绕过 ArgusSecurityPlugin 403 拦截并提取无水印原片）
+    from . import douyin_api
+    if douyin_api.is_douyin(clean_url):
+        try:
+            return douyin_api.extract(clean_url)
+        except Exception as e:
+            log.warning("自研抖音解析失败，回退 yt-dlp 兜底：%s", str(e)[:150])
+
     base, acct = _base_opts(clean_url)
     opts = {
         **base,
@@ -323,6 +331,14 @@ def download(url: str, dest: Path) -> Path:
     # 短链展开（与 extract_meta 保持一致：两处都必须展开，
     # 否则会出现「元数据拿到了、下载却报 Unsupported URL」的割裂）
     clean_url, _ = expand_short_link(clean_url)
+
+    # 抖音优先走自研无水印直链极速下载（秒级流式落盘，绕过 yt-dlp 403）
+    from . import douyin_api
+    if douyin_api.is_douyin(clean_url):
+        try:
+            return douyin_api.download(clean_url, dest)
+        except Exception as e:
+            log.warning("自研抖音下载失败，回退 yt-dlp 兜底：%s", str(e)[:150])
 
     # yt-dlp 的 outtmpl 控制：我们指定完整文件名，用 dest 的 stem + dir
     out_dir = str(dest.parent)
