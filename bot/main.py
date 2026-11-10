@@ -1025,6 +1025,40 @@ def cmd_ig_check(s: Settings) -> None:
     print("=" * 60)
 
 
+def cmd_yt_check(s: Settings) -> None:
+    """检查 YouTube Shorts 平台配置与凭据有效性。"""
+    from .publish import youtube as yt
+
+    print("=" * 60)
+    print(" YouTube Shorts 配置自检")
+    print("=" * 60)
+
+    cfg = s.platforms.get("youtube")
+    status = "启用" if (cfg and cfg.enabled) else "未启用"
+    print(f"\n--- youtube（{status}） ---")
+
+    acct = yt.load_account()
+    if acct is None:
+        print("   ✗ 未配置凭据：请在 .env 填写 YOUTUBE_CLIENT_ID、YOUTUBE_CLIENT_SECRET 与 YOUTUBE_REFRESH_TOKEN")
+        print("=" * 60)
+        return
+
+    cid_mask = f"{acct.client_id[:8]}…{acct.client_id[-8:]}" if len(acct.client_id) > 16 else acct.client_id
+    sec_mask = f"{acct.client_secret[:3]}…{acct.client_secret[-3:]}" if len(acct.client_secret) > 6 else "******"
+    ref_mask = f"{acct.refresh_token[:6]}…{acct.refresh_token[-4:]}" if len(acct.refresh_token) > 10 else "******"
+
+    print(f"   client_id     = {cid_mask}")
+    print(f"   client_secret = {sec_mask}")
+    print(f"   refresh_token = {ref_mask}")
+
+    try:
+        token = yt.get_access_token(acct)
+        print("   ✓ OAuth2 凭据有效，成功获取 access_token！")
+    except Exception as e:
+        print(f"   ✗ 凭据校验失败：{e}")
+    print("=" * 60)
+
+
 def cmd_setup(s: Settings) -> None:
     """交互式初始化向导：长效 token 交换 + 发现 IG_USER_ID + TG chat_id。"""
     print("=" * 56)
@@ -1188,6 +1222,8 @@ def main() -> None:
                         help="与 --reply-comments 配合：执行真实回复（未指定则为安全 dry-run）")
     parser.add_argument("--ig-check", action="store_true",
                         help="检查 Instagram 矩阵号配置：凭据有效性、发布配额、媒体公网链路（不发视频）")
+    parser.add_argument("--yt-check", action="store_true",
+                        help="检查 YouTube Shorts 配置：OAuth 凭据有效性、API 连通性（不发视频）")
     parser.add_argument("--audit-env", action="store_true",
                         help="账号环境隔离诊断：检查是否为同一 Profile/登录态/出口 IP（评估连坐风险）")
     parser.add_argument("--risk-status", action="store_true",
@@ -1275,6 +1311,10 @@ def main() -> None:
 
     if args.ig_check:
         cmd_ig_check(s)
+        sys.exit(0)
+
+    if args.yt_check:
+        cmd_yt_check(s)
         sys.exit(0)
 
     if args.audit_env:

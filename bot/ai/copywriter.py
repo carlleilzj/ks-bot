@@ -185,6 +185,20 @@ PLATFORM_PROFILES: dict[str, PlatformProfile] = {
         tag_fixed_pool=("homedecor", "interiordesign", "cozyhome", "amazonfinds",
                         "homegadgets", "bedroommakeover", "roomdecor", "fyp"),
     ),
+    "youtube": PlatformProfile(
+        name="youtube", display_name="YouTube·Shorts", max_title_len=95, max_tags=8,
+        tone="English, cinematic, mind-bending hook for YouTube Shorts / Sci-Fi / AI Animation.",
+        desc_hint="one short intriguing sentence setting up the lore, max ~100 chars",
+        title_style=(
+            "2. Write a viral YOUTUBE SHORTS TITLE in English for a cinematic AI/3D animation:\n"
+            "   - Intriguing, curiosity-inducing, cinematic tone\n"
+            "   - Max 95 characters, at most 2 emojis\n"
+            "   - Add #Shorts at the end\n"
+        ),
+        tag_base="",
+        tag_content_slots=8,
+        tag_fixed_pool=("Shorts", "AIAnimation", "SciFi", "CGI", "Cinematic", "3DAnimation"),
+    ),
 }
 
 
@@ -277,9 +291,9 @@ def _system_prompt(profile: PlatformProfile) -> str:
     title_len_hint = (f"{_lower}~{_upper} 个字，最多两小句" if _upper > _lower
                       else f"不超过 {_upper} 个字，一句话说完")
 
-    # Instagram 矩阵号走独立的全英文 prompt：海外 Reels 的写法和国内完全不同，
+    # Instagram / YouTube 出海号走独立的全英文 prompt：海外平台的写法和国内完全不同，
     # 复用中文规范（12~24 字、禁套话表、情绪垫句清单）在英文里毫无意义。
-    if profile.name.startswith("ig_"):
+    if profile.name.startswith("ig_") or profile.name == "youtube":
         return _ig_system_prompt(profile)
     style_block = profile.title_style or (
         "2. 先写笑点，不写旁白。一句里要有「谁 + 反差/误会/吃瘪」，把最炸的结果咽住半句当钩子。\n"
@@ -453,12 +467,12 @@ def _fit_title_natural(title: str, max_len: int) -> str:
 def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dict:
     if not isinstance(obj, dict):
         raise ValueError("输出不是 JSON 对象")
-    is_ig = profile.name.startswith("ig_")
+    is_overseas = profile.name.startswith("ig_") or profile.name == "youtube"
     title = str(obj.get("title", "")).strip().strip('"""')
     if not title:
         raise ValueError("title 为空")
 
-    if not is_ig:
+    if not is_overseas:
         # 中文平台的专栏前缀清洗（【有点视频】等历史遗留）对英文无意义
         title = _strip_legacy_prefix(title)
         if not title:
@@ -475,8 +489,7 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
     tags_raw = obj.get("tags") or []
     if not isinstance(tags_raw, list):
         tags_raw = []
-    is_ig = profile.name.startswith("ig_")
-    if is_ig:
+    if is_overseas:
         # 英文标签：不截断到 10 字符（会切坏 longtail），去空格保留下划线/连写
         tags = []
         for t in tags_raw:
@@ -501,7 +514,7 @@ def _validate(obj: dict, categories: list[str], profile: PlatformProfile) -> dic
                       base_tag=profile.tag_base,
                       content_slots=profile.tag_content_slots,
                       fixed_pool=profile.tag_fixed_pool or None,
-                      latin=is_ig)
+                      latin=is_overseas)
 
     category = str(obj.get("category", "")).strip()
     if profile.supports_category and categories:
@@ -772,7 +785,7 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     def _content_block() -> str:
         if not (content and content.get("summary")):
             return ""
-        if profile.name.startswith("ig_"):
+        if profile.name.startswith("ig_") or profile.name == "youtube":
             return (
                 f"【ACTUAL VISUAL CONTENT (vision model, frame by frame — ground truth)】\n"
                 f"Subject: {content.get('subject') or 'unknown'}\n"
@@ -806,8 +819,8 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
     cap_full = caption.strip() or "（无外文简介）"
 
     def _build_user(with_content: bool, cap: str) -> str:
-        is_ig = profile.name.startswith("ig_")
-        if is_ig:
+        is_overseas = profile.name.startswith("ig_") or profile.name == "youtube"
+        if is_overseas:
             uc = (
                 (_content_block() if with_content else "")
                 + "【SOURCE CAPTION (story beats only; ignore promo talk & hashtags)】\n"
@@ -815,7 +828,7 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
                 + "【TRANSCRIPT】\n"
                 + (raw or "(no dialogue / no speech — pure visual storytelling)") + "\n\n"
             )
-            uc += (f"【PLATFORM】\n{profile.display_name} Reels "
+            uc += (f"【PLATFORM】\n{profile.display_name} "
                    f"(no category field — output empty string)\n")
             return uc
 
@@ -901,8 +914,8 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
             # 中文专用校验（幻觉词/套话/首评模板）：英文文案里这些中文字串
             # 永远不可能命中，跑一遍纯属浪费，还会因「12 到 24 字」这类
             # 中文重写指令把英文文案带歪。
-            is_ig = profile.name.startswith("ig_")
-            if not is_ig:
+            is_overseas = profile.name.startswith("ig_") or profile.name == "youtube"
+            if not is_overseas:
                 banned = _check_hallucination(result["title"], result["description"])
                 if banned:
                     # 幻觉（编造做饭/带娃等画面外剧情）绝不能兜底复用，

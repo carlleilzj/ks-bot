@@ -698,6 +698,17 @@ platforms:
         - 妆容
         - 美妆
         - 穿搭教程
+  # ============================================================
+  # YouTube Shorts 出海通道（官方 YouTube Data API v3）
+  # 凭据：.env 中 YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REFRESH_TOKEN
+  # ============================================================
+  youtube:
+    enabled: false    # 待配置 Google OAuth2 凭据后启用
+    default: false    # 必须 false：只有投链带 @yt 或 @youtube 才发
+    daily_limit: 2
+    min_gap_hours: 6
+    window: ["20:00", "06:00"]   # 跨夜：覆盖欧美黄金时段
+    is_ai_generated: true         # 声明 AI 生成
 
 # 各平台可选分区列表（发布页有分区选择的平台才需要；抖音/小红书无分区，用话题标签）
 # LLM 会从中选择一个；列表与实际不符时自动降级为不选分类

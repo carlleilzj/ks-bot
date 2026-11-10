@@ -75,6 +75,9 @@ class ExportProfile:
             "ig_home": cls("ig_home", crop_bottom_ratio=0.09,
                            strip_audio=False,
                            watermark_presets=("corner_pair",)),
+            "youtube": cls("youtube", crop_bottom_ratio=0.10,
+                           strip_audio=True,
+                           watermark_presets=("corner_pair",)),
         }
         return presets.get(account, cls(account))
 
@@ -87,23 +90,24 @@ class ExportProfile:
 
 
 _IG_ACCOUNTS = ("ig_pets", "ig_satisfying", "ig_anim", "ig_home")
+_EXPORT_ACCOUNTS = ("ig_pets", "ig_satisfying", "ig_anim", "ig_home", "youtube")
 
 
 def is_export_task(target_platforms: str | None) -> bool:
-    """判断该任务是否是出海任务（目标平台里有 ig_*）。"""
+    """判断该任务是否是出海任务（目标平台里有 ig_* 或 youtube）。"""
     if not target_platforms:
         return False
     names = {p.strip() for p in target_platforms.split(",") if p.strip()}
-    return bool(names & set(_IG_ACCOUNTS))
+    return bool(names & set(_EXPORT_ACCOUNTS))
 
 
 def export_account_of(target_platforms: str | None) -> str:
-    """取出该任务的出海账号名（多个时取第一个 ig_*）。"""
+    """取出该任务的出海账号名（多个时取第一个出海账号）。"""
     if not target_platforms:
         return ""
     for p in target_platforms.split(","):
         name = p.strip()
-        if name in _IG_ACCOUNTS:
+        if name in _EXPORT_ACCOUNTS:
             return name
     return ""
 

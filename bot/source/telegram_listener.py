@@ -834,6 +834,9 @@ _PUBLISH_PLATFORM_ALIASES = {
     "ig动画": "ig_anim", "ig_anim": "ig_anim", "iganim": "ig_anim", "动画ig": "ig_anim",
     "ig家居": "ig_home", "ig好物": "ig_home", "ig_home": "ig_home",
     "ighome": "ig_home", "家居ig": "ig_home", "ig带货": "ig_home",
+    # YouTube 出海通道
+    "yt": "youtube", "youtube": "youtube", "油管": "youtube", "油管短片": "youtube",
+    "yt_shorts": "youtube", "ytshorts": "youtube", "yt短片": "youtube", "yt短视频": "youtube",
 }
 
 # canonical key → 中文名（TG 回复用）
@@ -848,6 +851,7 @@ _PUBLISH_PLATFORM_CN = {
     "ig_satisfying": "IG·解压",
     "ig_anim": "IG·动画",
     "ig_home": "IG·家居",
+    "youtube": "YouTube·Shorts",
 }
 
 

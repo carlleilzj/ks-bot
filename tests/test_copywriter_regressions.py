@@ -56,12 +56,12 @@ def test_banned_patterns_all_reach_prompt():
 def test_title_len_hint_respects_platform_cap():
     """长度提示不能超过 12~24 基线，也不能超过平台硬上限。
 
-    Instagram 矩阵号走独立英文 prompt（无「N~M 个字」中文提示），跳过。
+    Instagram / YouTube 出海号走独立英文 prompt（无「N~M 个字」中文提示），跳过。
     """
     import re as _re
 
     for name, prof in PLATFORM_PROFILES.items():
-        if name.startswith("ig_"):
+        if name.startswith("ig_") or name == "youtube":
             continue
         prompt = _system_prompt(prof)
         m = _re.search(r"\*\*短\*\*：(\d+)~(\d+) 个字", prompt)

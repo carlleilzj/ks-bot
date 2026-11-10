@@ -35,7 +35,7 @@ def state_path_for(name: str) -> Path:
 
 
 def _build_specs() -> dict[str, PublisherSpec]:
-    from . import douyin, instagram, kuaishou, toutiao, weixin, xhs
+    from . import douyin, instagram, kuaishou, toutiao, weixin, xhs, youtube
 
     specs = [
         PublisherSpec(
@@ -68,6 +68,12 @@ def _build_specs() -> dict[str, PublisherSpec]:
             name="toutiao", display_name="今日头条",
             state_path=state_path_for("toutiao"), supports_category=False,
             login=toutiao.login_interactive, publish=toutiao.publish,
+        ),
+        # YouTube Shorts 出海通道：走官方 YouTube Data API v3
+        PublisherSpec(
+            name="youtube", display_name="YouTube·Shorts",
+            state_path=state_path_for("youtube"), supports_category=False,
+            login=youtube.login_interactive, publish=youtube.publish,
         ),
     ]
     # Instagram 矩阵号：同一套 Meta API 实现，凭据按 platform name 从 .env 读取。

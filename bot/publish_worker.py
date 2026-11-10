@@ -423,7 +423,8 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         # Instagram 走 Meta 官方 API，没有浏览器登录态文件；凭据在 .env 里，
         # 由 publish() 内部校验并抛 LoginExpired，这里不能按快手的方式判存在性。
         is_ig = platform.startswith("ig_")
-        if not is_ig and not pub.state_path.exists():
+        is_yt = platform == "youtube"
+        if not (is_ig or is_yt) and not pub.state_path.exists():
             report(base, s, task_id, platform, ok=False,
                    error="登录态文件不存在", login_expired=True)
             return
@@ -437,10 +438,13 @@ def process_platform(base: str, s: Settings, task: dict, plat_info: dict, force:
         if is_ig:
             ig_media_url = fetch_media_url(base, s, task_id)
             video = Path(payload["final_file"]["name"])   # 仅用于日志展示，不做本地读写
+        elif is_yt and payload.get("final_file") and Path(payload["final_file"].get("path", "")).exists():
+            # 本机协调端直接使用本地已就绪成品视频
+            video = Path(payload["final_file"]["path"])
         else:
             video = download_file(base, s, payload["final_file"], dest_dir)
         cover = None
-        if payload.get("cover_file") and not is_ig:
+        if payload.get("cover_file") and not (is_ig or is_yt):
             try:
                 cover = download_file(base, s, payload["cover_file"], dest_dir)
             except WorkerError as e:
@@ -785,12 +789,20 @@ def run_once(base: str, s: Settings, *,
                 continue
 
             is_ig = plat_name.startswith("ig_")
+            is_yt = plat_name == "youtube"
             if is_ig:
                 from .publish.instagram import load_account
                 if load_account(plat_name) is None:
                     if plat_name not in skipped_login:
                         skipped_login.add(plat_name)
                         log.info("%s 未配置凭据（IG_TOKEN_...），本轮不认领", pub.display_name)
+                    continue
+            elif is_yt:
+                from .publish.youtube import load_account as load_yt_account
+                if load_yt_account() is None:
+                    if plat_name not in skipped_login:
+                        skipped_login.add(plat_name)
+                        log.info("%s 未配置凭据（YOUTUBE_CLIENT_ID...），本轮不认领", pub.display_name)
                     continue
             elif not pub.state_path.exists():
                 if plat_name not in skipped_login:
@@ -803,7 +815,7 @@ def run_once(base: str, s: Settings, *,
             time.sleep(5)  # 平台间小间隔
 
     # 仅当处理国内平台（或未限定平台）时才跑国内特有的审核/统计/星火收益/话题/补链
-    has_domestic = not only_set or any(not p.startswith("ig_") for p in only_set)
+    has_domestic = not only_set or any(not (p.startswith("ig_") or p == "youtube") for p in only_set)
     if has_domestic:
         maybe_audit(base, s)
         maybe_refresh_stats(s, base)
@@ -1096,33 +1108,41 @@ def main() -> None:
         time.sleep(max(30, args.interval))
 
 
-def start_ig_worker_thread(s: Settings, interval: int = 60) -> threading.Thread | None:
-    """在协调端后台启动出海 IG 发布线程（每 interval 秒检查一次）。"""
-    from .publish.instagram import load_account
-    ig_plats = [name for name in s.platforms if name.startswith("ig_")]
-    has_any_token = any(load_account(name) is not None for name in ig_plats)
-    if not has_any_token:
-        log.info("未检测到有效 Instagram 凭据，不启动出海发布线程")
+def start_overseas_worker_thread(s: Settings, interval: int = 60) -> threading.Thread | None:
+    """在协调端后台启动出海发布线程（监控 ig_* 与 youtube 平台，每 interval 秒检查一次）。"""
+    from .publish.instagram import load_account as load_ig_account
+    from .publish.youtube import load_account as load_yt_account
+
+    overseas_plats = [name for name in s.platforms if name.startswith("ig_") or name == "youtube"]
+    has_any = any(
+        (load_ig_account(name) is not None if name.startswith("ig_") else load_yt_account() is not None)
+        for name in overseas_plats
+    )
+    if not has_any:
+        log.info("未检测到有效海外凭据（IG/YouTube），不启动出海发布线程")
         return None
 
     base = f"http://127.0.0.1:{s.remote_api_port}"
     stop_event = threading.Event()
 
     def _loop() -> None:
-        log.info("🟢 出海 IG 发布 worker 线程已启动（监听平台: %s，间隔 %ds）",
-                 ",".join(ig_plats), interval)
+        log.info("🟢 出海发布 worker 线程已启动（监听平台: %s，间隔 %ds）",
+                 ",".join(overseas_plats), interval)
         time.sleep(5)  # 等待 Remote API 线程完全就绪
         while not stop_event.is_set():
             try:
-                run_once(base, s, only_platforms=ig_plats)
+                run_once(base, s, only_platforms=overseas_plats)
             except Exception as e:
-                log.exception("出海 IG 发布 worker 循环异常：%s", e)
+                log.exception("出海发布 worker 循环异常：%s", e)
             stop_event.wait(interval)
-        log.info("出海 IG 发布 worker 线程已退出")
+        log.info("出海发布 worker 线程已退出")
 
-    t = threading.Thread(target=_loop, name="ig_publish_worker", daemon=True)
+    t = threading.Thread(target=_loop, name="overseas_publish_worker", daemon=True)
     t.start()
     return t
+
+
+start_ig_worker_thread = start_overseas_worker_thread
 
 
 if __name__ == "__main__":
