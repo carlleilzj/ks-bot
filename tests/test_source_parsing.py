@@ -51,6 +51,13 @@ def test_cookie_httponly_prefix_is_parsed(tmp_path):
     assert cookies.get("sessionid") == "SECRETVAL"
 
 
+def test_bilibili_and_b23_url_recognized():
+    from bot.source.telegram_listener import _looks_like_video_url
+    assert _looks_like_video_url("https://www.bilibili.com/video/BV1xx411c7mD/") is True
+    assert _looks_like_video_url("https://b23.tv/BV1xx411c7mD") is True
+    assert _looks_like_video_url("https://b23.tv/abcXYZ") is True
+
+
 def test_cookie_plain_comment_still_skipped(tmp_path):
     cf = tmp_path / "cookies.txt"
     cf.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")

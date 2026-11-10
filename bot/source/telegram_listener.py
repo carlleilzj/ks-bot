@@ -864,6 +864,7 @@ _VIDEO_PATH_RE = re.compile(
     r"|(?:v|v1)\.kuaishou\.com/"
     r"|toutiao\.com/(?:video/|item/|a)"
     r"|bilibili\.com/video/"
+    r"|b23\.tv/"
     r"|facebook\.com/(?:watch|reel)",
     re.I,
 )

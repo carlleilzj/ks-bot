@@ -34,3 +34,12 @@ def test_pick_cookies_routes_correctly(tmp_path, monkeypatch):
 
     p, stem = dl._pick_cookies("https://www.toutiao.com/video/123")
     assert p == cookie_dir / "toutiao.txt"
+
+    (cookie_dir / "bilibili.txt").write_text("dummy", encoding="utf-8")
+    p, stem = dl._pick_cookies("https://www.bilibili.com/video/BV123")
+    assert p == cookie_dir / "bilibili.txt"
+    assert stem == "bilibili"
+
+    p, stem = dl._pick_cookies("https://b23.tv/abc")
+    assert p == cookie_dir / "bilibili.txt"
+    assert stem == "bilibili"

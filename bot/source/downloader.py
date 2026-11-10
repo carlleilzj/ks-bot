@@ -44,6 +44,7 @@ def _pick_cookies(url: str) -> tuple[Path | None, str]:
         ("xiaohongshu.com", "xhslink.com", "xhslink.cn"): "xhs.txt",
         ("kuaishou.com", "kwai.com"): "kuaishou.txt",
         ("toutiao.com",): "toutiao.txt",
+        ("bilibili.com", "b23.tv"): "bilibili.txt",
     }
     for domains, filename in platform_cookie_map.items():
         if any(d in u for d in domains):
@@ -95,6 +96,7 @@ def _base_opts(url: str = "") -> tuple[dict, str]:
     # （下载/转码/发布/DB 推进全部停摆），比 TG 监听被阻塞更严重。
     opts.setdefault("socket_timeout", 30)
     opts.setdefault("retries", 2)
+    opts["noplaylist"] = True
     opts["extractor_args"] = {
         "youtube": {
             # android：实测能直接拿到 format 18（mp4 音视频合一），无需合并。
