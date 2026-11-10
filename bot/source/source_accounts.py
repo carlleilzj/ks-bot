@@ -256,15 +256,16 @@ SEED_ANIMALS = [
 
 # 海外 4 个矩阵号对应的预置白名单
 SEED_OVERSEAS = [
-    # ig_pets 萌宠
-    {"lane": "ig_pets", "account": "kataicinema", "url": "https://www.instagram.com/kataicinema/", "note": "3D动物搞笑动画"},
-    {"lane": "ig_pets", "account": "mamahentale", "url": "https://www.instagram.com/mamahentale/", "note": "萌宠母鸡历险"},
-    {"lane": "ig_pets", "account": "bingwave123", "url": "https://www.instagram.com/bingwave123/", "note": "动物无声动画"},
-    # ig_anim 动画
+    # ig_pets 萌宠（猫狗搞笑抓拍、橘猫、宠物跑酷）
+    {"lane": "ig_pets", "account": "chipcoi888", "url": "https://www.instagram.com/chipcoi888/", "note": "动物搞笑日常"},
+    {"lane": "ig_pets", "account": "purrithepurplecat", "url": "https://www.instagram.com/purrithepurplecat/", "note": "紫猫搞笑日常"},
+    {"lane": "ig_pets", "account": "TailBitPets", "url": "https://www.instagram.com/TailBitPets/", "note": "宠物萌趣抓拍"},
+    # ig_anim 动画（3D/AI 脑洞动画短片、变色龙、神反转）
+    {"lane": "ig_anim", "account": "kataicinema", "url": "https://www.instagram.com/kataicinema/", "note": "Paco 3D变色龙/动物翻车短片"},
     {"lane": "ig_anim", "account": "aivoxy", "url": "https://www.instagram.com/aivoxy/", "note": "治愈3D动画"},
     {"lane": "ig_anim", "account": "she_talks_ai", "url": "https://www.instagram.com/she_talks_ai/", "note": "3D脑洞短片"},
     {"lane": "ig_anim", "account": "cartoonworldtop", "url": "https://www.instagram.com/cartoonworldtop/", "note": "奇幻小剧场"},
-    # ig_home 家居
+    # ig_home 家居带货（四件套、睡衣、氛围灯、卧室改造）
     {"lane": "ig_home", "account": "harun_home", "url": "https://www.instagram.com/harun_home/", "note": "家纺四件套实拍"},
     {"lane": "ig_home", "account": "cilinea", "url": "https://www.instagram.com/cilinea/", "note": "软装与睡衣穿搭"},
     {"lane": "ig_home", "account": "grand.style", "url": "https://www.instagram.com/grand.style/", "note": "轻奢卧室质感"},

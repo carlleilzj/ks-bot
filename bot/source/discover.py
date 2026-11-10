@@ -202,7 +202,8 @@ def discover_instagram(query: str, limit: int = 8) -> list[Candidate]:
 def run_ig_search(tags: list[str], keywords: list[str],
                   limit_per_entry: int = 24,
                   per_run: int = 10,
-                  pages: int = 1) -> list[Candidate]:
+                  pages: int = 1,
+                  db = None) -> list[Candidate]:
     """跑 IG hashtag + 关键词搜索，返回候选。
 
     2026-11-09 实测三种入口都可用（各拿到 24 条链接）：
@@ -230,6 +231,8 @@ def run_ig_search(tags: list[str], keywords: list[str],
                                          cookie_dir=cdir, pages=pages):
             if it["url"] in seen:
                 continue
+            if db and db.find_by_source_url(it["url"]):
+                continue
             seen.add(it["url"])
             picked.append(Candidate(url=it["url"], title=f"#{tag.lstrip('#')}",
                                     source="instagram_tag", channel=tag))
@@ -240,6 +243,8 @@ def run_ig_search(tags: list[str], keywords: list[str],
         for it in discover_instagram_keyword(kw, limit=limit_per_entry,
                                              cookie_dir=cdir):
             if it["url"] in seen:
+                continue
+            if db and db.find_by_source_url(it["url"]):
                 continue
             seen.add(it["url"])
             picked.append(Candidate(url=it["url"], title=f"kw:{kw}",
@@ -327,7 +332,8 @@ WHITELIST_SOURCES = {
 
 def run_whitelist(lane: LaneConfig, platform: str,
                   per_account: int = 10,
-                  per_run: int | None = None) -> list[Candidate]:
+                  per_run: int | None = None,
+                  db = None) -> list[Candidate]:
     """从白名单账号拉候选。
 
     白名单是「已知质量好的源」，所以放宽题材要求：
@@ -356,6 +362,8 @@ def run_whitelist(lane: LaneConfig, platform: str,
                 return picked
             for cand in fn(handle, min(per_account, max(need, 1) * 2)):
                 if cand.url in seen:
+                    continue
+                if db and db.find_by_source_url(cand.url):
                     continue
                 # 时长闸门要和白名单一起用：实测 Studio McGee 这类家居频道
                 # 全是 10~27 分钟的长视频（631~1611 秒），不过滤会白拉。
@@ -472,6 +480,7 @@ def run_discovery(s, db, force: bool = False) -> dict:
                 lane, name,
                 per_account=int(conf.get("whitelist_per_account", 10)),
                 per_run=lane.per_run,
+                db=db,
             )
             if len(cands) < lane.per_run:
                 tags = [str(t) for t in (conf.get("ig_tags") or []) if str(t).strip()]
@@ -482,6 +491,7 @@ def run_discovery(s, db, force: bool = False) -> dict:
                         limit_per_entry=int(conf.get("ig_limit_per_entry", 24)),
                         per_run=lane.per_run - len(cands),
                         pages=int(conf.get("ig_pages", 1)),
+                        db=db,
                     )
             if len(cands) < lane.per_run and srcs:
                 cands += run_lane(lane, sources=srcs,
