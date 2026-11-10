@@ -946,8 +946,8 @@ def generate_copy(transcript: str, caption: str, categories: list[str], s: Setti
 
             # 首评质量：拦截「…吗？」这类提问式模板收尾（实测占 60%）。
             # 只重写首评，不推翻已合格的标题/标签，避免整条重来时标题又变差。
-            # Instagram 没有首评概念（Meta API 不支持作者置顶首评），跳过。
-            bad_comment = ([] if is_ig
+            # 出海平台（Instagram / YouTube）没有首评概念，跳过。
+            bad_comment = ([] if is_overseas
                            else _check_first_comment(result.get("first_comment") or ""))
             if bad_comment:
                 log.warning("[%s] 首评命中提问式模板（第 %d 次）：%s | %r",

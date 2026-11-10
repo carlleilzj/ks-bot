@@ -43,7 +43,7 @@ def _truncate_log(path: Path, max_mb: int) -> None:
 
 
 _MEDIA_SUFFIXES = (
-    "_final.mp4", "_tc.mp4", "_cover.jpg", "_copy.json", ".mp4", ".srt", ".ass",
+    "_final.mp4", "_tc.mp4", "_export.mp4", "_cover.jpg", "_copy.json", ".mp4", ".srt", ".ass",
 )
 
 
