@@ -454,8 +454,12 @@ def run_discovery(s, db, force: bool = False) -> dict:
         if not conf.get("enabled"):
             continue
         lane = lane_from_config(name, conf)
-        if not lane.queries:
-            log.warning("[%s] 自动发现已启用但没有 queries，跳过", name)
+        has_queries = bool(lane.queries)
+        has_ig = bool(conf.get("ig_tags") or conf.get("ig_keywords"))
+        from .source_accounts import accounts_for
+        has_whitelist = bool(accounts_for(name, "instagram") or accounts_for(name, "youtube"))
+        if not (has_queries or has_ig or has_whitelist):
+            log.warning("[%s] 自动发现已启用但未配置任何寻源途径（无 queries/无 ig_tags/无白名单），跳过", name)
             continue
 
         srcs = sources_from_config(conf)

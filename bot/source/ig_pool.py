@@ -153,7 +153,7 @@ def _has_sessionid(cf: Path) -> bool:
                 if line.startswith("#") or not line.strip():
                     continue
                 parts = line.rstrip("\n").split("\t")
-                if len(parts) >= 7 and parts[5] == "sessionid" and parts[6].strip():
+                if len(parts) >= 7 and "instagram" in parts[0] and parts[5] == "sessionid" and parts[6].strip():
                     return True
     except Exception:
         return False
@@ -220,6 +220,9 @@ def pick_cookiefile(rotate_every: int = DEFAULT_ROTATE_EVERY) -> Path | None:
     scanned: list[Path] = []
     for cf in sorted(_COOKIE_DIR.glob("*.txt")):
         if cf.name.endswith(".bak") or cf.stem in disabled:
+            continue
+        # 严格限定只扫 IG 相关的 Cookie 文件，排除国内平台（douyin.txt, xhs.txt 等）
+        if not (cf.name.startswith("ig_") or cf.name in ("carllei2026.txt", "chenzhou_li.txt")):
             continue
         if cf.stat().st_size > 0 and _has_sessionid(cf):
             scanned.append(cf)
