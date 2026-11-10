@@ -154,14 +154,23 @@ def _try_fetch(pk: int, cookies: dict, app_id: str, host: str) -> tuple[dict | N
 
 
 def _best_video_url(item: dict) -> str:
-    """从 item 里挑最高清的视频直链。"""
+    """从 item 里挑最高清的视频直链（含 carousel 轮播里的视频）。"""
     vv = item.get("video_versions") or []
-    if not vv:
-        return ""
-    # 按带宽/尺寸降序
-    def key(v):
-        return (v.get("width", 0) * v.get("height", 0), v.get("bandwidth", 0))
-    return sorted(vv, key=key, reverse=True)[0].get("url", "")
+    if vv:
+        # 按带宽/尺寸降序
+        def key(v):
+            return (v.get("width", 0) * v.get("height", 0), v.get("bandwidth", 0))
+        return sorted(vv, key=key, reverse=True)[0].get("url", "")
+
+    # 检查 carousel_media（轮播合集里可能包含视频）
+    for sub in (item.get("carousel_media") or []):
+        sub_vv = sub.get("video_versions") or []
+        if sub_vv:
+            def key(v):
+                return (v.get("width", 0) * v.get("height", 0), v.get("bandwidth", 0))
+            return sorted(sub_vv, key=key, reverse=True)[0].get("url", "")
+
+    return ""
 
 
 def _best_image_url(item: dict) -> str:
@@ -235,9 +244,14 @@ def extract(url: str):
     image_url = _best_image_url(item)
     media_type = item.get("media_type")  # 1=图 2=视频 8=carousel
     duration = float(item.get("video_duration") or 0)
+    if not duration and item.get("carousel_media"):
+        for sub in item["carousel_media"]:
+            if sub.get("video_duration"):
+                duration = float(sub["video_duration"])
+                break
 
-    if media_type == 1 and not video_url:
-        raise ValueError(f"该 IG 链接是纯图文帖，无视频可下载（{shortcode}）")
+    if not video_url:
+        raise ValueError(f"该 IG 链接无视频内容（纯图文或静态图片轮播：{shortcode}）")
 
     taken_at = item.get("taken_at")
     from datetime import datetime, timezone
@@ -257,6 +271,53 @@ def extract(url: str):
         duration=duration,
         permalink=f"https://www.instagram.com/reel/{shortcode}/",
     )
+
+
+def download(url: str, dest: Path) -> Path:
+    """直接下载 IG 高清原片（秒级直链下载，绕过 yt-dlp 门禁与格式问题）。"""
+    from .downloader import parse_url
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    clean_url = parse_url(url)
+    shortcode = _extract_shortcode(clean_url)
+    pk = shortcode_to_pk(shortcode)
+
+    cf = ig_pool.pick_cookiefile()
+    cookies = _read_cookie(cf) if cf else {}
+
+    item = None
+    for host, app_id in (("i.instagram.com", _APP_ID_IOS),
+                         ("www.instagram.com", _APP_ID_WEB)):
+        item, status = _try_fetch(pk, cookies, app_id, host)
+        if item:
+            break
+
+    if not item:
+        raise ValueError(f"获取 IG 帖子详情失败：{shortcode}")
+
+    video_url = _best_video_url(item)
+    if not video_url:
+        raise ValueError(f"该 IG 链接无视频可下载（纯图文或静态图片轮播：{shortcode}）")
+
+    log.info("[instagram] 开始直链下载原画视频: %s -> %s", shortcode, dest.name)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15",
+    }
+    with httpx.Client(timeout=120, follow_redirects=True, headers=headers) as client:
+        with client.stream("GET", video_url) as resp:
+            if resp.status_code != 200:
+                raise ValueError(f"下载 IG 直链失败 HTTP {resp.status_code}: {video_url[:100]}")
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_bytes(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+    if not dest.exists() or dest.stat().st_size == 0:
+        raise FileNotFoundError(f"IG 下载完成但文件为空: {dest}")
+
+    size_mb = dest.stat().st_size / (1024 * 1024)
+    log.info("[instagram] 下载成功: %s (%.1f MB)", dest.name, size_mb)
+    return dest
 
 
 def probe(cookiefile: Path | None = None) -> dict:

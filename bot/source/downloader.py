@@ -241,13 +241,13 @@ def extract_meta(url: str) -> VideoMeta:
     # 国内分享短链（v.douyin.com 等）先展开，否则 yt-dlp 直接 Unsupported URL
     clean_url, _ = expand_short_link(clean_url)
 
-    # IG 优先走自研解析器；若自研失败（除纯图文帖外），回退到 yt-dlp 兜底
+    # IG 优先走自研解析器；若自研失败（除纯图文/轮播图帖外），回退到 yt-dlp 兜底
     if ig_api.is_instagram(clean_url):
         try:
             return ig_api.extract(clean_url)
         except ValueError as e:
             msg = str(e)
-            if "纯图文" in msg:
+            if "纯图文" in msg or "无视频" in msg:
                 raise
             log.warning("自研 IG 解析失败，回退 yt-dlp 兜底：%s", msg[:150])
 
@@ -341,6 +341,16 @@ def download(url: str, dest: Path) -> Path:
             return douyin_api.download(clean_url, dest)
         except Exception as e:
             log.warning("自研抖音下载失败，回退 yt-dlp 兜底：%s", str(e)[:150])
+
+    # IG 优先走自研无门禁直链极速下载（秒级流式落盘，绕过 yt-dlp 格式问题）
+    if ig_api.is_instagram(clean_url):
+        try:
+            return ig_api.download(clean_url, dest)
+        except Exception as e:
+            msg = str(e)
+            if "无视频" in msg or "纯图文" in msg:
+                raise
+            log.warning("自研 IG 下载失败，回退 yt-dlp 兜底：%s", str(e)[:150])
 
     # yt-dlp 的 outtmpl 控制：我们指定完整文件名，用 dest 的 stem + dir
     out_dir = str(dest.parent)

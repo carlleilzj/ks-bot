@@ -615,6 +615,14 @@ def advance_task(s: Settings, db: Database, task_id: int,
             if after and after["state"] != st and (after.get("retries") or 0):
                 db.update(task_id, retries=0)
         except Exception as e:
+            err_msg = str(e)
+            # 纯图片/图文帖/无可用视频格式：重试绝不可能凭空变出视频，直接标记 SKIPPED 并终止报警
+            if st == State.DETECTED and any(k in err_msg for k in ("纯图文", "无视频", "No video formats found")):
+                db.update(task_id, state=State.SKIPPED, error=err_msg[:500])
+                log.warning("[%s] 链接无可用视频（纯图片/图文帖），跳过任务", task["shortcode"])
+                telegram.notify_info(s, f"⏭️ 任务 [{task['shortcode']}] @{task.get('username','')} 属于纯图片/轮播图帖（无视频内容），已自动跳过")
+                return
+
             retries = (task["retries"] or 0) + 1
             log.exception("[%s] 在 %s 阶段失败（第 %d 次）", task["shortcode"], st, retries)
             if retries >= MAX_RETRIES:

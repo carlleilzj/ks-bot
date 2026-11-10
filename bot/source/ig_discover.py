@@ -191,7 +191,9 @@ def _scrape_links(path: str, limit: int,
             return out;
         }""")
         added = 0
-        for href in (links or []):
+        # 优先收录 /reel/ 短视频链接（100% 为可下载视频），再收录 /p/（混合图文）
+        sorted_links = sorted(links or [], key=lambda h: 0 if "/reel/" in h else 1)
+        for href in sorted_links:
             if len(found) >= limit:
                 break
             parts = [p for p in href.split("/") if p]
