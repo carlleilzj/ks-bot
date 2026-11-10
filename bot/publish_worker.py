@@ -728,9 +728,14 @@ def maybe_process_login_requests(base: str, s, peek: bool = False) -> None:
         )
 
 
-def run_once(base: str, s: Settings) -> int:
+def run_once(base: str, s: Settings, *,
+             only_platforms: set[str] | list[str] | None = None,
+             exclude_platforms: set[str] | list[str] | None = None) -> int:
     """一轮：拉清单 → 逐个可发布平台处理 → 审核巡检。返回处理数。"""
     from .publish import get_publisher
+
+    only_set = set(only_platforms) if only_platforms else None
+    exclude_set = set(exclude_platforms) if exclude_platforms else None
 
     # 卡死 job 回收要每轮做（幂等、开销小）：只在启动时做会漏掉「部署重启时
     # 正在发布、updated_at 还很新」的那条，它会永久停在 PUBLISHING。
@@ -759,34 +764,52 @@ def run_once(base: str, s: Settings) -> int:
     skipped_login: set[str] = set()
     for task in tasks:
         for plat in task.get("platforms", []):
+            plat_name = plat["platform"]
+            if only_set and plat_name not in only_set:
+                continue
+            if exclude_set and plat_name in exclude_set:
+                continue
             if plat.get("gate"):
                 log.debug("[%s] %s gate 未放行：%s",
-                          task.get("shortcode"), plat["platform"], plat["gate"])
+                          task.get("shortcode"), plat_name, plat["gate"])
                 continue
             if plat.get("retries", 0) >= 5:
-                log.warning("[%s] %s 重试已达 5 次，等人工处理", task.get("shortcode"), plat["platform"])
+                log.warning("[%s] %s 重试已达 5 次，等人工处理", task.get("shortcode"), plat_name)
                 continue
-            # 没登录态就别认领。认领后再回报「登录失效」会把 job 打回 PENDING
+            # 没登录态/没凭据就别认领。认领后再回报「登录失效」会把 job 打回 PENDING
             # 并每轮刷一条 TG，新平台还没扫码时会刷屏。
             try:
-                pub = get_publisher(plat["platform"])
+                pub = get_publisher(plat_name)
             except KeyError:
-                log.warning("未知平台 %s，跳过", plat["platform"])
+                log.warning("未知平台 %s，跳过", plat_name)
                 continue
-            if not pub.state_path.exists():
-                if plat["platform"] not in skipped_login:
-                    skipped_login.add(plat["platform"])
+
+            is_ig = plat_name.startswith("ig_")
+            if is_ig:
+                from .publish.instagram import load_account
+                if load_account(plat_name) is None:
+                    if plat_name not in skipped_login:
+                        skipped_login.add(plat_name)
+                        log.info("%s 未配置凭据（IG_TOKEN_...），本轮不认领", pub.display_name)
+                    continue
+            elif not pub.state_path.exists():
+                if plat_name not in skipped_login:
+                    skipped_login.add(plat_name)
                     log.info("%s 未登录，本轮不认领（--login-qr %s）",
-                             pub.display_name, plat["platform"])
+                             pub.display_name, plat_name)
                 continue
             process_platform(base, s, task, plat)
             n += 1
             time.sleep(5)  # 平台间小间隔
-    maybe_audit(base, s)
-    maybe_refresh_stats(s, base)
-    maybe_refresh_spark_income(s)
-    maybe_refresh_hot_topics(s, base)
-    maybe_backfill_urls(base, s)
+
+    # 仅当处理国内平台（或未限定平台）时才跑国内特有的审核/统计/星火收益/话题/补链
+    has_domestic = not only_set or any(not p.startswith("ig_") for p in only_set)
+    if has_domestic:
+        maybe_audit(base, s)
+        maybe_refresh_stats(s, base)
+        maybe_refresh_spark_income(s)
+        maybe_refresh_hot_topics(s, base)
+        maybe_backfill_urls(base, s)
     return n
 
 
@@ -951,6 +974,10 @@ def main() -> None:
                                      description="远程发布 worker（家庭端）")
     parser.add_argument("--once", action="store_true", help="跑一轮就退出（调试）")
     parser.add_argument("--interval", type=int, default=120, help="轮询间隔秒数（默认 120）")
+    parser.add_argument("--platforms", default=None,
+                        help="只处理指定平台（逗号分隔，如 kuaishou,kuaishou2 或 ig_pets,ig_home）")
+    parser.add_argument("--exclude-platforms", default=None,
+                        help="排除指定平台（逗号分隔）")
     parser.add_argument("--audit", action="store_true",
                         help="只跑一轮抖音审核巡检（违规通知→自动删除作品）后退出")
     parser.add_argument("--audit-dry-run", action="store_true",
@@ -1038,6 +1065,9 @@ def main() -> None:
         threading.Thread(target=_login_watcher, name="login-watcher",
                          daemon=True).start()
 
+    only_plats = [p.strip() for p in args.platforms.split(",") if p.strip()] if args.platforms else None
+    exclude_plats = [p.strip() for p in args.exclude_platforms.split(",") if p.strip()] if args.exclude_platforms else None
+
     while True:
         try:
             # 每轮都做：补报上轮未上报的成功结果、释放卡死的 PUBLISHING job。
@@ -1047,7 +1077,7 @@ def main() -> None:
                 flush_pending_reports(base, s)
             except Exception:
                 log.debug("补报队列处理失败（下轮再试）", exc_info=True)
-            n = run_once(base, s)
+            n = run_once(base, s, only_platforms=only_plats, exclude_platforms=exclude_plats)
             consecutive_failures = 0
             if n:
                 log.info("本轮处理 %d 个平台 job", n)
@@ -1064,6 +1094,35 @@ def main() -> None:
         except Exception:
             log.exception("worker 循环异常（继续）")
         time.sleep(max(30, args.interval))
+
+
+def start_ig_worker_thread(s: Settings, interval: int = 60) -> threading.Thread | None:
+    """在协调端后台启动出海 IG 发布线程（每 interval 秒检查一次）。"""
+    from .publish.instagram import load_account
+    ig_plats = [name for name in s.platforms if name.startswith("ig_")]
+    has_any_token = any(load_account(name) is not None for name in ig_plats)
+    if not has_any_token:
+        log.info("未检测到有效 Instagram 凭据，不启动出海发布线程")
+        return None
+
+    base = f"http://127.0.0.1:{s.remote_api_port}"
+    stop_event = threading.Event()
+
+    def _loop() -> None:
+        log.info("🟢 出海 IG 发布 worker 线程已启动（监听平台: %s，间隔 %ds）",
+                 ",".join(ig_plats), interval)
+        time.sleep(5)  # 等待 Remote API 线程完全就绪
+        while not stop_event.is_set():
+            try:
+                run_once(base, s, only_platforms=ig_plats)
+            except Exception as e:
+                log.exception("出海 IG 发布 worker 循环异常：%s", e)
+            stop_event.wait(interval)
+        log.info("出海 IG 发布 worker 线程已退出")
+
+    t = threading.Thread(target=_loop, name="ig_publish_worker", daemon=True)
+    t.start()
+    return t
 
 
 if __name__ == "__main__":

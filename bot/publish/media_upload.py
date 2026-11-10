@@ -108,7 +108,7 @@ class _MediaHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # 静默默认访问日志
         pass
 
-    def do_GET(self):  # noqa: N802
+    def _serve(self, send_body: bool = True):
         parsed = urlparse(self.path)
         path = parsed.path
         if not path.startswith(_MEDIA_PREFIX):
@@ -143,10 +143,11 @@ class _MediaHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(size))
             self.send_header("Accept-Ranges", "none")
             self.end_headers()
-            with open(target, "rb") as f:
-                while chunk := f.read(1 << 20):
-                    self.wfile.write(chunk)
-            log.info("媒体已投递：%s（%.1f MB）", target.name, size / 1048576)
+            if send_body:
+                with open(target, "rb") as f:
+                    while chunk := f.read(1 << 20):
+                        self.wfile.write(chunk)
+                log.info("媒体已投递：%s（%.1f MB）", target.name, size / 1048576)
         except (BrokenPipeError, ConnectionResetError):
             log.debug("媒体投递被对端中断（Meta 常常拉完即断，正常）：%s", target.name)
         except Exception as e:
@@ -155,6 +156,12 @@ class _MediaHandler(BaseHTTPRequestHandler):
                 self._plain(500, "internal error")
             except Exception:
                 pass
+
+    def do_GET(self):  # noqa: N802
+        self._serve(send_body=True)
+
+    def do_HEAD(self):  # noqa: N802
+        self._serve(send_body=False)
 
     def _plain(self, code: int, msg: str) -> None:
         body = msg.encode()

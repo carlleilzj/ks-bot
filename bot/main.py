@@ -1438,6 +1438,13 @@ def main() -> None:
                 start_media_server(s.remote_api_bind, MEDIA_PORT)
             except Exception as e:
                 log.warning("IG 媒体服务未启动（不影响国内平台）：%s", e)
+            # IG 出海发布 worker（协调端直连 Meta Graph API）：
+            # 解决国内端（阿里云）无海外网络与 Meta 凭据的问题，由协调端负责出海发布。
+            try:
+                from .publish_worker import start_ig_worker_thread
+                start_ig_worker_thread(s)
+            except Exception as e:
+                log.warning("出海 IG 发布 worker 启动失败：%s", e)
         else:
             log.warning("REMOTE_API_TOKEN/REMOTE_API_BIND 未配置，Remote API 未启动")
 

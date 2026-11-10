@@ -202,3 +202,65 @@ class TestBuildPublicUrl:
 
         token = url.split("/ig-media/")[1].rsplit("/", 1)[0]
         assert mu.verify_media_token("abc_final.mp4", token)
+
+    def test_media_handler_head_and_get(self, tmp_path, monkeypatch):
+        final_root = tmp_path / "final"
+        final_root.mkdir()
+        video = final_root / "test_final.mp4"
+        video.write_bytes(b"sample-video-content-here")
+        monkeypatch.setattr(mu, "FINAL_DIR", final_root)
+
+        token = mu.build_media_token("test_final.mp4")
+        path = f"/ig-media/{token}/test_final.mp4"
+
+        from unittest.mock import MagicMock
+        handler = mu._MediaHandler.__new__(mu._MediaHandler)
+        handler.path = path
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.wfile = MagicMock()
+
+        handler.do_HEAD()
+        handler.send_response.assert_called_with(200)
+        assert handler.wfile.write.call_count == 0
+
+        handler.do_GET()
+        assert handler.wfile.write.call_count > 0
+
+
+class TestPublishWorkerPlatformFiltering:
+    def test_publish_worker_handles_ig_without_state_path(self, monkeypatch):
+        from bot import publish_worker as pw
+        from bot.config import Settings
+
+        monkeypatch.setattr(pw, "maybe_process_login_requests", lambda base, s: None)
+        monkeypatch.setattr(pw, "_pending_report_pairs", lambda: set())
+
+        # 模拟 pending 任务返回一个 ig_pets job
+        fake_task = {
+            "task_id": 999,
+            "shortcode": "test_ig",
+            "platforms": [{"platform": "ig_pets"}],
+        }
+        monkeypatch.setattr(pw, "fetch_pending", lambda base, s: [fake_task])
+
+        processed = []
+        monkeypatch.setattr(pw, "process_platform",
+                            lambda base, s, task, plat: processed.append(plat["platform"]))
+
+        # 当 load_account 返回 None 时，不认领
+        from bot.publish import instagram as ig
+        monkeypatch.setattr(ig, "load_account", lambda key: None)
+
+        s = Settings()
+        n = pw.run_once("http://127.0.0.1:8765", s, only_platforms={"ig_pets"})
+        assert n == 0
+        assert processed == []
+
+        # 当 load_account 返回有效账号时，认领并处理
+        monkeypatch.setattr(ig, "load_account",
+                            lambda key: ig.IgAccount(key, "123", "token"))
+        n = pw.run_once("http://127.0.0.1:8765", s, only_platforms={"ig_pets"})
+        assert n == 1
+        assert processed == ["ig_pets"]
