@@ -772,6 +772,52 @@ class TelegramListener(threading.Thread):
             )
             return
 
+        # 跨海搬运硬隔离规则检查（2026-11-11 严管）
+        from .cross_border import (
+            is_domestic_source, is_overseas_source,
+            filter_valid_targets,
+        )
+
+        source_plat = meta.platform or ""
+        platform_cn = _PLATFORM_CN.get(source_plat, source_plat)
+
+        if not target_platforms:
+            # 用户未显式指定目标平台
+            if is_domestic_source(source_plat):
+                # 国内素材：禁止默认流向国内平台！必须显式指定出海赛道
+                telegram.send_text(
+                    self.s,
+                    f"⚠️ 收到 [{platform_cn}] 国内素材：{clean_url}\n\n"
+                    f"⛔ 跨海规则限制：国内素材仅限出海分发，禁止国内搬国内（默认不入快手）！\n"
+                    f"请重新发送链接并附带出海赛道别名：\n"
+                    f"  @ig萌宠 / @ig解压 / @ig动画 / @ig家居 / @yt\n"
+                    f"例如：{clean_url} @ig解压",
+                )
+                return
+        else:
+            # 用户显式指定了目标平台
+            valid_targets, invalid_targets = filter_valid_targets(source_plat, target_platforms)
+            if invalid_targets:
+                invalid_names = "、".join(_PUBLISH_PLATFORM_CN.get(p, p) for p in invalid_targets)
+                if is_overseas_source(source_plat):
+                    telegram.send_text(
+                        self.s,
+                        f"⛔ 跨海搬运规则拦截：\n"
+                        f"素材来自海外平台 [{platform_cn}]，禁止出海发布到 {invalid_names}（严禁海外搬海外/IG搬IG）！\n"
+                        f"出海平台仅允许搬运国内跨平台素材（抖音/小红书/B站等）。\n"
+                        f"本条视频未入库。",
+                    )
+                    return
+                elif is_domestic_source(source_plat):
+                    telegram.send_text(
+                        self.s,
+                        f"⛔ 跨海搬运规则拦截：\n"
+                        f"素材来自国内平台 [{platform_cn}]，禁止发布到国内平台 {invalid_names}！\n"
+                        f"国内平台仅允许搬运海外优质素材（Instagram/YouTube等）。\n"
+                        f"本条视频未入库。",
+                    )
+                    return
+
         # 入库
         tid = self.db.insert_video(meta, target_platforms=target_platforms)
         if tid is None:

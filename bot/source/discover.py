@@ -457,10 +457,17 @@ def run_discovery(s, db, force: bool = False) -> dict:
         return {}
 
     summary: dict[str, dict] = {}
+    from .cross_border import is_overseas_target
     for name, plat in s.platforms.items():
         conf = (plat.discover or {})
         if not conf.get("enabled"):
             continue
+
+        # 跨海硬隔离：出海平台（ig_*, youtube）只能搬运国内跨平台素材，禁止抓取海外平台（杜绝 IG 搬 IG）
+        if is_overseas_target(name):
+            log.debug("[%s] 出海平台跳过海外自动发现（出海仅限国内跨平台素材投链）", name)
+            continue
+
         lane = lane_from_config(name, conf)
         has_queries = bool(lane.queries)
         has_ig = bool(conf.get("ig_tags") or conf.get("ig_keywords"))

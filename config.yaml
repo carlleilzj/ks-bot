@@ -480,24 +480,11 @@ platforms:
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
     discover:
-      enabled: true
+      enabled: false            # 出海链路严格走国内跨平台投链（B站/抖音/小红书），禁止海外抓取（杜绝IG搬IG）
       interval_hours: 6
       per_run: 4
-      sources: []               # 走 IG 发现与白名单
-      ig_tags:
-        - funnyanimals
-        - cutepets
-        - petmemes
-        - funnycats
-        - dogsofinstagram
-        - catsofinstagram
-        - animalsdoingthings
-        - animalvideos
-        - 萌宠
-        - 搞笑动物
-        - 宠物日常
-        - 橘猫
-        - 修狗
+      sources: []
+      ig_tags: []
       require_any:
         - cat
         - dog
@@ -549,23 +536,11 @@ platforms:
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
     discover:
-      enabled: true
+      enabled: false            # 出海链路严格走国内跨平台投链（B站/抖音/小红书），禁止海外抓取（杜绝IG搬IG）
       interval_hours: 6
       per_run: 4
       sources: []
-      ig_tags:
-        - oddlysatisfying
-        - satisfying
-        - asmr
-        - hoofcleaning
-        - deepcleaning
-        - woodworking
-        - soapcutting
-        - restoration
-        - 微缩模型
-        - 沉浸式收纳
-        - 洗地毯
-        - 修蹄
+      ig_tags: []
       require_any:
         - satisfying
         - asmr
@@ -602,20 +577,11 @@ platforms:
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
     discover:
-      enabled: true
+      enabled: false            # 出海链路严格走国内跨平台投链（B站/抖音/小红书），禁止海外抓取（杜绝IG搬IG）
       interval_hours: 6
       per_run: 4
       sources: []
-      ig_tags:
-        - 3danimation
-        - aianimation
-        - blender3d
-        - cgi
-        - animatedshort
-        - 3D动画
-        - AI动画
-        - 搞笑动画
-        - 脑洞动画
+      ig_tags: []
       require_any:
         - 3d
         - animation
@@ -648,24 +614,11 @@ platforms:
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
     discover:
-      enabled: true
+      enabled: false            # 出海链路严格走国内跨平台投链（B站/抖音/小红书），禁止海外抓取（杜绝IG搬IG）
       interval_hours: 6
       per_run: 4
       sources: []
-      ig_tags:
-        - homedecor
-        - bedroomdecor
-        - cozyhome
-        - homegadgets
-        - amazonfinds
-        - roommakeover
-        - 氛围灯
-        - 收纳神器
-        - 卧室改造
-        - 厨房好物
-        - 家居美学
-        - 四件套
-        - 睡衣
+      ig_tags: []
       require_any:
         - home
         - room

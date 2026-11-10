@@ -437,7 +437,18 @@ class Database:
         source_tag: 来源标签（历史字段，发现层已下线，现留空）。
         """
         ts = now_iso()
-        targets_str = ",".join(target_platforms) if target_platforms else None
+        # 跨海搬运硬隔离校验：出海仅限国内素材，国内仅限海外素材
+        if target_platforms:
+            from .source.cross_border import filter_valid_targets
+            valid, invalid = filter_valid_targets(meta.platform, target_platforms)
+            if not valid:
+                raise ValueError(
+                    f"违背跨海定向法则：素材来源 [{meta.platform}] 与目标平台 [{','.join(target_platforms)}] 方向冲突！"
+                    f"出海仅支持国内素材，国内仅支持海外素材。"
+                )
+            targets_str = ",".join(valid)
+        else:
+            targets_str = None
         with self._lock:
             cur = self.conn.execute(
                 """INSERT OR IGNORE INTO tasks

@@ -162,6 +162,12 @@ def add_account(lane: str, platform: str, account: str,
     """
     if not lane or not platform or not account:
         return False, "缺少 lane/platform/account"
+
+    from .cross_border import validate_cross_border
+    ok, reason = validate_cross_border(platform, lane)
+    if not ok:
+        return False, f"跨海规则拦截：{reason}"
+
     data = _load()
     lane_obj = data.setdefault(lane, {})
     items = lane_obj.setdefault(platform, [])
@@ -254,21 +260,10 @@ SEED_ANIMALS = [
 ]
 
 
-# 海外 4 个矩阵号对应的预置白名单
+# 海外 4 个矩阵号对应的预置白名单（必须严格遵守国内跨平台原则）
+# 严禁在出海账号下配置 Instagram 等海外源（杜绝 IG 搬 IG）
 SEED_OVERSEAS = [
-    # ig_pets 萌宠（猫狗搞笑抓拍、橘猫、宠物跑酷）
-    {"lane": "ig_pets", "account": "chipcoi888", "url": "https://www.instagram.com/chipcoi888/", "note": "动物搞笑日常"},
-    {"lane": "ig_pets", "account": "purrithepurplecat", "url": "https://www.instagram.com/purrithepurplecat/", "note": "紫猫搞笑日常"},
-    {"lane": "ig_pets", "account": "TailBitPets", "url": "https://www.instagram.com/TailBitPets/", "note": "宠物萌趣抓拍"},
-    # ig_anim 动画（3D/AI 脑洞动画短片、变色龙、神反转）
-    {"lane": "ig_anim", "account": "kataicinema", "url": "https://www.instagram.com/kataicinema/", "note": "Paco 3D变色龙/动物翻车短片"},
-    {"lane": "ig_anim", "account": "aivoxy", "url": "https://www.instagram.com/aivoxy/", "note": "治愈3D动画"},
-    {"lane": "ig_anim", "account": "she_talks_ai", "url": "https://www.instagram.com/she_talks_ai/", "note": "3D脑洞短片"},
-    {"lane": "ig_anim", "account": "cartoonworldtop", "url": "https://www.instagram.com/cartoonworldtop/", "note": "奇幻小剧场"},
-    # ig_home 家居带货（四件套、睡衣、氛围灯、卧室改造）
-    {"lane": "ig_home", "account": "harun_home", "url": "https://www.instagram.com/harun_home/", "note": "家纺四件套实拍"},
-    {"lane": "ig_home", "account": "cilinea", "url": "https://www.instagram.com/cilinea/", "note": "软装与睡衣穿搭"},
-    {"lane": "ig_home", "account": "grand.style", "url": "https://www.instagram.com/grand.style/", "note": "轻奢卧室质感"},
+    # 出海赛道后续配置国内 B站/小红书/抖音等高质垂直源，当前不设海外账号
 ]
 
 
@@ -285,10 +280,6 @@ def seed_if_empty() -> int:
         ok, _ = add_account("kuaishou", "instagram",
                             item["account"], item["url"], item["note"])
         n += int(ok)
-    for item in SEED_OVERSEAS:
-        ok, _ = add_account(item["lane"], "instagram",
-                            item["account"], item["url"], item["note"])
-        n += int(ok)
     return n
 
 
@@ -301,10 +292,6 @@ def sync_builtin_seeds() -> int:
         n += int(ok)
     for item in SEED_ANIMALS:
         ok, _ = add_account("kuaishou", "instagram",
-                            item["account"], item["url"], item["note"])
-        n += int(ok)
-    for item in SEED_OVERSEAS:
-        ok, _ = add_account(item["lane"], "instagram",
                             item["account"], item["url"], item["note"])
         n += int(ok)
     return n

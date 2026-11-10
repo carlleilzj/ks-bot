@@ -518,7 +518,18 @@ def _task_platforms(s: Settings, task: dict) -> list:
             log.warning("[%s] 指定平台均已停用，不发任何平台", task.get("shortcode", "?"))
             return []
         log.warning("[%s] 指定的平台全部不可用，回退为默认发布平台", task.get("shortcode", "?"))
-        return default_publishers(s)
+        pubs = default_publishers(s)
+
+    # 跨海搬运硬隔离过滤：防止任何环节遗漏违规目标
+    from .source.cross_border import filter_valid_targets
+    source_plat = task.get("source_platform") or ""
+    if source_plat:
+        valid_names, invalid_names = filter_valid_targets(source_plat, [p.name for p in pubs])
+        if invalid_names:
+            log.warning("[%s] 跨海硬隔离拦截违规发布目标 %s (素材来源: %s)",
+                        task.get("shortcode"), invalid_names, source_plat)
+        pubs = [p for p in pubs if p.name in set(valid_names)]
+
     return pubs
 
 
