@@ -703,7 +703,7 @@ platforms:
   # 凭据：.env 中 YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REFRESH_TOKEN
   # ============================================================
   youtube:
-    enabled: false    # 待配置 Google OAuth2 凭据后启用
+    enabled: true     # 已配置 Google OAuth2 凭据，正式启用
     default: false    # 必须 false：只有投链带 @yt 或 @youtube 才发
     daily_limit: 2
     min_gap_hours: 6
