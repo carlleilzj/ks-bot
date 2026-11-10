@@ -727,3 +727,18 @@ class TestRunDiscovery:
                                                        title="cozy bedroom",
                                                        source="youtube")])
         assert dc.run_discovery(s, _FakeDB(), force=True)
+
+    def test_whitelist_candidate_not_dropped_by_require_any(self, monkeypatch):
+        """白名单候选进入元数据阶段，即使 caption/title 未命中 require_any 也不被丢弃。"""
+        monkeypatch.setattr(dc, "_last_run", {})
+        monkeypatch.setitem(dc.SOURCES, "youtube",
+                            lambda q, n: [dc.Candidate(url="wl_1",
+                                                       title="random title without bed",
+                                                       source="youtube_whitelist")])
+        monkeypatch.setattr("bot.source.downloader.extract_meta",
+                            lambda url: _meta(url, caption="non-matching caption", dur=30))
+        db = _FakeDB()
+        out = dc.run_discovery(self._settings(), db, force=True)
+        assert out["kuaishou2"]["new"] == 1
+        assert len(db.inserted) == 1
+        assert db.inserted[0][0] == "wl_1"

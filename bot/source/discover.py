@@ -533,18 +533,32 @@ def run_discovery(s, db, force: bool = False) -> dict:
                               title=f"{c.title} {meta.title or ''}".strip(),
                               description=meta.caption or "",
                               duration=meta.duration)
-            ok, why = evaluate(check, lane)
-            if not ok:
-                skipped += 1
-                log.debug("[%s] 元数据阶段丢弃 %s：%s", name, c.url, why)
-                continue            # 有 require_any 的 lane 必须能证明题材对口。
-            # 若搜索标题和真实 caption 都是空的（实测有这种视频：caption 只有
-            # 外链或被平台清空），说明拿不到任何题材证据 —— 宁可不要，
-            # 也不要把「不知道是什么」的内容发出去。B 号漂移就是这样开始的。
-            if lane.require_any and not check.matched_keywords:
-                skipped += 1
-                log.debug("[%s] 无题材证据（caption 为空）丢弃 %s", name, c.url)
-                continue
+            is_whitelist = "whitelist" in c.source or c.source == "instagram"
+            if is_whitelist:
+                # 白名单账号已由人工/爆款晋级确认赛道垂直度，不强制要求 caption 包含品类词；
+                # 但仍然执行 block_any 排除（防止发广告/美妆/无关翻车）。
+                blocked = match_keywords(check.hint_text, lane.block_any)
+                if blocked:
+                    skipped += 1
+                    log.debug("[%s] 白名单元数据阶段丢弃（命中排除词 %s）：%s",
+                              name, ",".join(blocked), c.url)
+                    continue
+                if not check.matched_keywords:
+                    check.matched_keywords = ["whitelist"]
+            else:
+                ok, why = evaluate(check, lane)
+                if not ok:
+                    skipped += 1
+                    log.debug("[%s] 元数据阶段丢弃 %s：%s", name, c.url, why)
+                    continue
+                # 有 require_any 的 lane 必须能证明题材对口。
+                # 若搜索标题和真实 caption 都是空的（实测有这种视频：caption 只有
+                # 外链或被平台清空），说明拿不到任何题材证据 —— 宁可不要，
+                # 也不要把「不知道是什么」的内容发出去。B 号漂移就是这样开始的。
+                if lane.require_any and not check.matched_keywords:
+                    skipped += 1
+                    log.debug("[%s] 无题材证据（caption 为空）丢弃 %s", name, c.url)
+                    continue
             try:
                 tid = db.insert_video(meta, target_platforms=[name],
                                       source_tag=f"auto:{c.source}")
