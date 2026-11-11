@@ -23,6 +23,11 @@ KEEP_FINAL_DAYS = 7
 KEEP_SCREENSHOT_DAYS = 3
 # 日志文件大小上限（MB），超过则截断尾部 50%
 MAX_LOG_MB = 10
+# READY 任务最长排队天数：超过仍未发出 → 标 SKIPPED 并删媒体。
+# 背景（2026-11-12）：产能 12 条/天 而发现层约 21-31 条/天，READY 一路涨到
+# 32 条，最老的等了 2 天。素材有保质期，两周前的链接发出去也错过热点，
+# 留着只占水位名额。3 天 = 约两轮产能周期，足够容忍短暂堵塞。
+KEEP_READY_DAYS = 3
 
 
 def _file_age_days(path: Path) -> float:
@@ -149,9 +154,57 @@ def rotate_logs() -> None:
             _truncate_log(p, MAX_LOG_MB)
 
 
+def expire_stale_ready(db: Database, days: float = KEEP_READY_DAYS) -> dict:
+    """把排队超期的 READY 任务标 SKIPPED 并删媒体，返回统计。
+
+    为什么单独一件事而不是塞进 cleanup_media：cleanup_media 只处理**终态**
+    任务（NOTIFIED/FAILED/SKIPPED），READY 是在制品，属于状态机活的任务。
+    混在一起会让「清理旧文件」意外改动流水线状态，不好排查。
+
+    为什么删媒体：这些 final 不会再发，留着只会让 purge_orphans 每次都
+    重新扫一遍、白占磁盘（实测一条约 12.8MB，积压 30 条就是 380MB）。
+    """
+    stats = {"expired": 0, "freed_mb": 0, "shortcodes": []}
+    for task in db.expired_ready(days):
+        sc = task.get("shortcode") or ""
+        try:
+            one = purge_task_media(task, keep_final=False)
+            stats["freed_mb"] += one.get("freed_mb", 0)
+            # purge_task_media 的 freed_mb 不含 final，单独补上
+            final = (Path(task["final_path"]) if task.get("final_path")
+                     else FINAL_DIR / f"{sc}_final.mp4")
+            if final.exists():
+                stats["freed_mb"] += final.stat().st_size // 1048576
+                final.unlink(missing_ok=True)
+            # 必须同时把待发 job 收成终态：否则任务虽 SKIPPED，PENDING job 仍在
+            # backlog_size() 里被统计，水位永远不会降下来 → 闸门永久关闭、发现层
+            # 再也恢复不了（本地测试实测：只改 task 时 backlog 仍为 3）。
+            for job in db.pending_jobs(task["id"]):
+                db.update_job(job["id"], state="SKIPPED",
+                              error=f"source task expired: queued > {days:g} days")
+            db.update(task["id"], state=State.SKIPPED,
+                      error=f"排队超过 {days:g} 天未发出（素材时效性过期），已自动清理")
+            stats["expired"] += 1
+            stats["shortcodes"].append(sc)
+            log.info("[%s] READY 排队超 %g 天，已标 SKIPPED 并删媒体", sc, days)
+        except Exception:
+            log.exception("[%s] 过期清理失败（跳过该条）", sc)
+    return stats
+
+
 def run_cleanup(db: Database) -> None:
     """执行完整清理流程。"""
     log.info("开始清理旧文件...")
+
+    # 先处理排队超期的 READY：它们会释放水位名额，让发现层尽快恢复。
+    try:
+        expired = expire_stale_ready(db)
+        if expired["expired"]:
+            log.warning("READY 超期清理：%d 条（%s），释放 %dMB",
+                        expired["expired"], ", ".join(expired["shortcodes"][:5]),
+                        expired["freed_mb"])
+    except Exception:
+        log.exception("READY 超期清理失败（不影响其他清理）")
 
     media = cleanup_media(db)
     if media["raw_deleted"] or media["work_deleted"] or media["final_deleted"]:

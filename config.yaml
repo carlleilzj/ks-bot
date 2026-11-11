@@ -10,6 +10,15 @@ asr:
   local_device: auto      # auto / cpu
   local_compute: int8     # int8 / int8_float16 / float16
 
+# 发现层全局参数（各平台的寻源配置在 platforms.<name>.discover）
+discovery:
+  # 待发水位闸门（2026-11-12）：已就绪但未发出的量（READY 任务 / PENDING job 取大者）
+  # 达到该值就跳过本轮自动发现，积压消化到水位以下自动恢复。
+  # 依据：发布产能 = 快手 A/B 各 daily_limit 6 条 = 12 条/天，而发现层入库
+  # 约 21-31 条/天，净积压约 +15/天。24 = 约两天的产能缓冲。
+  # 设为 0 可关闭闸门（恢复“无条件按 interval 发现”的旧行为）。
+  backlog_watermark: 24
+
 # 字幕烧录样式（ratio 均为相对视频尺寸的比例，自动适配竖屏/横屏）
 subtitle:
   enabled: true

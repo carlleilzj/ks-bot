@@ -196,6 +196,9 @@ class Settings:
     publish: PublishConfig = field(default_factory=PublishConfig)
     categories: list[str] = field(default_factory=lambda: list(DEFAULT_CATEGORIES))  # 快手分区（兼容旧配置）
     platforms: dict[str, PlatformConfig] = field(default_factory=dict)
+    # 顶层 discovery 段：目前只放跨 lane 的全局参数（待发水位闸门）。
+    # 各平台的寻源配置仍在 platforms.<name>.discover。
+    discovery: dict = field(default_factory=dict)
 
 
 def ensure_dirs() -> None:
@@ -363,6 +366,11 @@ def load_settings() -> Settings:
     s.watermark = _build_watermark(raw.get("watermark"))
     s.vision = _build_vision(raw.get("vision"))
     s.publish = _build_publish(raw.get("publish") or {})
+    # 顶层 discovery 段：目前只有待发水位闸门（backlog_watermark）。
+    # 0 / 缺省 = 不启用闸门；正整数 = 待发量达到该值就暂停自动发现。
+    disc_top = raw.get("discovery")
+    if isinstance(disc_top, dict):
+        s.discovery = dict(disc_top)
     cats = raw.get("categories")
     if isinstance(cats, list) and cats:
         s.categories = [str(c).strip() for c in cats if str(c).strip()]

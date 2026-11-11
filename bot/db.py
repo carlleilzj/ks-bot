@@ -591,6 +591,40 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def backlog_size(self) -> int:
+        """待发队列水位：已就绪但还没发出去的量（READY 任务 / PENDING 平台 job）。
+
+        用来给自动发现层设闸门。为什么不用 READY 任务数：一个任务可能带两个
+        平台 job，任务数会低估真实待发量；为什么不用所有任务数：DETECTED /
+        DOWNLOADED 还在处理中，属于在制品而非库存，算进来会让闸门在流水线
+        正常忙碌时误关。
+        """
+        with self._lock:
+            ready = self.conn.execute(
+                "SELECT COUNT(*) c FROM tasks WHERE state=?", (State.READY,)
+            ).fetchone()["c"]
+            pending = self.conn.execute(
+                "SELECT COUNT(*) c FROM publish_jobs WHERE state=?", (JobState.PENDING,)
+            ).fetchone()["c"]
+        # 取两者较大值而非相加：READY 任务与 PENDING job 是同一批东西的两种视角
+        # （分体部署里一个 READY 任务通常正好对应它的 PENDING job），相加会翻倍。
+        return max(ready, pending)
+
+    def expired_ready(self, days: float) -> list[dict]:
+        """READY 超过 N 天仍未发出的任务（按入库时间算）。
+
+        积压治理用：素材有保质期，一条两周前的链接即使发出去也错过热点了，
+        留着只会永久占用水位名额。返回完整行，供调用方删媒体 + 标记 SKIPPED。
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                """SELECT * FROM tasks WHERE state=?
+                   AND COALESCE(created_at, updated_at) < datetime('now', 'localtime', ?)
+                   ORDER BY created_at ASC""",
+                (State.READY, f"-{float(days)} days"),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def pending(self, limit: int = 50, states: list[str] | None = None) -> list[dict]:
         """返回本轮要推进的任务。
 

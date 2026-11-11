@@ -512,11 +512,36 @@ def _save_last_run(state: dict[str, float]) -> None:
 
 _last_run: dict[str, float] = _load_last_run()
 
+# 待发水位硬上限的默认值（可在 config.yaml 的 discovery.backlog_watermark 覆盖，0/None 关闭）
+DEFAULT_BACKLOG_WATERMARK = 24
+
+
+def backlog_watermark(s) -> int:
+    """读待发水位阈值。0 或未配置 = 不启用闸门。"""
+    try:
+        conf = getattr(s, "discovery", None) or {}
+        val = conf.get("backlog_watermark", DEFAULT_BACKLOG_WATERMARK)
+        return int(val or 0)
+    except Exception:
+        return DEFAULT_BACKLOG_WATERMARK
+
 
 def run_discovery(s, db, force: bool = False) -> dict:
     """按配置为各平台跑一轮自动发现并把候选入库。
 
     返回 {"platform": {"found": n, "new": n, "skipped": n, "errors": [...]}}
+
+    水位闸门（2026-11-12）
+    ----------------------
+    发现层的入库速度（~21-31 条/天）长期高于发布产能（快手 A/B 各 6 条/天
+    = 12 条/天），净积压约 +15/天 —— 实测 11-10 单日入库 154 条，
+    READY 队列一路涨到 32 条，最老的等了 2 天，素材时效性已经过期。
+
+    所以入库前先看待发水位：一旦 backlog >= backlog_watermark 就整轮跳过，
+    积压消化到水位以下再自动恢复。这样既不丢已入库素材（已找到的照常发），
+    也不用人工干预 —— 发得快就多找，发不完就先停手。
+
+    force=True 时绕过闸门（人工补素材/测试用）。
 
     设计取舍
     --------
@@ -530,6 +555,20 @@ def run_discovery(s, db, force: bool = False) -> dict:
 
     if not force and not _discovery_due(s):
         return {}
+
+    if not force:
+        watermark = backlog_watermark(s)
+        if watermark > 0:
+            try:
+                backlog = db.backlog_size()
+            except Exception as e:
+                # 读不到水位时保守选「继续发现」：宁可多入库也别把发现层意外关死。
+                log.debug("读取待发水位失败（继续发现）：%s", e)
+                backlog = 0
+            if backlog >= watermark:
+                log.info("待发积压 %d 条已达水位 %d，本轮自动发现跳过（消化后自动恢复）",
+                         backlog, watermark)
+                return {}
 
     summary: dict[str, dict] = {}
     from .cross_border import is_overseas_target
