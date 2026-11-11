@@ -77,13 +77,29 @@ def cookies_from_netscape(path: Path) -> list[dict]:
     return out
 
 
+_bad_cookies: dict[str, float] = {}   # cookie path -> cooled until timestamp
+_COOKIE_COOLDOWN_SEC = 1800            # 被 IG 登录墙拦截后冷却 30 分钟
+
+
+def _is_login_wall(url: str) -> bool:
+    u = (url or "").strip().rstrip("/")
+    return (
+        "/accounts/login" in u
+        or "/challenge" in u
+        or u in ("https://www.instagram.com", "http://www.instagram.com")
+    )
+
+
 def pick_cookiefile(cookie_dir: Path) -> Path | None:
-    """挑一个含 sessionid 的 IG cookie 文件。"""
+    """挑一个含有效 sessionid 且未处于冷却期的 IG cookie 文件。"""
     if not cookie_dir.exists():
         return None
+    now = time.time()
     candidates = []
     for f in sorted(cookie_dir.glob("*.txt")):
         if f.name.endswith(".bak"):
+            continue
+        if _bad_cookies.get(str(f), 0) > now:
             continue
         cks = cookies_from_netscape(f)
         if any(c["name"] == "sessionid" and c["value"].strip() for c in cks):
@@ -98,22 +114,31 @@ def discover_instagram_profile(username: str, limit: int = 12,
                                cookie_dir: Path | None = None) -> list[dict]:
     """打开账号主页，从 DOM 取作品链接。
 
-    优先访问 `/{handle}/reels/`（Reels 专属页）：
-    2026-11-10 实测发现，账号主页常包含大量纯图片图文帖（/p/），
-    抓回来在 extract_meta 阶段会报「纯图文帖无视频可下载」，浪费配额且占坑。
-    Reels 标签页内 100% 全是可下载的短视频，零图文干扰。
-    若该账号没有 Reels 专页，自动回退到普通主页。
-
-    返回 [{"url": "https://www.instagram.com/reel/XXX/", "code": "XXX"}]，
-    失败返回空列表（不抛异常，发现层失败不应影响发布主流程）。
+    2026-11-11 实测优化：
+    - 公开账号的 `/{handle}/reels/` 页无需登录态即可直接拿到 12 条 Reel 链接！
+    - 优先用【无 Cookie 匿名浏览器】抓取白名单账号，彻底避免把有限的小号 sessionid
+      烧在白名单巡检上；仅当匿名失败（或显式传入 cookiefile）时再试登录态。
     """
     handle = username.lstrip("@").strip("/")
     reels_path = f"https://www.instagram.com/{handle}/reels/"
-    found = _scrape_links(reels_path, limit, cookiefile, cookie_dir, label=f"@{handle}/reels")
+    # 1. 优先匿名抓取 /reels/（零账号损耗）
+    if cookiefile is None:
+        found = _scrape_links(reels_path, limit, None, cookie_dir,
+                              label=f"@{handle}/reels", allow_anonymous=True,
+                              prefer_anonymous=True)
+        if found:
+            return found
+
+    # 2. 匿名未拿到（可能页面限制）或显式传了 cookiefile → 试登录态
+    found = _scrape_links(reels_path, limit, cookiefile, cookie_dir,
+                          label=f"@{handle}/reels", allow_anonymous=True)
     if found:
         return found
+
     path = f"https://www.instagram.com/{handle}/"
-    return _scrape_links(path, limit, cookiefile, cookie_dir, label=f"@{handle}")
+    return _scrape_links(path, limit, cookiefile, cookie_dir,
+                         label=f"@{handle}", allow_anonymous=True,
+                         prefer_anonymous=(cookiefile is None))
 
 
 def discover_instagram_tag(tag: str, limit: int = 24,
@@ -157,7 +182,9 @@ def _scrape_links(path: str, limit: int,
                   cookiefile: Path | None,
                   cookie_dir: Path | None,
                   label: str = "",
-                  pages: int = 1) -> list[dict]:
+                  pages: int = 1,
+                  allow_anonymous: bool = False,
+                  prefer_anonymous: bool = False) -> list[dict]:
     """打开 path，从 DOM 取 /reel/ 与 /p/ 链接。三个入口共用。
 
     pages > 1 时反复滚动页面底部触发懒加载，再重新采集。
@@ -165,16 +192,18 @@ def _scrape_links(path: str, limit: int,
     """
     from playwright.sync_api import sync_playwright
 
-    if cookiefile is None:
-        cookie_dir = cookie_dir or Path("data/cookies.d")
-        cookiefile = pick_cookiefile(cookie_dir)
-    if not cookiefile:
-        log.debug("IG 发现跳过：没有含 sessionid 的 cookie 文件")
-        return []
-
-    cks = cookies_from_netscape(cookiefile)
-    if not cks:
-        return []
+    cks: list[dict] = []
+    used_cookiefile: Path | None = None
+    if not prefer_anonymous:
+        if cookiefile is None:
+            cookie_dir = cookie_dir or Path("data/cookies.d")
+            cookiefile = pick_cookiefile(cookie_dir)
+        if cookiefile:
+            cks = cookies_from_netscape(cookiefile)
+            used_cookiefile = cookiefile
+        elif not allow_anonymous:
+            log.debug("IG 发现跳过（%s）：没有含有效 sessionid 的 cookie 文件", label or path)
+            return []
 
     found: list[dict] = []
     seen_codes: set[str] = set()
@@ -225,10 +254,31 @@ def _scrape_links(path: str, limit: int,
                     locale="en-US",
                 )
                 try:
-                    ctx.add_cookies(cks)
+                    if cks:
+                        ctx.add_cookies(cks)
                     page = ctx.new_page()
                     page.goto(path, wait_until="domcontentloaded", timeout=45000)
                     page.wait_for_timeout(7000)
+
+                    # 若带 Cookie 却被 IG 强制跳到了登录墙，说明 Cookie 已失效/被风控，立即熔断该 Cookie
+                    if _is_login_wall(page.url):
+                        if used_cookiefile:
+                            _bad_cookies[str(used_cookiefile)] = time.time() + _COOKIE_COOLDOWN_SEC
+                            log.warning("IG 抓取 %s 遭遇登录墙（%s），Cookie %s 已暂停 30 分钟",
+                                        label or path, page.url, used_cookiefile.name)
+                            cks = []
+                            used_cookiefile = None
+                            if allow_anonymous:
+                                # 立刻切匿名兜底再试一次
+                                ctx.clear_cookies()
+                                page.goto(path, wait_until="domcontentloaded", timeout=45000)
+                                page.wait_for_timeout(5000)
+                            else:
+                                return found
+                        else:
+                            log.debug("IG 抓取 %s 需要登录墙（%s），跳过", label or path, page.url)
+                            return found
+
                     _collect(page)
 
                     for _ in range(max(0, pages - 1)):

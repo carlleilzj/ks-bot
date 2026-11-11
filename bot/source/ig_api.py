@@ -37,9 +37,13 @@ log = logging.getLogger(__name__)
 # shortcode 使用的自定义 64 进制字符表
 _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
-# 移动端 UA：IG 对浏览器 UA 会走 web 端点（已废弃），必须伪装移动客户端
+# 移动端 UA：仅用于真正移动 App cookie 对接 i.instagram.com
 _MOBILE_UA = ("Instagram 361.0.0.36.91 (iPhone15,2; iOS 18_1; en_US; en-US; "
               "scale=3.00; 1290x2796; 623744990)")
+
+# 桌面浏览器 UA：对接 www.instagram.com 网页 API（匹配 Chrome 导出的 web cookie，防止 UA 错配遭秒封）
+_WEB_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
 _APP_ID_IOS = "124024574287414"   # → i.instagram.com/api/v1
 _APP_ID_WEB = "936619743392459"   # → www.instagram.com/api/v1
@@ -82,7 +86,7 @@ def _extract_shortcode(url: str) -> str:
 
 
 def _read_cookie(path: Path) -> dict[str, str]:
-    """读 Netscape cookie 文件 → dict。"""
+    """读 Netscape cookie 文件 → dict（仅提取 instagram 域名，防跨站 Cookie 污染）。"""
     out: dict[str, str] = {}
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -91,7 +95,7 @@ def _read_cookie(path: Path) -> dict[str, str]:
             if not line.strip() or line.startswith("#"):
                 continue
             f = line.split("\t")
-            if len(f) >= 7:
+            if len(f) >= 7 and "instagram" in f[0].lower():
                 out[f[5]] = f[6]
     except Exception as e:
         log.warning("读 cookie 失败 %s：%s", path, e)
@@ -106,15 +110,26 @@ def _try_fetch(pk: int, cookies: dict, app_id: str, host: str) -> tuple[dict | N
     于是每轮都优先选这个坏账号，形成稳定失败循环。
     """
     url = f"https://{host}/api/v1/media/{pk}/info/"
-    headers = {
-        "User-Agent": _MOBILE_UA,
-        "X-IG-App-ID": app_id,
-        "X-IG-Capabilities": "3brTvwE=",
-        "X-IG-Connection-Type": "WIFI",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
-    }
+    if host == "www.instagram.com":
+        headers = {
+            "User-Agent": _WEB_UA,
+            "X-IG-App-ID": app_id,
+            "X-CSRFToken": cookies.get("csrftoken", ""),
+            "Referer": "https://www.instagram.com/",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
+        }
+    else:
+        headers = {
+            "User-Agent": _MOBILE_UA,
+            "X-IG-App-ID": app_id,
+            "X-IG-Capabilities": "3brTvwE=",
+            "X-IG-Connection-Type": "WIFI",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
+        }
     try:
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as c:
             r = c.get(url, headers=headers)
@@ -204,12 +219,18 @@ def extract(url: str):
     if "sessionid" not in cookies:
         raise ValueError(f"cookie 文件缺少 sessionid：{cf}")
 
-    # 依次尝试：iOS 端点 → Web 端点
+    # 若属于桌面浏览器导出的 Web Cookie，优先走 www.instagram.com（Chrome UA），防止用 iOS App UA 秒触发风控吊销
+    is_web_cookie = any(k in cookies for k in ("datr", "ig_did", "mid", "wd"))
+    endpoints = (
+        (("www.instagram.com", _APP_ID_WEB),)
+        if is_web_cookie else
+        (("i.instagram.com", _APP_ID_IOS), ("www.instagram.com", _APP_ID_WEB))
+    )
+
     item = None
     last_err = ""
     auth_failed = False
-    for host, app_id in (("i.instagram.com", _APP_ID_IOS),
-                         ("www.instagram.com", _APP_ID_WEB)):
+    for host, app_id in endpoints:
         item, status = _try_fetch(pk, cookies, app_id, host)
         if item:
             log.info("IG 解析成功：%s（%s，账号 %s）", shortcode, host, acct)
@@ -285,9 +306,15 @@ def download(url: str, dest: Path) -> Path:
     cf = ig_pool.pick_cookiefile()
     cookies = _read_cookie(cf) if cf else {}
 
+    is_web_cookie = any(k in cookies for k in ("datr", "ig_did", "mid", "wd"))
+    endpoints = (
+        (("www.instagram.com", _APP_ID_WEB),)
+        if is_web_cookie else
+        (("i.instagram.com", _APP_ID_IOS), ("www.instagram.com", _APP_ID_WEB))
+    )
+
     item = None
-    for host, app_id in (("i.instagram.com", _APP_ID_IOS),
-                         ("www.instagram.com", _APP_ID_WEB)):
+    for host, app_id in endpoints:
         item, status = _try_fetch(pk, cookies, app_id, host)
         if item:
             break
@@ -321,7 +348,7 @@ def download(url: str, dest: Path) -> Path:
 
 
 def probe(cookiefile: Path | None = None) -> dict:
-    """连通性自检：验证 cookie 能否拉到数据。"""
+    """连通性自检：验证 cookie 能否拉到数据（使用匹配 Web Cookie 的桌面 Chrome UA）。"""
     cf = cookiefile or ig_pool.pick_cookiefile()
     if cf is None:
         return {"ok": False, "reason": "无可用 cookie"}
@@ -329,17 +356,17 @@ def probe(cookiefile: Path | None = None) -> dict:
     if "sessionid" not in cookies:
         return {"ok": False, "reason": "cookie 缺 sessionid"}
     headers = {
-        "User-Agent": _MOBILE_UA,
-        "X-IG-App-ID": _APP_ID_IOS,
-        "X-IG-Capabilities": "3brTvwE=",
-        "X-IG-Connection-Type": "WIFI",
+        "User-Agent": _WEB_UA,
+        "X-IG-App-ID": _APP_ID_WEB,
+        "X-CSRFToken": cookies.get("csrftoken", ""),
+        "Referer": "https://www.instagram.com/",
         "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
         "Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items()),
     }
     try:
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as c:
-            r = c.get("https://i.instagram.com/api/v1/users/web_profile_info/",
+            r = c.get("https://www.instagram.com/api/v1/users/web_profile_info/",
                       params={"username": "instagram"}, headers=headers)
             txt = r.text
         try:

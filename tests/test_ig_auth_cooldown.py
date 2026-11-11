@@ -60,3 +60,43 @@ def test_success_calls_report_ok(fake_env, monkeypatch):
     meta = ig_api.extract("https://www.instagram.com/reel/ABC123/")
     assert meta.username == "creator"
     assert ok_calls == ["acct1"]
+
+
+def test_read_cookie_filters_instagram_domain_only(tmp_path):
+    """全量导出文件中含抖音 sessionid 时，_read_cookie 绝不能被非 IG 域污染。"""
+    cf = tmp_path / "mixed.txt"
+    cf.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".douyin.com\tTRUE\t/\tTRUE\t9999999999\tsessionid\tDOUYIN_SID\n"
+        "#HttpOnly_.instagram.com\tTRUE\t/\tTRUE\t9999999999\tsessionid\tIG_SID\n"
+        ".instagram.com\tTRUE\t/\tTRUE\t9999999999\tcsrftoken\tIG_CSRF\n",
+        encoding="utf-8",
+    )
+    cookies = ig_api._read_cookie(cf)
+    assert cookies.get("sessionid") == "IG_SID"
+    assert cookies.get("csrftoken") == "IG_CSRF"
+
+
+def test_ig_discover_profile_prefers_anonymous_and_does_not_require_cookie(tmp_path, monkeypatch):
+    """白名单主页抓取优先匿名，即使完全没有 cookie 也能调到抓取流程。"""
+    from bot.source import ig_discover as igd
+
+    calls = []
+
+    def fake_scrape(path, limit, cookiefile, cookie_dir, label="", pages=1,
+                    allow_anonymous=False, prefer_anonymous=False):
+        calls.append((path, allow_anonymous, prefer_anonymous))
+        return [{"url": "https://www.instagram.com/reel/XYZ/", "code": "XYZ"}]
+
+    monkeypatch.setattr(igd, "_scrape_links", fake_scrape)
+    out = igd.discover_instagram_profile("kataicinema", cookie_dir=tmp_path)
+    assert len(out) == 1
+    assert calls[0][1] is True
+    assert calls[0][2] is True
+
+
+def test_ig_discover_tag_skips_cleanly_without_cookie(tmp_path):
+    """标签探索无有效 sessionid 时不启动浏览器、直接跳过返回空。"""
+    from bot.source import ig_discover as igd
+
+    assert igd.discover_instagram_tag("3danimation", cookie_dir=tmp_path) == []

@@ -35,8 +35,10 @@ def _pick_cookies(url: str) -> tuple[Path | None, str]:
     u = (url or "").lower()
     if "instagram.com" in u:
         cf = ig_pool.pick_cookiefile()
-        if cf is not None:
+        if cf is not None and ig_pool._has_sessionid(cf):
             return cf, ig_pool.account_of(cf)
+        # 无含 sessionid 的可用 IG cookie 时直接返回 None（走纯净匿名 yt-dlp，不回落到遗留 cookies.txt）
+        return None, ""
 
     # 国内主流短视频平台专用 Cookie 文件匹配（2026-11-10 引入）
     platform_cookie_map = {
@@ -277,13 +279,25 @@ def extract_meta(url: str) -> VideoMeta:
             info = ydl.extract_info(clean_url, download=False)
     except yt_dlp.utils.DownloadError as e:
         msg = str(e)
-        # IG 风控：冷却该账号，下次自动换号
-        if acct and ig_pool.is_blocked(msg):
-            ig_pool.report_blocked(acct, msg)
-            raise ValueError(
-                f"IG 账号 {acct} 被风控，已冷却并切换其他账号。原始错误：{msg[:220]}"
-            ) from e
-        raise ValueError(f"yt-dlp 无法解析该链接：{msg[:300]}") from e
+        # IG 带 Cookie 遇风控或失败时：冷却账号并尝试无 Cookie 纯净匿名解析一次
+        if ig_api.is_instagram(clean_url) and opts.get("cookiefile"):
+            if acct and ig_pool.is_blocked(msg):
+                ig_pool.report_blocked(acct, msg)
+            anon_opts = dict(opts)
+            anon_opts.pop("cookiefile", None)
+            try:
+                with yt_dlp.YoutubeDL(anon_opts) as ydl:
+                    info = ydl.extract_info(clean_url, download=False)
+                acct = ""
+            except yt_dlp.utils.DownloadError as e2:
+                raise ValueError(f"yt-dlp 无法解析该链接：{str(e2)[:300]}") from e2
+        else:
+            if acct and ig_pool.is_blocked(msg):
+                ig_pool.report_blocked(acct, msg)
+                raise ValueError(
+                    f"IG 账号 {acct} 被风控，已冷却并切换其他账号。原始错误：{msg[:220]}"
+                ) from e
+            raise ValueError(f"yt-dlp 无法解析该链接：{msg[:300]}") from e
 
     if acct:
         ig_pool.report_ok(acct)
@@ -301,7 +315,11 @@ def extract_meta(url: str) -> VideoMeta:
         raise ValueError("无法提取视频 ID")
 
     shortcode = f"{platform}_{video_id}"
-    uploader = info.get("uploader") or info.get("channel") or info.get("uploader_id") or ""
+    if platform == "instagram":
+        # IG 优先取 channel（即准确 handle 如 kataicinema），避免把带空格显示名存入 username
+        uploader = info.get("channel") or info.get("uploader") or info.get("uploader_id") or ""
+    else:
+        uploader = info.get("uploader") or info.get("channel") or info.get("uploader_id") or ""
     title = info.get("title") or ""
     # description 可能在不同字段
     caption = info.get("description") or ""
@@ -376,8 +394,17 @@ def download(url: str, dest: Path) -> Path:
         "postprocessors": [],
     }
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([clean_url])
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([clean_url])
+    except yt_dlp.utils.DownloadError:
+        if ig_api.is_instagram(clean_url) and opts.get("cookiefile"):
+            anon_opts = dict(opts)
+            anon_opts.pop("cookiefile", None)
+            with yt_dlp.YoutubeDL(anon_opts) as ydl:
+                ydl.download([clean_url])
+        else:
+            raise
 
     # yt-dlp 可能输出 .mp4 或其他扩展名，找实际文件
     if dest.exists():

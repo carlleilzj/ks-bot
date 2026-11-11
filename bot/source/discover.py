@@ -434,8 +434,38 @@ def sources_from_config(conf: dict) -> list[str]:
 # 调度器：发现 → 元数据 → 入库
 # ---------------------------------------------------------------------------
 
-# 每个 lane 上次运行时间（内存态；进程重启后重新计时，不会重复跑）
-_last_run: dict[str, float] = {}
+# 上次运行时间（重启后从 data/discover_state.json 恢复，防止每次部署重启都重复狂刷 IG）
+def _discover_state_path():
+    from ..config import DATA_DIR
+    return DATA_DIR / "discover_state.json"
+
+
+def _load_last_run() -> dict[str, float]:
+    import json
+    try:
+        p = _discover_state_path()
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {str(k): float(v) for k, v in data.items()}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_last_run(state: dict[str, float]) -> None:
+    import json, os
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+    try:
+        p = _discover_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(state), encoding="utf-8")
+    except Exception:
+        pass
+
+
+_last_run: dict[str, float] = _load_last_run()
 
 
 def run_discovery(s, db, force: bool = False) -> dict:
@@ -594,6 +624,7 @@ def run_discovery(s, db, force: bool = False) -> dict:
                      name, added, len(cands), skipped)
 
     _last_run["all"] = time.time()
+    _save_last_run(_last_run)
     return summary
 
 

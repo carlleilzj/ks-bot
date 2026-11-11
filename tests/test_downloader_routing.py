@@ -43,3 +43,17 @@ def test_pick_cookies_routes_correctly(tmp_path, monkeypatch):
     p, stem = dl._pick_cookies("https://b23.tv/abc")
     assert p == cookie_dir / "bilibili.txt"
     assert stem == "bilibili"
+
+
+def test_pick_cookies_instagram_returns_none_without_sessionid(tmp_path, monkeypatch):
+    """IG 无含 sessionid 的可用 cookie 时，必须返回 (None, '') 走纯净匿名 yt-dlp，不能回落到遗留 cookies.txt。"""
+    from bot.source import ig_pool
+
+    legacy = tmp_path / "legacy_cookies.txt"
+    legacy.write_text("# legacy stale cookies", encoding="utf-8")
+    monkeypatch.setattr(dl, "_COOKIE_FILE", legacy)
+    monkeypatch.setattr(ig_pool, "pick_cookiefile", lambda: None)
+
+    p, stem = dl._pick_cookies("https://www.instagram.com/reel/DdHFxhYsKgz/")
+    assert p is None
+    assert stem == ""
