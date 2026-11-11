@@ -273,12 +273,16 @@ def inspect_cover(cover: Path, s: Settings) -> CoverVerdict:
                      model, verdict.is_animation, verdict.has_real_person,
                      verdict.real_person_ratio, verdict.real_person_is_subject,
                      verdict.has_watermark, verdict.watermark_desc)
+            from .vision_health import reset as _vh_reset
+            _vh_reset("cover_check")
             return verdict
         except Exception as e:
             last_err = f"模型 {model}: {str(e)[:100]}"
             continue
 
     log.warning("所有 vision 模型均不可用：%s。返回不确定判定。", last_err)
+    from .vision_health import record_failure as _vh_fail
+    _vh_fail(s, "cover_check", last_err)
     return CoverVerdict(reason=f"检测失败: {last_err[:150]}")
 
 

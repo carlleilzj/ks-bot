@@ -238,12 +238,16 @@ def _vision_rank(frames: list[Path], s) -> list[tuple[Path, float, bool]] | None
                          "最佳 %s（%.2f 分）",
                          model, VISION_WEIGHT_SUBJECT, VISION_WEIGHT_IMPACT,
                          VISION_WEIGHT_INFO, out[0][0].name, out[0][1])
+                from .vision_health import reset as _vh_reset
+                _vh_reset("cover_pick")
                 return out
             last_err = f"模型 {model} frames 为空"
         except Exception as e:
             last_err = f"模型 {model}: {str(e)[:100]}"
             continue
     log.warning("封面选优 vision 全部失败：%s", last_err[:150])
+    from .vision_health import record_failure as _vh_fail
+    _vh_fail(s, "cover_pick", last_err)
     return None
 
 

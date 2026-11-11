@@ -137,10 +137,14 @@ def _ask_vision(frames: list[Path], s: Settings) -> dict:
                 last_err = f"模型 {model} 返回的不是对象"
                 continue
             data["model"] = model
+            from .vision_health import reset as _vh_reset
+            _vh_reset("content_probe")
             return data
         except Exception as e:
             last_err = f"模型 {model}: {str(e)[:120]}"
             continue
+    from .vision_health import record_failure as _vh_fail
+    _vh_fail(s, "content_probe", last_err)
     raise RuntimeError(f"vision 全部失败：{last_err[:200]}")
 
 
