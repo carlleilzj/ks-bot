@@ -292,6 +292,48 @@ def step_transcribe(s: Settings, db: Database, task: dict) -> None:
               srt_path=srt_path, error=None)
 
 
+def _recheck_block_any(s: Settings, db: Database, task: dict, caption: str) -> bool:
+    """用当前配置的 block_any 复查已入库的存量任务，命中则置 SKIPPED。
+
+    返回 True 表示已拦截，**调用方必须立刻 return** —— 曾经漏了这一步：
+    函数把任务标成 SKIPPED 后返回 None，step_copywrite 继续往下调 LLM、
+    最后用空 copy 写库，直接 KeyError: 'title' 把任务打成失败。
+
+    为什么需要：block_any 原本只在发现层入库前生效，已经进了库的任务
+    永远不会再被规则检查。规则一改（比如新增 furry/兽装、品牌硬广），
+    存量违规素材仍会跑到发布 —— 2026-11-12 实测 5 条只能手工清库。
+
+    只看任务的 caption（就是源平台标题）。人工投链的链接也要查：
+    「只拦自动发现」会让同一条规则对两条路径行为不一致。
+    筛选文本不包含 LLM 生成的文案 —— 那是下游产物，不是源头证据。
+    """
+    targets = [t.strip() for t in (task.get("target_platforms") or "").split(",") if t.strip()]
+    if not targets or not caption:
+        return False
+    from .source.discover import match_keywords
+
+    for name in targets:
+        plat = s.platforms.get(name)
+        if plat is None:
+            continue
+        conf = getattr(plat, "discover", None) or {}
+        block = conf.get("block_any") or []
+        if not block:
+            continue
+        hit = match_keywords(caption, block)
+        if hit:
+            why = f"命中 {name} 排除词：{','.join(hit[:3])}（规则复查）"
+            # 顺带收掉待发 job：否则任务虽 SKIPPED，PENDING job 仍在
+            # backlog_size() 里占水位，发现层会被无谓地闸住。
+            for job in db.pending_jobs(task["id"]):
+                db.update_job(job["id"], state=JobState.SKIPPED,
+                              error="blocked by block_any recheck")
+            db.update(task["id"], state=State.SKIPPED, error=why)
+            log.info("[%s] %s，自动跳过", task.get("shortcode"), why)
+            return True
+    return False
+
+
 def step_copywrite(s: Settings, db: Database, task: dict) -> None:
     """为每个启用平台生成专属文案。
 
@@ -306,6 +348,15 @@ def step_copywrite(s: Settings, db: Database, task: dict) -> None:
     sc = task["shortcode"]
     transcript = task.get("transcript") or ""
     caption = (task.get("caption") or "").strip()
+
+    # 赛道排除词复查（2026-11-12）
+    # ----------------------------
+    # block_any 原来只在发现层入库前生效，**已入库的任务不会再被复查**。
+    # 后果：规则上线前入库的存量素材照常跑完全流程并发出去 —— 实测 3 条
+    # furry/兽装内容已进入 READY 等发布、2 条海尔硬广还在队列里，只能手工清库。
+    # 复查放在文案生成之前：既能把存量任务拦住，又不白花一次 LLM 调用。
+    if _recheck_block_any(s, db, task, caption):
+        return
 
     # 画面探针：抽帧 + vision 识别真实内容。失败返回 {}，不阻塞文案生成。
     content: dict = {}

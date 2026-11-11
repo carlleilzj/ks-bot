@@ -126,6 +126,15 @@ class _Plat:
     def __init__(self, enabled, discover):
         self.enabled = enabled
         self.discover = discover
+        self.categories = []          # step_copywrite 会读
+        self.cover_title = False
+        self.anchors = {}
+        self.spark_task = False
+        self.spark_task_title = ""
+        self.attach_service = ""
+        self.attach_prefer = ""
+        self.attach_fallback = ""
+        self.hot_topic = ""
 
 
 class _S:
@@ -226,4 +235,111 @@ def test_overseas_watermark_blocks_when_its_own_backlog_full(tmp_path):
     finally:
         mod.collect = orig
     assert called["n"] == 0, "出海水位满时必须跳过寻源"
+    db.close()
+
+
+# ---------- 流水线级 block_any 复查 ----------
+
+def _mk_task_db(tmp_path, caption, targets="ig_pets"):
+    db = Database(tmp_path / "rc.db")
+    cur = db.conn.execute(
+        "INSERT INTO tasks (ig_media_id, shortcode, state, caption, target_platforms,"
+        " created_at, updated_at) VALUES ('m','sc',?,?,?,'2026-01-01','2026-01-01')",
+        (State.COPYWRITTEN, caption, targets))
+    db.conn.commit()
+    tid = cur.lastrowid
+    db.create_publish_jobs(tid, [t for t in targets.split(",")])
+    return db, tid
+
+
+def _settings_with_block(targets, block):
+
+    s = _S({t: _Plat(True, {"enabled": True, "block_any": block}) for t in targets})
+    return s
+
+
+def test_recheck_skips_furry_content(tmp_path):
+    """存量 furry/兽装 任务必须被复查拦下（实测 t976-978 曾进入 READY）。"""
+    import bot.main as main_mod
+
+    db, tid = _mk_task_db(tmp_path, "【furry动画】被揉超大毛茸茸肚子的母胶兽兽人宠物")
+    s = _settings_with_block(["ig_pets"], ["furry", "兽装", "兽人"])
+
+    main_mod._recheck_block_any(s, db, db.get(tid), db.get(tid)["caption"])
+
+    task = db.get(tid)
+    assert task["state"] == State.SKIPPED
+    assert "排除词" in (task["error"] or "")
+    assert all(j["state"] == JobState.SKIPPED for j in db.jobs(tid)), \
+        "待发 job 必须一并收成终态，否则仍占水位"
+    db.close()
+
+
+def test_recheck_skips_brand_ad(tmp_path):
+    """存量品牌硬广（海尔/京东）也要拦（实测 t987-988）。"""
+    import bot.main as main_mod
+
+    db, tid = _mk_task_db(tmp_path, "海尔云溪冰箱630靠谱好物适配三代同堂", "ig_home")
+    s = _settings_with_block(["ig_home"], ["海尔", "京东"])
+
+    main_mod._recheck_block_any(s, db, db.get(tid), db.get(tid)["caption"])
+    assert db.get(tid)["state"] == State.SKIPPED
+    db.close()
+
+
+def test_recheck_lets_clean_content_through(tmp_path):
+    """真人木工内容不能被误杀（实测 t979 已正常发布）。"""
+    import bot.main as main_mod
+
+    db, tid = _mk_task_db(tmp_path, "传统拉大锯解木，众人合力破开粗壮大树桩", "ig_satisfying")
+    s = _settings_with_block(["ig_satisfying"], ["AI", "动画", "3D"])
+
+    main_mod._recheck_block_any(s, db, db.get(tid), db.get(tid)["caption"])
+    assert db.get(tid)["state"] == State.COPYWRITTEN, "合规素材不能被改状态"
+    db.close()
+
+
+def test_recheck_checks_each_target_platform(tmp_path):
+    """多平台任务：任一目标平台命中排除词就跳过。"""
+    import bot.main as main_mod
+
+    db, tid = _mk_task_db(tmp_path, "海尔空调好物", "ig_home,kuaishou")
+    s = _settings_with_block(["ig_home"], ["海尔"])
+    main_mod._recheck_block_any(s, db, db.get(tid), db.get(tid)["caption"])
+    assert db.get(tid)["state"] == State.SKIPPED
+    db.close()
+
+
+def test_recheck_noop_without_caption(tmp_path):
+    """没有 caption（如纯投链）时不误杀。"""
+    import bot.main as main_mod
+
+    db, tid = _mk_task_db(tmp_path, "", "ig_pets")
+    s = _settings_with_block(["ig_pets"], ["furry"])
+    main_mod._recheck_block_any(s, db, db.get(tid), "")
+    assert db.get(tid)["state"] == State.COPYWRITTEN
+    db.close()
+
+
+def test_step_copywrite_actually_calls_recheck(tmp_path, monkeypatch):
+    """接线测试：step_copywrite 必须真的调用复查。
+
+    前面几个用例直接调 _recheck_block_any，只能证明函数本身对不对，
+    证明不了它被接进流水线 —— 变异验证时把调用改成 pass，那些用例全绿。
+    """
+    import bot.main as main_mod
+
+    db, tid = _mk_task_db(tmp_path, "【furry动画】兽人宠物", "ig_pets")
+    s = _settings_with_block(["ig_pets"], ["furry", "兽人"])
+
+    # 一旦走到 LLM 就说明没拦住 —— 让它在烂掉时炸得很明显
+    called = {"llm": 0}
+    monkeypatch.setattr(main_mod, "generate_copy",
+                        lambda *a, **k: called.update(llm=called["llm"] + 1) or {})
+
+    task = db.get(tid)
+    main_mod.step_copywrite(s, db, task)
+
+    assert db.get(tid)["state"] == State.SKIPPED
+    assert called["llm"] == 0, "复查要在调 LLM 之前就拦住"
     db.close()
