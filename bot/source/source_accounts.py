@@ -234,27 +234,25 @@ SEED_HOME = [
      "note": "n=6 中位 2622（库内显示名 GRAND STYLE，用户名待用户核对）"},
 ]
 
-# 快手 A 号爆款源账号（2026-11-10 从历史 Top 爆款实测数据中精准反查）
-# 定位：以小动物/奇幻生物为主角的 AI 3D 搞笑剧情动画微剧场
+# 快手 A 号爆款源账号（2026-11-11 纯化：只保留经核验的 3D/AI 动画作者）
+# 定位：纯 3D / CGI / AI 搞笑脑洞动画短片（不含纯实拍萌宠号/自然鸟类号）
 SEED_ANIMALS = [
     {"account": "kataicinema", "url": "https://www.instagram.com/kataicinema/",
      "note": "Top1 383万大爆款源头（Paco 变色龙 AI 动画）"},
     {"account": "chipcoi888", "url": "https://www.instagram.com/chipcoi888/",
-     "note": "Top2 134万大爆款源头（拟人蜜獾平头哥短片）"},
+     "note": "Top2 134万大爆款源头（3D 搞笑神反转动画）"},
     {"account": "mamahentale", "url": "https://www.instagram.com/mamahentale/",
      "note": "Top3 12.5万大爆款源头（母鸡历险记 3D 动画）"},
-    {"account": "bingwave123", "url": "https://www.instagram.com/bingwave123/",
-     "note": "Top4 11.4万大爆款源头（小鸟与鱼无声 3D 动画）"},
     {"account": "aivoxy", "url": "https://www.instagram.com/aivoxy/",
-     "note": "1.7万播放（树洞小动物治愈动画）"},
+     "note": "1.7万播放（树洞小动物 3D 治愈动画）"},
     {"account": "cart.oons9493", "url": "https://www.instagram.com/cart.oons9493/",
-     "note": "1.1万播放（小鸡搞笑动画短片）"},
+     "note": "1.1万播放（3D 小鸡搞笑动画短片）"},
     {"account": "cartoonworldtop", "url": "https://www.instagram.com/cartoonworldtop/",
-     "note": "1.1万播放（母鸡孵出巨龙奇幻动画）"},
+     "note": "1.1万播放（3D 奇幻动画短片）"},
     {"account": "zooya.world", "url": "https://www.instagram.com/zooya.world/",
-     "note": "8267播放（毛茸茸小家伙奇妙日常）"},
+     "note": "8267播放（毛茸茸 3D 动画）"},
     {"account": "hello_bug88", "url": "https://www.instagram.com/hello_bug88/",
-     "note": "6747播放（火山翻车搞笑动画）"},
+     "note": "6747播放（火山翻车搞笑 3D 动画）"},
     {"account": "she_talks_ai", "url": "https://www.instagram.com/she_talks_ai/",
      "note": "4015播放（Bruno & Luma 3D 系列动画）"},
 ]
@@ -323,7 +321,7 @@ def promote_burst_accounts(db, s=None, threshold_play: int = 2500) -> list[dict]
     ph = ",".join("?" * len(lanes))
     with db._lock:
         rows = db.conn.execute(f"""
-            SELECT j.platform as lane, t.username, t.play_count, t.title, 
+            SELECT j.platform as lane, t.shortcode, t.username, t.play_count, t.title, 
                    t.source_url, t.source_platform, t.caption
             FROM publish_jobs j
             JOIN tasks t ON j.task_id = t.id
@@ -352,14 +350,13 @@ def promote_burst_accounts(db, s=None, threshold_play: int = 2500) -> list[dict]
         title = (r["title"] or "").strip()
         caption = r["caption"] or ""
 
-        # 提取合法 handle
+        # 提取合法 handle：只接受纯 handle，拒绝靠删空格把显示名硬拼成假 IG 用户名
         handle = ""
-        if re.match(r"^[a-zA-Z0-9._]{2,30}$", raw_user):
-            handle = raw_user
-        elif src_plat == "instagram":
-            cleaned = re.sub(r"[^a-zA-Z0-9._]", "", raw_user)
-            if 3 <= len(cleaned) <= 30:
-                handle = cleaned
+        if re.match(r"^[a-zA-Z0-9._-]{2,30}$", raw_user):
+            if src_plat == "instagram" and not re.match(r"^[a-zA-Z0-9._]{2,30}$", raw_user):
+                handle = ""
+            else:
+                handle = raw_user
 
         if not handle or handle.lower() in _IG_RESERVED:
             continue
@@ -368,6 +365,18 @@ def promote_burst_accounts(db, s=None, threshold_play: int = 2500) -> list[dict]
         lane_existing = existing_by_lane.setdefault(lane, set())
         if handle_lower in lane_existing:
             continue
+
+        # 画面探针缓存复检：若快手 A 号已有明确的 is_animation=False 判定，不晋级实拍作者
+        if lane == "kuaishou" and r["shortcode"]:
+            try:
+                from ..config import WORK_DIR
+                probe_file = WORK_DIR / f"{r['shortcode']}_content.json"
+                if probe_file.exists():
+                    pdata = json.loads(probe_file.read_text(encoding="utf-8"))
+                    if pdata.get("is_animation") is False:
+                        continue
+            except Exception:
+                pass
 
         # 题材闸门二次校验：防止非本赛道的偶发内容被错误晋级
         text = f"{title} {caption}".lower()

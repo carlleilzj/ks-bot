@@ -297,6 +297,14 @@ def step_copywrite(s: Settings, db: Database, task: dict) -> None:
             if is_real_person_footage(content):
                 log.warning("[%s] ⚠️ 画面疑似实拍真人素材（非动画）：%s",
                             sc, str(content.get("summary", ""))[:120])
+            # 自动发现的快手 A 号素材必须为 3D/CG/AI 动画（防止实拍猫狗/自然风光混入）
+            is_auto = (task.get("source_tag") or "").startswith("auto:")
+            targets = {t.strip() for t in (task.get("target_platforms") or "").split(",") if t.strip()}
+            if is_auto and targets == {"kuaishou"} and content.get("is_animation") is False:
+                why = f"非 3D/AI 动画素材（实拍）：{str(content.get('summary', ''))[:100]}"
+                db.update(task["id"], state=State.SKIPPED, error=why)
+                log.info("[%s] 快手 A 号自动发现素材非动画，自动跳过：%s", sc, why)
+                return
         except Exception as e:
             log.warning("[%s] 内容探针异常（按无画面描述继续）：%s", sc, str(e)[:150])
 

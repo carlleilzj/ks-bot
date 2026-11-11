@@ -82,3 +82,13 @@ def test_b_lane_enforces_genre_gate(tmp_path):
     promoted = sa.promote_burst_accounts(db, s=s, threshold_play=2500)
     assert len(promoted) == 1
     assert promoted[0]["account"] == "home_star"
+
+
+def test_ignores_display_name_with_spaces_and_non_animation(tmp_path):
+    """带空格的显示名绝不能硬删空格拼成假 IG 账号；带 is_animation=False 缓存的也不晋级。"""
+    db = Database(path=tmp_path / "t.db")
+    s = _FakeSettings({"kuaishou": _FakePlat({"enabled": True, "require_any": []})})
+    _seed_job_with_play(db, "kuaishou", "KATAI Cinema", 50000, "3d animation")
+
+    promoted = sa.promote_burst_accounts(db, s=s, threshold_play=2500)
+    assert len(promoted) == 0

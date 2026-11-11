@@ -432,6 +432,27 @@ class TestIgConfig:
         conf = self._conf("kuaishou")
         assert len(conf.get("ig_tags") or []) >= 5
 
+    def test_a_lane_targets_pure_ai_3d_animation_only(self):
+        """A 号定位纯化（2026-11-11）：对齐 IG 3D/AI 动画，剔除实拍猫狗萌宠词。"""
+        conf = self._conf("kuaishou")
+        tags = {str(t).lower() for t in (conf.get("ig_tags") or [])}
+        req = {str(w).lower() for w in (conf.get("require_any") or [])}
+        block = {str(w).lower() for w in (conf.get("block_any") or [])}
+
+        # 必须是纯 3D/AI 动画标签
+        for t in ("3danimation", "aianimation", "cgi", "blender3d"):
+            assert t in tags, f"缺少核心动画标签：{t}"
+        for bad_tag in ("funnyanimals", "petmemes", "catsofinstagram", "dogsofinstagram"):
+            assert bad_tag not in tags, f"ig_tags 不该混入实拍萌宠标签：{bad_tag}"
+
+        # require_any 不得含单纯宠物/泛搞笑词（防止放行实拍猫狗）
+        for bad_req in ("cat", "dog", "pet", "animal", "猫", "狗", "萌宠", "搞笑", "沙雕"):
+            assert bad_req not in req, f"require_any 不该含实拍风险词：{bad_req}"
+
+        # block_any 拦截实拍宠物蹭标签
+        for blk in ("pet", "catsofinstagram", "dogsofinstagram", "实拍"):
+            assert blk in block, f"block_any 缺少实拍排除词：{blk}"
+
     def test_youtube_disabled_but_lane_enabled(self):
         """A 号恢复自动发现，但不再走 YouTube 关键词搜索。"""
         conf = self._conf("kuaishou")
@@ -742,3 +763,49 @@ class TestRunDiscovery:
         assert out["kuaishou2"]["new"] == 1
         assert len(db.inserted) == 1
         assert db.inserted[0][0] == "wl_1"
+
+
+def test_step_copywrite_skips_non_animation_auto_kuaishou(tmp_path, monkeypatch):
+    """快手 A 号自动发现的素材若内容探针判定为非动画，直接标记 SKIPPED。"""
+    from bot.config import Settings
+    from bot.db import Database, State
+    from bot.main import step_copywrite
+    from bot.source.downloader import VideoMeta
+
+    db = Database(path=tmp_path / "t.db")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    monkeypatch.setattr("bot.main.WORK_DIR", work_dir)
+
+    tc = work_dir / "sc1_tc.mp4"
+    tc.write_bytes(b"fake_video")
+
+    meta = VideoMeta(
+        source_url="https://www.instagram.com/reel/abc/",
+        platform="instagram",
+        video_id="abc",
+        shortcode="instagram_abc",
+        username="realpet_user",
+        title="cute cat",
+        caption="cute cat",
+        thumbnail_url="",
+        duration=15.0,
+        permalink="https://www.instagram.com/reel/abc/",
+    )
+    tid = db.insert_video(meta, target_platforms=["kuaishou"], source_tag="auto:instagram_tag")
+    db.update(tid, state=State.TRANSCRIBED, work_path=str(tc))
+
+    monkeypatch.setattr(
+        "bot.ai.content_probe.describe_video",
+        lambda *a, **kw: {"is_animation": False, "has_real_person": False, "summary": "一只真猫在客厅乱跳"},
+    )
+    monkeypatch.setattr(
+        "bot.main.generate_copy",
+        lambda *a, **kw: pytest.fail("非动画被拦截时不应再调用文案生成"),
+    )
+
+    task = db.get(tid)
+    step_copywrite(Settings(), db, task)
+    updated = db.get(tid)
+    assert updated["state"] == State.SKIPPED
+    assert "非 3D/AI 动画素材" in (updated["error"] or "")
