@@ -18,6 +18,11 @@ discovery:
   # 约 21-31 条/天，净积压约 +15/天。24 = 约两天的产能缓冲。
   # 设为 0 可关闭闸门（恢复“无条件按 interval 发现”的旧行为）。
   backlog_watermark: 24
+  # 出海链路单独的水位（2026-11-12 新增）。
+  # 不能与国内共用 24：国内快手积压一旦顶到 24，就会把出海寻源一起关掉，
+  # 而出海 4 账号产能是 2×4=8 条/天（窗口 20:00~06:00），24 条对它等于 3 天库存。
+  # 8 = 约一天的产能缓冲。
+  backlog_watermark_overseas: 8
 
 # 字幕烧录样式（ratio 均为相对视频尺寸的比例，自动适配竖屏/横屏）
 subtitle:
@@ -534,53 +539,29 @@ platforms:
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
     discover:
-      enabled: false            # 出海链路严格走国内跨平台投链（B站/抖音/小红书），禁止海外抓取（杜绝IG搬IG）
+      enabled: true            # 国内 B站 寻源（阿里云 discover_worker 执行）
       interval_hours: 6
       per_run: 4
-      sources: []
-      ig_tags: []
+      sources: ["bilibili"]
+      queries:
+        - "宠物动画"
+        - "猫咪动画"
+        - "萌宠动画"
+        - "宠物搞笑"
       require_any:
-        - cat
-        - dog
-        - pet
-        - puppy
-        - kitten
-        - kitty
-        - cute
-        - funny
-        - meow
-        - bark
-        - animal
-        - animals
-        - duck
-        - hen
-        - chicken
-        - bird
-        - bunny
-        - rabbit
-        - hamster
-        - capybara
-        - paws
-        - 猫
-        - 狗
-        - 宠物
-        - 橘猫
-        - 萌宠
-        - 汪星人
-        - 喵星人
-        - 动物
-        - 小动物
-        - 小猫
-        - 小狗
-        - 修狗
-        - 鸭子
-        - 仓鼠
-      block_any:
-        - makeup
-        - cooking
-        - recipe
-        - news
-        - 采访
+        - "猫"
+        - "狗"
+        - "宠物"
+        - "萌宠"
+        - "动物"
+        - "小猫"
+        - "小狗"
+        - "喵"
+        - "汪"
+        - "仓鼠"
+        - "鸭子"
+      min_duration: 10
+      max_duration: 120
   ig_satisfying:
     enabled: true
     default: false
@@ -590,38 +571,43 @@ platforms:
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
     discover:
-      enabled: false            # 出海链路严格走国内跨平台投链（B站/抖音/小红书），禁止海外抓取（杜绝IG搬IG）
+      enabled: true            # 国内 B站 寻源（阿里云 discover_worker 执行）
       interval_hours: 6
       per_run: 4
-      sources: []
-      ig_tags: []
+      sources: ["bilibili"]
+      queries:
+        - "传统木工"
+        - "榫卯"
+        - "手工制作"
+        - "解压视频"
+        - "微缩模型"
       require_any:
-        - satisfying
-        - asmr
-        - clean
-        - hoof
-        - carpet
-        - restore
-        - carving
-        - soap
-        - sand
-        - glass
-        - 修蹄
-        - 洗地毯
-        - 木工
-        - 雕刻
-        - 肥皂
-        - 动力沙
-        - 微缩
-        - 修复
-        - 收纳
-      block_any:
-        - makeup
-        - recipe
-        - cooking
-        - dance
-        - tutorial
-        - 采访
+        - "木工"
+        - "木匠"
+        - "木作"
+        - "手工"
+        - "手艺"
+        - "榫卯"
+        - "雕刻"
+        - "解压"
+        - "微缩"
+        - "修复"
+        - "削"
+        - "肥皂"
+      block_any:            # 命中即丢弃（优先于 require_any）
+        - "AI"
+        - "ai"
+        - "动画"
+        - "3D"
+        - "cg"
+        - "建模"
+        - "渲染"
+        - "虚拟"
+        - "游戏"
+        - "二次元"
+        - "漫剧"
+      min_duration: 15
+      max_duration: 480
   ig_anim:
     enabled: true
     default: false
@@ -631,34 +617,29 @@ platforms:
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
     discover:
-      enabled: false            # 出海链路严格走国内跨平台投链（B站/抖音/小红书），禁止海外抓取（杜绝IG搬IG）
+      enabled: true            # 国内 B站 寻源（阿里云 discover_worker 执行）
       interval_hours: 6
       per_run: 4
-      sources: []
-      ig_tags: []
+      sources: ["bilibili"]
+      queries:
+        - "3D动画"
+        - "AI动画"
+        - "动画短片"
+        - "Blender动画"
+        - "CG动画"
+        - "脑洞动画"
       require_any:
-        - 3d
-        - animation
-        - animated
-        - cgi
-        - blender
-        - cartoon
-        - dragon
-        - dino
-        - ai
-        - 动画
-        - 卡通
-        - 3D
-        - 神反转
-        - 脑洞
-        - 恐龙
-        - 神龙
-      block_any:
-        - makeup
-        - cooking
-        - news
-        - 教程
-        - 教学
+        - "3d"
+        - "3D"
+        - "动画"
+        - "cgi"
+        - "blender"
+        - "脑洞"
+        - "神反转"
+        - "恐龙"
+        - "神龙"
+      min_duration: 15
+      max_duration: 180
   ig_home:
     enabled: true
     default: false
@@ -668,43 +649,27 @@ platforms:
     min_gap_hours: 6
     window: ["20:00", "06:00"]   # 跨夜：覆盖欧美午后到晚间黄金时段
     discover:
-      enabled: false            # 出海链路严格走国内跨平台投链（B站/抖音/小红书），禁止海外抓取（杜绝IG搬IG）
+      enabled: true            # 国内 B站 寻源（阿里云 discover_worker 执行）
       interval_hours: 6
       per_run: 4
-      sources: []
-      ig_tags: []
+      sources: ["bilibili"]
+      queries:
+        - "家居好物"
+        - "房间改造"
+        - "收纳整理"
       require_any:
-        - home
-        - room
-        - decor
-        - gadget
-        - lamp
-        - light
-        - organizer
-        - storage
-        - cozy
-        - aesthetic
-        - kitchen
-        - bedroom
-        - bedding
-        - pajama
-        - pyjama
-        - 氛围灯
-        - 收纳
-        - 卧室改造
-        - 家居
-        - 懒人
-        - 好物
-        - 小家电
-        - 四件套
-        - 睡衣
-        - 投影灯
-      block_any:
-        - makeup
-        - cooking recipe
-        - 妆容
-        - 美妆
-        - 穿搭教程
+        - "家居"
+        - "卧室"
+        - "收纳"
+        - "好物"
+        - "改造"
+        - "氛围灯"
+        - "四件套"
+        - "睡衣"
+        - "小家电"
+        - "宅家"
+      min_duration: 15
+      max_duration: 300
   # ============================================================
   # YouTube Shorts 出海通道（官方 YouTube Data API v3）
   # 凭据：.env 中 YOUTUBE_CLIENT_ID / YOUTUBE_CLIENT_SECRET / YOUTUBE_REFRESH_TOKEN

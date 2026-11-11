@@ -217,6 +217,69 @@ class RemoteApi:
                 log.debug("自动发掘爆款账号跳过: %s", pe)
         return {"ok": True, **res}
 
+    def submit_urls(self, data: dict) -> dict:
+        """接收国内发现端（阿里云）推送的素材链接，入库为待处理任务。
+
+        为什么要这个接口：B站 搜索在国内线路可用（实测 200），在协调端所在的
+        境外线路被 412 风控 —— 所以发现必须在阿里云跑，而任务是协调端的库。
+        本接口就是两端的桥：只传「链接 + 目标平台」，下载/转码/文案仍走协调端
+        原有流水线（与 TG 投链完全同一条路径）。
+
+        安全约束：
+        * 目标平台逐条过跨海硬隔离校验（出海只收国内源，国内只收海外源）。
+        * 只接受 http(s) 链接；不在这里下载/解析，避免把网络 IO 拉进 API 线程。
+        * source_platform 来自发现端声明，会再卡一次方向 —— 即使发现端被篡改，
+          也不能把 IG 链接塞进出海队列（这正是 11-10 踩过的那类问题）。
+        """
+        from .source.cross_border import validate_cross_border
+
+        items = data.get("items") or []
+        if not isinstance(items, list):
+            return {"ok": False, "error": "items must be a list"}
+        targets = [str(t).strip() for t in (data.get("targets") or []) if str(t).strip()]
+        if not targets:
+            return {"ok": False, "error": "targets 必填"}
+
+        added, dup, rejected = 0, 0, []
+        for item in items[:50]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            platform = str(item.get("platform") or "bilibili").strip().lower()
+            if not url.startswith("http"):
+                continue
+            # 方向校验：全部目标都合规才入库，否则整条丢弃并留痕
+            bad = [t for t in targets if not validate_cross_border(platform, t)[0]]
+            if bad:
+                rejected.append(f"{url}: 与 {','.join(bad)} 方向冲突")
+                continue
+            if self.db.find_by_source_url(url):
+                dup += 1
+                continue
+
+            shortcode = f"{platform}_{hashlib.sha1(url.encode()).hexdigest()[:11]}"
+            ts = now_iso()
+            with self.db._lock:
+                cur = self.db.conn.execute(
+                    """INSERT OR IGNORE INTO tasks
+                       (ig_media_id, shortcode, media_type, caption, permalink, username,
+                        media_url, source_url, source_platform, target_platforms,
+                        state, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (shortcode, shortcode, "VIDEO", str(item.get("title") or "")[:500],
+                     url, str(item.get("channel") or ""), url, url, platform,
+                     ",".join(targets), State.DETECTED, ts, ts))
+                self.db.conn.commit()
+                if cur.rowcount:
+                    added += 1
+                else:
+                    dup += 1
+        if added:
+            log.info("国内发现端推送：新增 %d 条（重复 %d），目标 %s",
+                     added, dup, ",".join(targets))
+        return {"ok": True, "added": added, "duplicate": dup,
+                "rejected": rejected[:20]}
+
     def hot_topics_ingest(self, data: dict) -> dict:
         """接收发布端（阿里云）每天推送的平台热门话题并归档到 data/kuaishou_hot_topics.json。
 
@@ -863,6 +926,13 @@ class RemoteApi:
                     # 发布端每日推送快手等平台热门话题榜单（国内抓取→协调端存储）
                     try:
                         self._send_json(200, api.hot_topics_ingest(data))
+                    except Exception as e:
+                        self._send_json(500, {"ok": False, "error": str(e)[:200]})
+                    return
+                if parsed.path == "/api/submit_url":
+                    # 国内发现端（阿里云）推送 B站 等国内素材链接
+                    try:
+                        self._send_json(200, api.submit_urls(data))
                     except Exception as e:
                         self._send_json(500, {"ok": False, "error": str(e)[:200]})
                     return

@@ -490,3 +490,77 @@ def test_report_url_requires_fields(api_env):
     r = httpx.post(f"{base}/api/report-url", headers=_h(s),
                    json={"task_id": api_env["task_id"], "platform": "kuaishou"}, timeout=5)
     assert r.json()["ok"] is False
+
+
+# ---------- 国内发现端推送接口（/api/submit_url） ----------
+
+def test_submit_urls_adds_domestic_source_to_overseas_target(tmp_path):
+    """B站 → 出海目标：合规，应入库为 DETECTED。"""
+    from unittest.mock import MagicMock
+    import bot.remote_api as ra
+    from bot.db import Database, State
+
+    db = Database(tmp_path / "submit.db")
+    api = ra.RemoteApi(MagicMock(), db, lambda s, d, p: None)
+
+    res = api.submit_urls({
+        "targets": ["ig_anim", "youtube"],
+        "items": [{"url": "https://www.bilibili.com/video/BV1xx",
+                   "title": "3D动画短片", "channel": "某UP", "platform": "bilibili"}],
+    })
+    assert res["ok"] is True and res["added"] == 1
+    row = db.find_by_source_url("https://www.bilibili.com/video/BV1xx")
+    assert row is not None
+    assert row["state"] == State.DETECTED
+    assert row["source_platform"] == "bilibili"
+    assert set(row["target_platforms"].split(",")) == {"ig_anim", "youtube"}
+    db.close()
+
+
+def test_submit_urls_rejects_cross_border_violation(tmp_path):
+    """IG 素材 → 出海目标属「IG 搬 IG」，必须拒绝。"""
+    from unittest.mock import MagicMock
+    import bot.remote_api as ra
+    from bot.db import Database
+
+    db = Database(tmp_path / "s2.db")
+    api = ra.RemoteApi(MagicMock(), db, lambda s, d, p: None)
+
+    res = api.submit_urls({
+        "targets": ["ig_anim"],
+        "items": [{"url": "https://www.instagram.com/reel/ABC/",
+                   "platform": "instagram"}],
+    })
+    assert res["added"] == 0
+    assert res["rejected"], "方向冲突必须留痕"
+    assert db.find_by_source_url("https://www.instagram.com/reel/ABC/") is None
+    db.close()
+
+
+def test_submit_urls_dedupes(tmp_path):
+    """同一条链接推两次只入库一次（去重键 source_url）。"""
+    from unittest.mock import MagicMock
+    import bot.remote_api as ra
+    from bot.db import Database
+
+    db = Database(tmp_path / "s3.db")
+    api = ra.RemoteApi(MagicMock(), db, lambda s, d, p: None)
+    payload = {"targets": ["ig_home"],
+               "items": [{"url": "https://www.bilibili.com/video/BV1yy",
+                          "platform": "bilibili"}]}
+    assert api.submit_urls(payload)["added"] == 1
+    second = api.submit_urls(payload)
+    assert second["added"] == 0 and second["duplicate"] == 1
+    db.close()
+
+
+def test_submit_urls_requires_targets(tmp_path):
+    from unittest.mock import MagicMock
+    import bot.remote_api as ra
+    from bot.db import Database
+
+    db = Database(tmp_path / "s4.db")
+    api = ra.RemoteApi(MagicMock(), db, lambda s, d, p: None)
+    res = api.submit_urls({"items": [{"url": "https://www.bilibili.com/video/BV1"}]})
+    assert res["ok"] is False and "targets" in res["error"]
+    db.close()

@@ -213,6 +213,160 @@ def discover_youtube(query: str, limit: int = 8,
 
 
 # ---------------------------------------------------------------------------
+# 来源：B站（国内线路专用）
+# ---------------------------------------------------------------------------
+
+def _parse_bili_duration(s) -> float:
+    """B站 时长字符串 → 秒。`"12:26"` / `"1:02:33"` / `""`。
+
+    B站 搜索接口给的是 mm:ss 文本而不是数字，不转成秒就进不了
+    lane.min_duration/max_duration 闸门 —— 而时长闸门恰恰是挡掉
+    「204 分钟 AI 教程」「86 分钟助眠音频」的唯一手段。
+    解析不出来返回 0（下游 evaluate 对 0 不做时长判定，交给元数据阶段）。
+    """
+    if isinstance(s, (int, float)):
+        return float(s)
+    text = str(s or "").strip()
+    if not text:
+        return 0.0
+    try:
+        parts = [int(x) for x in text.split(":")]
+    except (TypeError, ValueError):
+        return 0.0
+    if not 1 <= len(parts) <= 3:
+        return 0.0
+    secs = 0
+    for p in parts:
+        secs = secs * 60 + p
+    return float(secs)
+
+
+def _strip_html(s: str) -> str:
+    """去掉 B站 标题里的高亮标签：`3D<em class="keyword">动画</em>` → `3D动画`。
+
+    不做剥离的话，require_any 里的「动画」能命中但「3D动画」命不中，
+    关键词匹配会变得难预测。
+    """
+    import re as _re
+
+    return _re.sub(r"<[^>]+>", "", str(s or "")).replace("&quot;", '"')\
+        .replace("&amp;", "&").strip()
+
+
+def _bili_get(url: str, params: dict, *, retries: int = 3) -> dict | None:
+    """带 412 风控重试的 B站 请求。
+
+    实测（2026-11-12，阿里云国内线路）：连续请求会返回 **HTTP 412**，
+    间隔 3~5 秒后自动恢复。这是 B站 的速率风控，不是封禁。
+    所以每个请求失败都退避重试，而不是整轮放弃。
+
+    注意：必须在**国内线路**上跑。同一接口在境外的协调端（gc-jp）实测 412，
+    在国内的阿里云实测 200 —— 这是本模块只在阿里云侧运行的根本原因。
+    """
+    import httpx
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Referer": "https://www.bilibili.com/",
+        "Accept": "application/json, text/plain, */*",
+    }
+    for attempt in range(retries):
+        try:
+            with httpx.Client(timeout=20, follow_redirects=True) as c:
+                r = c.get(url, params=params, headers=headers)
+            if r.status_code == 200:
+                try:
+                    return r.json()
+                except Exception:
+                    return None
+            if r.status_code in (412, 429):
+                wait = 5 * (attempt + 1)
+                log.debug("B站 风控 %d，%ds 后重试", r.status_code, wait)
+                time.sleep(wait)
+                continue
+            log.debug("B站 请求失败 HTTP %d：%s", r.status_code, url)
+            return None
+        except Exception as e:
+            log.debug("B站 请求异常（%s）：%s", url, str(e)[:100])
+            time.sleep(3)
+    return None
+
+
+def discover_bilibili(query: str, limit: int = 8) -> list[Candidate]:
+    """B站 关键词搜索视频。
+
+    接口：`x/web-interface/search/type`（search_type=video），**无需 WBI 签名**，
+    字段齐全（bvid/duration/play/author/pubdate）。
+
+    与 YouTube 源的关键差异：B站 返回的是**中文标题**，所以赛道关键词
+    必须写中文（英文 cat/dog 在中文标题上几乎匹配不到，等于没过滤）。
+
+    duration 是 `"12:26"` 文本，转成秒后才能进时长闸门 —— 这一步很关键，
+    实测不加闸门时「AI动画」搜出来全是 204/951 分钟教程课。
+    """
+    data = _bili_get("https://api.bilibili.com/x/web-interface/search/type",
+                     {"search_type": "video", "keyword": query, "page": 1,
+                      "order": "pubdate"})
+    if not data or data.get("code") != 0:
+        if data:
+            log.debug("B站 搜索返回 code=%s（%s）", data.get("code"), query)
+        return []
+
+    out: list[Candidate] = []
+    for item in ((data.get("data") or {}).get("result") or [])[:max(1, limit)]:
+        bvid = str(item.get("bvid") or "").strip()
+        if not bvid:
+            continue
+        out.append(Candidate(
+            url=f"https://www.bilibili.com/video/{bvid}",
+            title=_strip_html(item.get("title")),
+            description=_strip_html(item.get("description")),
+            source="bilibili",
+            channel=_strip_html(item.get("author")),
+            duration=_parse_bili_duration(item.get("duration")),
+            like_count=None,  # 搜索接口不返回点赞，只有播放量
+            published_timestamp=float(item.get("pubdate") or 0),
+        ))
+    return out
+
+
+def discover_bilibili_up(mid: int | str, limit: int = 10) -> list[Candidate]:
+    """拉某个 B站 UP 主的最新投稿（白名单路径）。
+
+    为什么白名单比关键词重要：实测（2026-11-12）关键词搜索召回质量很差 ——
+    「AI动画」返回 204 分钟教程课、「ASMR」返回吃播、品牌号返回广告片。
+    白名单账号是人工确认过质量的，产出稳定得多。
+
+    实现走 search/type + keyword=UP主名 过滤，而不是 space/wbi/arc/search：
+    后者需要 WBI 签名（实测 -403/-352），前者无需签名。
+    代价是「按 UP 主名搜索」可能混入别人的视频，所以按 author 精确匹配回滤。
+    """
+    data = _bili_get("https://api.bilibili.com/x/web-interface/search/type",
+                     {"search_type": "video", "keyword": str(mid), "page": 1,
+                      "order": "pubdate"})
+    if not data or data.get("code") != 0:
+        return []
+    out: list[Candidate] = []
+    for item in ((data.get("data") or {}).get("result") or []):
+        bvid = str(item.get("bvid") or "").strip()
+        if not bvid:
+            continue
+        out.append(Candidate(
+            url=f"https://www.bilibili.com/video/{bvid}",
+            title=_strip_html(item.get("title")),
+            description=_strip_html(item.get("description")),
+            source="bilibili",
+            channel=_strip_html(item.get("author")),
+            duration=_parse_bili_duration(item.get("duration")),
+            published_timestamp=float(item.get("pubdate") or 0),
+        ))
+        if len(out) >= max(1, limit):
+            break
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 来源：Instagram（当前不可用，保留接口）
 # ---------------------------------------------------------------------------
 
@@ -298,6 +452,7 @@ def run_ig_search(tags: list[str], keywords: list[str],
 SOURCES = {
     "youtube": discover_youtube,
     "instagram": discover_instagram,
+    "bilibili": discover_bilibili,
 }
 
 
