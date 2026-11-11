@@ -206,6 +206,10 @@ class VideoMeta:
     thumbnail_url: str     # 缩略图 URL
     duration: float        # 时长（秒），0 表示未知
     permalink: str         # 视频原始链接
+    width: int = 0         # 视频原始宽度（0 = 未知）
+    height: int = 0        # 视频原始高度（0 = 未知）
+    like_count: int | None = None    # 点赞数（None = 未知）
+    published_timestamp: float = 0.0 # 原作品发布时间（Unix epoch 秒，0 = 未知）
 
 
 def parse_url(raw_url: str) -> str:
@@ -325,6 +329,17 @@ def extract_meta(url: str) -> VideoMeta:
     caption = info.get("description") or ""
     thumbnail = info.get("thumbnail") or ""
     duration = float(info.get("duration") or 0)
+    width = int(info.get("width") or 0)
+    height = int(info.get("height") or 0)
+    if (width <= 0 or height <= 0) and info.get("formats"):
+        vfmts = [f for f in info["formats"] if f.get("width") and f.get("height") and f.get("vcodec") != "none"]
+        if vfmts:
+            best_f = max(vfmts, key=lambda f: int(f["width"]) * int(f["height"]))
+            width = int(best_f["width"])
+            height = int(best_f["height"])
+    raw_likes = info.get("like_count")
+    like_count = int(raw_likes) if raw_likes is not None else None
+    pub_ts = float(info.get("timestamp") or 0)
 
     return VideoMeta(
         source_url=clean_url,
@@ -337,6 +352,10 @@ def extract_meta(url: str) -> VideoMeta:
         thumbnail_url=thumbnail,
         duration=duration,
         permalink=clean_url,
+        width=width,
+        height=height,
+        like_count=like_count,
+        published_timestamp=pub_ts,
     )
 
 

@@ -130,6 +130,29 @@ def step_transcode(s: Settings, db: Database, task: dict) -> None:
     is_export = is_export_task(task.get("target_platforms"))
     export_account = export_account_of(task.get("target_platforms"))
 
+    # 自动发现的国内素材落地画质/画幅复检（元数据未含尺寸时，用实测 ffprobe 拦掉 360p 糊片或 4:5/1:1 非竖屏）
+    if (task.get("source_tag") or "").startswith("auto:") and not is_export:
+        try:
+            raw_info = ffmpeg.video_info(raw)
+            rw, rh = int(raw_info.get("width") or 0), int(raw_info.get("height") or 0)
+            if rw > 0 and rh > 0:
+                from .source.discover import lane_from_config
+                t_names = [t.strip() for t in (task.get("target_platforms") or "").split(",") if t.strip()]
+                if len(t_names) == 1 and t_names[0] in s.platforms:
+                    lane_cfg = lane_from_config(t_names[0], s.platforms[t_names[0]].discover or {})
+                    if lane_cfg.min_short_side > 0 and min(rw, rh) < lane_cfg.min_short_side:
+                        why = f"成片画质过低 ({rw}x{rh}, 短边<{lane_cfg.min_short_side})"
+                        db.update(task["id"], state=State.SKIPPED, error=why)
+                        log.info("[%s] %s，自动跳过", sc, why)
+                        return
+                    if lane_cfg.require_vertical and ffmpeg.is_landscape(rw, rh):
+                        why = f"非原生竖屏 ({rw}x{rh}, 需铺底变形)"
+                        db.update(task["id"], state=State.SKIPPED, error=why)
+                        log.info("[%s] %s，自动跳过", sc, why)
+                        return
+        except Exception as e:
+            log.debug("[%s] 画质复检跳过：%s", sc, str(e)[:100])
+
     ffmpeg.ensure_compatible(raw, tc)
     # 去除元数据里的作者/来源痕迹（IG 视频会带 title/comment 标签）
     ffmpeg.strip_metadata(tc, tc)
@@ -305,6 +328,22 @@ def step_copywrite(s: Settings, db: Database, task: dict) -> None:
                 db.update(task["id"], state=State.SKIPPED, error=why)
                 log.info("[%s] 快手 A 号自动发现素材非动画，自动跳过：%s", sc, why)
                 return
+            # 快手2号（家居四件套/女性睡衣）视觉防偏题拦截：防鱼缸/绿植/袜子/玩具/打包机器混入
+            if is_auto and targets == {"kuaishou2"} and content:
+                from .source.discover import match_keywords
+                vis_text = " ".join(str(content.get(k) or "") for k in ("subject", "action", "summary"))
+                b_conf = (s.platforms["kuaishou2"].discover or {}) if "kuaishou2" in s.platforms else {}
+                vis_block = list(b_conf.get("block_any") or []) + [
+                    "鱼缸", "水族", "水景", "假山", "绿植", "花藤", "加湿器", "台灯",
+                    "袜子", "耳环", "玩偶", "泡泡枪", "玩具", "发卡", "打包", "流水线",
+                    "机器", "化妆品", "修眉", "口红", "粉底",
+                ]
+                vis_hit = match_keywords(vis_text, vis_block)
+                if vis_hit:
+                    why = f"快手2号视觉内容偏离四件套/睡衣定位（命中 {','.join(vis_hit[:3])}）：{str(content.get('summary', ''))[:80]}"
+                    db.update(task["id"], state=State.SKIPPED, error=why)
+                    log.info("[%s] %s，自动跳过", sc, why)
+                    return
         except Exception as e:
             log.warning("[%s] 内容探针异常（按无画面描述继续）：%s", sc, str(e)[:150])
 

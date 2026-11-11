@@ -227,11 +227,13 @@ def _now() -> str:
 # 实际用户名与显示名不同，猜一个会拉到错的账号 —— 这类靠用户手动发链接补。
 SEED_HOME = [
     {"account": "harun_home", "url": "https://www.instagram.com/harun_home/",
-     "note": "n=8 中位 3206（库内显示名 هارون هوم）"},
+     "note": "n=8 中位 3206（1440x2560 高清家纺四件套）"},
+    {"account": "grandstyle_egypt", "url": "https://www.instagram.com/grandstyle_egypt/",
+     "note": "n=6 中位 2622（1080x1920 奢华刺绣床品，原显示名 GRAND STYLE）"},
+    {"account": "bejamty_.store", "url": "https://www.instagram.com/bejamty_.store/",
+     "note": "播 4546（1080x1920 女性丝绒睡衣/家居服，原显示名 بجامتي ستور）"},
     {"account": "cilinea", "url": "https://www.instagram.com/cilinea/",
-     "note": "n=3 中位 4104"},
-    {"account": "grand.style", "url": "https://www.instagram.com/grand.style/",
-     "note": "n=6 中位 2622（库内显示名 GRAND STYLE，用户名待用户核对）"},
+     "note": "n=3 中位 4104（床品/家居好物）"},
 ]
 
 # 快手 A 号爆款源账号（2026-11-11 纯化：只保留经核验的 3D/AI 动画作者）
@@ -378,8 +380,12 @@ def promote_burst_accounts(db, s=None, threshold_play: int = 2500) -> list[dict]
             except Exception:
                 pass
 
-        # 题材闸门二次校验：防止非本赛道的偶发内容被错误晋级
+        # 题材闸门二次校验：防止非本赛道的偶发内容或纯带货杂货铺被错误晋级
         text = f"{title} {caption}".lower()
+        if lane == "kuaishou2":
+            ad_markers = ("in our shop", "search #pn", "link in my bio", "link in bio", "grab yours")
+            if any(m in text for m in ad_markers):
+                continue
         if s and lane in s.platforms:
             try:
                 from .discover import match_keywords

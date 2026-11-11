@@ -49,6 +49,10 @@ class Candidate:
     source: str = ""            # youtube / instagram / manual
     channel: str = ""
     duration: float = 0.0
+    width: int = 0
+    height: int = 0
+    like_count: int | None = None
+    published_timestamp: float = 0.0
     # 命中的赛道关键词（空 = 未通过题材过滤）
     matched_keywords: list[str] = field(default_factory=list)
 
@@ -74,6 +78,12 @@ class LaneConfig:
     max_duration: float = 180.0
     # 每次运行最多收多少条
     per_run: int = 8
+    # 质量与纯度硬闸门（2026-11-11 引入：防 360p 糊片、4:5 非竖屏铺底、2020 年僵尸片、0 赞死片与白名单跑偏）
+    whitelist_require_genre: bool = False
+    min_short_side: int = 0
+    require_vertical: bool = False
+    min_likes: int = 0
+    max_age_days: int = 0
 
 
 def _norm_text(s: str) -> str:
@@ -97,6 +107,32 @@ def match_keywords(text: str, keywords: list[str]) -> list[str]:
     return out
 
 
+def evaluate_quality(cand: Candidate, lane: LaneConfig, *,
+                     now_ts: float | None = None) -> tuple[bool, str]:
+    """画质 / 画幅 / 时效 / 互动基础门槛检查（不放行明显低质或过时死片）。"""
+    if cand.width > 0 and cand.height > 0:
+        if lane.min_short_side > 0:
+            short = min(cand.width, cand.height)
+            if short < lane.min_short_side:
+                return False, f"画质过低 ({cand.width}x{cand.height}, 短边 {short} < {lane.min_short_side})"
+        if lane.require_vertical and (cand.width / cand.height) > 0.70:
+            return False, f"非原生竖屏 ({cand.width}x{cand.height}, 需铺底变形)"
+
+    now = now_ts if now_ts is not None else time.time()
+    if lane.max_age_days > 0 and cand.published_timestamp > 0:
+        age_days = (now - cand.published_timestamp) / 86400.0
+        if age_days > lane.max_age_days:
+            return False, f"素材过于陈旧 ({age_days:.0f} 天前, 上限 {lane.max_age_days} 天)"
+
+    if lane.min_likes > 0 and cand.like_count is not None:
+        # 24 小时内刚发的新片给豁免窗口，避免刚发布还没起量就被误杀
+        is_fresh_24h = cand.published_timestamp > 0 and (now - cand.published_timestamp) < 86400
+        if not is_fresh_24h and cand.like_count < lane.min_likes:
+            return False, f"互动过低 (赞 {cand.like_count} < {lane.min_likes})"
+
+    return True, "通过"
+
+
 def evaluate(cand: Candidate, lane: LaneConfig,
              allow_empty_hint: bool = False) -> tuple[bool, str]:
     """判断候选是否可进入该赛道。返回 (是否通过, 原因)。
@@ -108,6 +144,10 @@ def evaluate(cand: Candidate, lane: LaneConfig,
     """
     if cand.duration and not (lane.min_duration <= cand.duration <= lane.max_duration):
         return False, f"时长 {cand.duration:.0f}s 不在 {lane.min_duration:.0f}~{lane.max_duration:.0f}s"
+
+    q_ok, q_why = evaluate_quality(cand, lane)
+    if not q_ok:
+        return False, q_why
 
     blocked = match_keywords(cand.hint_text, lane.block_any)
     if blocked:
@@ -409,6 +449,11 @@ def lane_from_config(name: str, conf: dict) -> LaneConfig:
         min_duration=_num(conf.get("min_duration"), 5.0),
         max_duration=_num(conf.get("max_duration"), 180.0),
         per_run=int(_num(conf.get("per_run"), 8)),
+        whitelist_require_genre=bool(conf.get("whitelist_require_genre", False)),
+        min_short_side=int(_num(conf.get("min_short_side"), 0)),
+        require_vertical=bool(conf.get("require_vertical", False)),
+        min_likes=int(_num(conf.get("min_likes"), 0)),
+        max_age_days=int(_num(conf.get("max_age_days"), 0)),
     )
 
 
@@ -566,14 +611,26 @@ def run_discovery(s, db, force: bool = False) -> dict:
             # 注意必须同时带上 meta.title：很多短视频只有标题、没有 description
             # （实测 2026-11-09：一条 cozy bedroom 视频 description 为空，
             # 只靠 caption 会误判成「无题材证据」）。
-            check = Candidate(url=c.url,
-                              title=f"{c.title} {meta.title or ''}".strip(),
-                              description=meta.caption or "",
-                              duration=meta.duration)
-            is_whitelist = "whitelist" in c.source or c.source == "instagram"
+            check = Candidate(
+                url=c.url,
+                title=f"{c.title} {meta.title or ''}".strip(),
+                description=meta.caption or "",
+                duration=meta.duration,
+                width=getattr(meta, "width", 0),
+                height=getattr(meta, "height", 0),
+                like_count=getattr(meta, "like_count", None),
+                published_timestamp=getattr(meta, "published_timestamp", 0.0),
+            )
+            # 无论是否白名单，画质 / 画幅 / 时效 / 互动基础门槛必须过关
+            q_ok, q_why = evaluate_quality(check, lane)
+            if not q_ok:
+                skipped += 1
+                log.info("[%s] 质量闸门丢弃 %s：%s", name, c.url, q_why)
+                continue
+
+            is_whitelist = ("whitelist" in c.source or c.source == "instagram") and not lane.whitelist_require_genre
             if is_whitelist:
-                # 白名单账号已由人工/爆款晋级确认赛道垂直度，不强制要求 caption 包含品类词；
-                # 但仍然执行 block_any 排除（防止发广告/美妆/无关翻车）。
+                # 仅当白名单免卡关键词时（如 A 号纯动画小语种标题），免除 require_any，但保留 block_any 排除
                 blocked = match_keywords(check.hint_text, lane.block_any)
                 if blocked:
                     skipped += 1

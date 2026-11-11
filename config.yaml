@@ -82,6 +82,10 @@ platforms:
       interval_hours: 6
       per_query: 8
       per_run: 8
+      min_short_side: 540       # 拦掉 360p/480p 超低清糊片，保留 576x1024 及以上动画
+      require_vertical: false   # A 号保留 1920x1080 皮克斯风宽屏动画电影
+      min_likes: 30             # 拦掉 0 赞无人问津死片（24h 内新帖豁免）
+      max_age_days: 540         # 只取近一年半作品，拒绝 2020 年陈年老古董
       sources: []               # 关键词搜索走 IG，不用 yt-dlp 搜索
       # IG 话题：严格对齐 IG · 3D/AI 动画，抓纯 3D/CGI/AI 动画短片
       ig_tags:
@@ -180,6 +184,11 @@ platforms:
       interval_hours: 6
       per_query: 8
       per_run: 6
+      whitelist_require_genre: true # 2026-11-11：白名单账号也必须命中床品/睡衣关键词，防杂货铺跑偏
+      min_short_side: 720           # 严格 >=720p 高清，杜绝 360x640 / 540p 低清糊片
+      require_vertical: true        # 强制原生竖屏 9:16，拒绝 4:5/1:1/4:3 糊底变形片（如 720x900 鱼缸）
+      min_likes: 30                 # 拒绝 0~3 赞死片（24h 内新帖豁免）
+      max_age_days: 540             # 拒绝 2020 年陈年僵尸广告
       # 2026-11-09 停用 YouTube 搜索：用户反馈优质内容少。
       # 实测 YouTube 搜「cozy bedroom decor」返回的多是 5~25 分钟教程/测评
       # 或 Amazon 联盟推广；而 IG 白名单（harun_home 等）拿到的是真实家纺
@@ -301,6 +310,9 @@ platforms:
         - وسادة         # 枕头
         # ---- 阿拉伯语：睡衣 ----
         - بيجامة        # 睡衣
+        - بجامه         # 睡衣（方言拼写）
+        - دشداشة        # 家居睡裙/长袍
+        - تراك          # 家居休闲套装
         - قميص نوم      # 睡裙/睡衣上衣
         # ---- 俄语：床品 ----
         - постель       # 床品
@@ -379,6 +391,50 @@ platforms:
         - promo code
         - discount code
         - order now
+        - in our shop
+        - "search #pn"
+        - link in bio
+        - link in my bio
+        - "comment 'link'"
+        - grab yours
+        - 预购
+        - 預購
+        # 非四件套/睡衣杂货铺商品（鱼缸/塑料花/小夜灯/袜子/耳环/玩具/机器打包）
+        - aquarium
+        - fish tank
+        - fountain
+        - rockery
+        - flower vine
+        - artificial
+        - humidifier
+        - bedroom lamp
+        - table lamp
+        - mosquito
+        - apron
+        - squishy
+        - socks
+        - earrings
+        - bubble gun
+        - plush
+        - toys
+        - toy
+        - tissue box
+        - hair clips
+        - floor mat
+        - packing machine
+        - 鱼缸
+        - 水景
+        - 假山
+        - 绿植
+        - 加湿器
+        - 台灯
+        - 袜子
+        - 耳环
+        - 玩偶
+        - 玩具
+        - 泡泡枪
+        - 打包
+        - 机器
         # 中文排除词：同样的误判在中文内容里也会发生
         - 美妆
         - 眼妆

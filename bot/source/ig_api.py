@@ -275,10 +275,28 @@ def extract(url: str):
         raise ValueError(f"该 IG 链接无视频内容（纯图文或静态图片轮播：{shortcode}）")
 
     taken_at = item.get("taken_at")
-    from datetime import datetime, timezone
-    published = ""
-    if taken_at:
-        published = datetime.fromtimestamp(taken_at, tz=timezone.utc).isoformat()
+    pub_ts = float(taken_at or 0)
+
+    width = int(item.get("original_width") or 0)
+    height = int(item.get("original_height") or 0)
+    if width <= 0 or height <= 0:
+        vv = item.get("video_versions") or []
+        if not vv and item.get("carousel_media"):
+            for sub in item["carousel_media"]:
+                if sub.get("video_versions"):
+                    vv = sub["video_versions"]
+                    break
+        if vv:
+            best_v = sorted(
+                vv,
+                key=lambda v: (int(v.get("width") or 0) * int(v.get("height") or 0), int(v.get("bandwidth") or 0)),
+                reverse=True,
+            )[0]
+            width = int(best_v.get("width") or 0)
+            height = int(best_v.get("height") or 0)
+
+    raw_likes = item.get("like_count")
+    like_count = int(raw_likes) if raw_likes is not None else None
 
     return VideoMeta(
         source_url=clean_url,
@@ -291,6 +309,10 @@ def extract(url: str):
         thumbnail_url=image_url,
         duration=duration,
         permalink=f"https://www.instagram.com/reel/{shortcode}/",
+        width=width,
+        height=height,
+        like_count=like_count,
+        published_timestamp=pub_ts,
     )
 
 

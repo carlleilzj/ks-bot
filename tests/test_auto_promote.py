@@ -92,3 +92,15 @@ def test_ignores_display_name_with_spaces_and_non_animation(tmp_path):
 
     promoted = sa.promote_burst_accounts(db, s=s, threshold_play=2500)
     assert len(promoted) == 0
+
+
+def test_b_lane_rejects_shop_ad_spam_accounts(tmp_path):
+    """带 in our shop / Search #PN 的杂货铺号不能晋级 B 号白名单。"""
+    db = Database(path=tmp_path / "t.db")
+    s = _FakeSettings({
+        "kuaishou2": _FakePlat({"enabled": True, "require_any": ["bedding", "四件套"]}),
+    })
+    _seed_job_with_play(db, "kuaishou2", "pennycraftsstudio.store", 3150,
+                        "冬天四件套", "Winter Soft Bedding Set in our shop Search #PN6905")
+    promoted = sa.promote_burst_accounts(db, s=s, threshold_play=2500)
+    assert len(promoted) == 0

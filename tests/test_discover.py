@@ -809,3 +809,188 @@ def test_step_copywrite_skips_non_animation_auto_kuaishou(tmp_path, monkeypatch)
     updated = db.get(tid)
     assert updated["state"] == State.SKIPPED
     assert "非 3D/AI 动画素材" in (updated["error"] or "")
+
+
+class TestQualityGates:
+    def test_evaluate_quality_rejects_low_res_and_non_vertical(self):
+        import time as _t
+        lane = dc.LaneConfig(
+            name="kuaishou2", require_any=["bedding"],
+            min_short_side=720, require_vertical=True,
+            min_likes=30, max_age_days=540,
+        )
+        now = _t.time()
+
+        # 360x640 低清糊片 -> 拒收
+        c_low = dc.Candidate(url="u1", title="bedding", width=360, height=640,
+                             like_count=100, published_timestamp=now - 86400 * 10)
+        ok, why = dc.evaluate_quality(c_low, lane, now_ts=now)
+        assert not ok and "画质过低" in why
+
+        # 720x900 4:5 非竖屏 -> 拒收
+        c_45 = dc.Candidate(url="u2", title="bedding", width=720, height=900,
+                            like_count=100, published_timestamp=now - 86400 * 10)
+        ok, why = dc.evaluate_quality(c_45, lane, now_ts=now)
+        assert not ok and "非原生竖屏" in why
+
+        # 2020 年陈年老古董 -> 拒收
+        c_old = dc.Candidate(url="u3", title="bedding", width=1080, height=1920,
+                             like_count=500, published_timestamp=now - 86400 * 800)
+        ok, why = dc.evaluate_quality(c_old, lane, now_ts=now)
+        assert not ok and "过于陈旧" in why
+
+        # 超过 24h 但点赞=0 -> 拒收
+        c_dead = dc.Candidate(url="u4", title="bedding", width=1080, height=1920,
+                              like_count=0, published_timestamp=now - 86400 * 5)
+        ok, why = dc.evaluate_quality(c_dead, lane, now_ts=now)
+        assert not ok and "互动过低" in why
+
+        # 24h 内新发即使点赞=2 -> 放行（豁免窗口）
+        c_fresh = dc.Candidate(url="u5", title="bedding", width=1080, height=1920,
+                               like_count=2, published_timestamp=now - 3600)
+        ok, _ = dc.evaluate_quality(c_fresh, lane, now_ts=now)
+        assert ok
+
+        # 高清 9:16 + 高赞 + 近期 -> 放行
+        c_good = dc.Candidate(url="u6", title="bedding", width=1440, height=2560,
+                              like_count=3000, published_timestamp=now - 86400 * 10)
+        ok, _ = dc.evaluate_quality(c_good, lane, now_ts=now)
+        assert ok
+
+    def test_kuaishou2_whitelist_enforces_genre_when_configured(self, tmp_path, monkeypatch):
+        """whitelist_require_genre=True 时，白名单账号跑偏发袜子/非床品也必须拦截。"""
+        from bot.source.downloader import VideoMeta
+        from bot.source import source_accounts as sa
+        sa_file = tmp_path / "sa_wl.json"
+        monkeypatch.setattr(sa, "ACCOUNTS_FILE", sa_file)
+        sa.add_account("kuaishou2", "instagram", "shop_user")
+
+        monkeypatch.setattr(dc, "_last_run", {})
+        monkeypatch.setitem(dc.WHITELIST_SOURCES, "instagram", lambda h, n: [
+            dc.Candidate(url="wl_bad_ad", title="@shop_user", source="instagram"),
+            dc.Candidate(url="wl_bad_off", title="@shop_user", source="instagram"),
+            dc.Candidate(url="wl_good", title="@shop_user", source="instagram"),
+        ])
+
+        def fake_meta(url):
+            if url == "wl_bad_ad":
+                return VideoMeta(
+                    source_url=url, platform="instagram", video_id="bad1",
+                    shortcode="instagram_bad1", username="shop_user",
+                    title="Lovely Cat Socks", caption="Cat socks in our shop",
+                    thumbnail_url="", duration=10.0, permalink=url,
+                    width=720, height=1280, like_count=100, published_timestamp=0.0,
+                )
+            if url == "wl_bad_off":
+                return VideoMeta(
+                    source_url=url, platform="instagram", video_id="bad2",
+                    shortcode="instagram_bad2", username="shop_user",
+                    title="Desktop fish tank", caption="aquarium rockery fountain",
+                    thumbnail_url="", duration=15.0, permalink=url,
+                    width=720, height=1280, like_count=100, published_timestamp=0.0,
+                )
+            return VideoMeta(
+                source_url=url, platform="instagram", video_id="good",
+                shortcode="instagram_good", username="shop_user",
+                title="Winter bedding set", caption="fluffy duvet bedding set",
+                thumbnail_url="", duration=20.0, permalink=url,
+                width=1440, height=2560, like_count=500, published_timestamp=0.0,
+            )
+
+        monkeypatch.setattr("bot.source.downloader.extract_meta", fake_meta)
+        s = _FakeSettings({
+            "kuaishou2": _FakePlat({
+                "enabled": True, "per_run": 5, "sources": [], "queries": [],
+                "require_any": ["bedding", "duvet"], "block_any": ["in our shop", "socks"],
+                "whitelist_require_genre": True, "min_short_side": 720, "require_vertical": True,
+            })
+        })
+        db = _FakeDB()
+        out = dc.run_discovery(s, db, force=True)
+        assert out["kuaishou2"]["new"] == 1
+        assert [x[0] for x in db.inserted] == ["wl_good"]
+
+    def test_step_transcode_skips_low_res_and_non_vertical_auto_b(self, tmp_path, monkeypatch):
+        """快手2号自动发现素材下载后若实测为 360x640 或 720x900，step_transcode 必须拦截。"""
+        from bot.config import Settings, load_settings
+        from bot.db import Database, State
+        from bot.main import step_transcode
+        from bot.source.downloader import VideoMeta
+
+        s = load_settings()
+        db = Database(path=tmp_path / "t.db")
+        raw = tmp_path / "raw.mp4"
+        raw.write_bytes(b"fake")
+
+        meta = VideoMeta(
+            source_url="https://www.instagram.com/reel/low1/", platform="instagram",
+            video_id="low1", shortcode="instagram_low1", username="u1",
+            title="bedding", caption="bedding", thumbnail_url="", duration=15.0,
+            permalink="https://www.instagram.com/reel/low1/",
+        )
+        tid = db.insert_video(meta, target_platforms=["kuaishou2"], source_tag="auto:instagram_tag")
+        db.update(tid, state=State.DOWNLOADED, raw_path=str(raw))
+
+        monkeypatch.setattr(
+            "bot.media.ffmpeg.video_info",
+            lambda p: {"width": 720, "height": 900, "vcodec": "h264", "has_audio": True, "acodec": "aac", "duration": 15.0},
+        )
+        monkeypatch.setattr(
+            "bot.media.ffmpeg.ensure_compatible",
+            lambda *a, **kw: pytest.fail("非竖屏被拦截时不应再耗时转码"),
+        )
+
+        step_transcode(s, db, db.get(tid))
+        updated = db.get(tid)
+        assert updated["state"] == State.SKIPPED
+        assert "非原生竖屏" in (updated["error"] or "")
+
+    def test_step_copywrite_skips_visual_off_niche_auto_b(self, tmp_path, monkeypatch):
+        """快手2号自动发现素材若视觉探针识别出微型鱼缸/袜子/玩具，直接跳过。"""
+        from bot.config import load_settings
+        from bot.db import Database, State
+        from bot.main import step_copywrite
+        from bot.source.downloader import VideoMeta
+
+        s = load_settings()
+        db = Database(path=tmp_path / "t.db")
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        monkeypatch.setattr("bot.main.WORK_DIR", work_dir)
+        tc = work_dir / "sc2_tc.mp4"
+        tc.write_bytes(b"fake")
+
+        meta = VideoMeta(
+            source_url="https://www.instagram.com/reel/fish1/", platform="instagram",
+            video_id="fish1", shortcode="instagram_fish1", username="u1",
+            title="bedroom decor", caption="bedroom", thumbnail_url="", duration=15.0,
+            permalink="https://www.instagram.com/reel/fish1/",
+        )
+        tid = db.insert_video(meta, target_platforms=["kuaishou2"], source_tag="auto:instagram")
+        db.update(tid, state=State.TRANSCRIBED, work_path=str(tc))
+
+        monkeypatch.setattr(
+            "bot.ai.content_probe.describe_video",
+            lambda *a, **kw: {"is_animation": False, "has_real_person": False, "subject": "微型鱼缸", "summary": "桌面创意微型鱼缸和水族造景"},
+        )
+        monkeypatch.setattr(
+            "bot.main.generate_copy",
+            lambda *a, **kw: pytest.fail("偏题素材被拦截时不应再调用文案生成"),
+        )
+
+        step_copywrite(s, db, db.get(tid))
+        updated = db.get(tid)
+        assert updated["state"] == State.SKIPPED
+        assert "偏离四件套/睡衣" in (updated["error"] or "")
+
+    def test_config_kuaishou2_has_strict_quality_gates(self):
+        import yaml
+        from pathlib import Path
+        root = Path(__file__).resolve().parent.parent
+        data = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+        conf = data["platforms"]["kuaishou2"]["discover"]
+        assert conf.get("whitelist_require_genre") is True
+        assert int(conf.get("min_short_side", 0)) >= 720
+        assert conf.get("require_vertical") is True
+        assert int(conf.get("min_likes", 0)) >= 20
+        assert int(conf.get("max_age_days", 0)) > 0
