@@ -118,28 +118,69 @@ def _queue_pending_report(task_id: int, platform: str, url: str) -> None:
         log.error("写补报队列失败（该条可能重复发布）：%s", e)
 
 
+def _read_outbox() -> tuple[set[tuple[int, str]], bool]:
+    """读 outbox，返回 ({(task_id, platform)}, 是否可靠)。
+
+    第二项是安全标志：outbox 文件存在但读不出来（权限/磁盘/编码）时返回
+    False —— 调用方必须据此放弃回收卡死 job。理由见 release_stale_json()。
+    """
+    pairs: set[tuple[int, str]] = set()
+    if not PENDING_REPORTS_PATH.exists():
+        return pairs, True
+    try:
+        content = PENDING_REPORTS_PATH.read_text(encoding="utf-8")
+    except Exception as e:
+        log.error("补报队列读取失败（无法确认哪些 job 已发出）：%s", e)
+        return pairs, False
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+            pairs.add((int(item["task_id"]), str(item["platform"])))
+        except Exception:
+            continue
+    return pairs, True
+
+
 def _pending_report_pairs() -> set[tuple[int, str]]:
     """读 outbox，返回 {(task_id, platform)}，供 release_stale 排除。
 
     这些 job 的视频已经发出去了，只是成功回报还没送到；把它们放回 PENDING
-    会让同一条视频被再发一次。
+    会让同一条视频被再发一次。读不出来时返回空集 —— 需要「读失败就不回收」的
+    语义请用 _read_outbox() 并检查第二项。
     """
-    pairs: set[tuple[int, str]] = set()
-    if not PENDING_REPORTS_PATH.exists():
-        return pairs
-    try:
-        for line in PENDING_REPORTS_PATH.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                item = json.loads(line)
-                pairs.add((int(item["task_id"]), str(item["platform"])))
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return pairs
+    return _read_outbox()[0]
+
+
+def release_stale_json(base: str, s: Settings, older_than_minutes: int = 30) -> dict:
+    """构造 /api/release_stale 的请求体，**必须**带上待补报 job 的排除列表。
+
+    为什么单提一个函数：曾经启动路径和每轮轮询各写一份请求体，只有轮询那份带了
+    exclude，启动那份漏了。worker 停机超过 30 分钟后重启时，outbox 里「已发出但
+    没报上去」的 job 会先被退回 PENDING，随后 flush 再报 ok=True 时协调端已找不到
+    PUBLISHING job（200 + ok:false）→ 条目被丢弃 → 同一条视频被重复发布。
+
+    读不到 outbox 时返回 {"skip": True}：宁可让卡死 job 多停留一轮，也不能在
+    「不知道哪些已经发出去了」的情况下把它们退回待发队列。
+    """
+    pending_pairs, reliable = _read_outbox()
+    if not reliable:
+        return {"skip": True}
+    return {"older_than_minutes": older_than_minutes,
+            "exclude": sorted(f"{t}:{p}" for t, p in pending_pairs)}
+
+
+def _release_stale(base: str, s: Settings, older_than_minutes: int = 30) -> int:
+    """调用协调端回收卡死 job；outbox 不可读时跳过。返回释放条数。"""
+    body = release_stale_json(base, s, older_than_minutes)
+    if body.get("skip"):
+        log.warning("补报队列不可读，本轮跳过卡死 job 回收（避免重复发布）")
+        return 0
+    with httpx.Client(timeout=30) as c:
+        r = c.post(f"{base}/api/release_stale", headers=_headers(s), json=body)
+    return int((r.json() or {}).get("released", 0) or 0)
 
 
 def flush_pending_reports(base: str, s: Settings) -> int:
@@ -337,10 +378,13 @@ def run_audit_check(base: str, s: Settings, dry_run: bool = False) -> int:
         if r.get("deleted"):
             log.warning("[%s] 审核违规，作品已删除：%s", sc, matched.get("title", "")[:40])
             try:
+                # detail 已在上面兼容了作品类结果（无 'notice' 键）；这里曾硬取
+                # r['notice'] → 删除成功后抛 KeyError，告警掉进 except 被静默吃掉，
+                # operator 看不到「已自动删除」这条关键通知。统一复用 detail。
                 telegram.notify_info(
                     s, f"🗑️ 抖音审核违规，已自动删除作品\n"
                        f"任务：{sc}\n标题：{matched.get('title', '')[:50]}\n"
-                       f"原因：{r['notice'].get('text', '')[:200]}")
+                       f"原因：{detail[:200]}")
             except Exception:
                 pass
         else:
@@ -751,12 +795,7 @@ def run_once(base: str, s: Settings, *,
     # 已发出但成功回报还在 outbox 里的 job 必须排除：它们的视频已经上线，
     # 放回 PENDING 会让同一条再发一次。
     try:
-        pending_pairs = _pending_report_pairs()
-        with httpx.Client(timeout=15) as c:
-            r = c.post(f"{base}/api/release_stale", headers=_headers(s),
-                       json={"older_than_minutes": 30,
-                             "exclude": sorted(f"{t}:{p}" for t, p in pending_pairs)})
-        released = (r.json() or {}).get("released", 0)
+        released = _release_stale(base, s, 30)
         if released:
             log.warning("回收 %d 条卡死的发布中 job（已放回待发布队列）", released)
     except Exception as e:
@@ -1030,11 +1069,9 @@ def main() -> None:
 
     # 启动时释放卡死的 PUBLISHING job：上次 worker 若在发布中途被杀
     # （部署重启/崩溃），job 会永久停在 PUBLISHING，既不会被认领也不会回报。
+    # 注意：必须走 _release_stale()，它会带上 outbox 排除列表并做失败保护。
     try:
-        with httpx.Client(timeout=30) as c:
-            r = c.post(f"{base}/api/release_stale", headers=_headers(s),
-                       json={"older_than_minutes": 30})
-        released = (r.json() or {}).get("released", 0)
+        released = _release_stale(base, s, 30)
         if released:
             log.warning("启动清理：释放 %d 条卡死的发布中 job（已放回待发布队列）", released)
             try:

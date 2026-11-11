@@ -516,7 +516,19 @@ def step_publish(s: Settings, db: Database, task: dict, headed: bool) -> None:
         time.sleep(random.uniform(3, 8))  # 平台间隔，避免连续自动化操作
     jobs = db.jobs(task_id)
     if jobs and all(j["state"] in JOB_FINAL_STATES for j in jobs):
-        db.update(task_id, state=State.PUBLISHED, published_at=now_iso(), error=None)
+        # 必须至少有一条真的发出去过才收尾。DB 层 finalize_orphan_ready 与
+        # remote_api.report 都守这条不变量；本路径曾写成「全部终态即完成」，
+        # 于是所有平台都失败/被跳过时任务也会变 PUBLISHED，step_notify 再推一条
+        # 「✅ 发布完成」——凭空伪造一条已发布记录。
+        done = sum(1 for j in jobs if j["state"] == JobState.PUBLISHED)
+        if done:
+            db.update(task_id, state=State.PUBLISHED, published_at=now_iso(), error=None)
+        else:
+            err = "所有平台均未发布成功（FAILED/SKIPPED），等人工处理后再重试"
+            db.update(task_id, error=err)
+            log.error("[%s] %s，任务保持 %s", task["shortcode"], err, task["state"])
+            telegram.notify_info(s, f"❌ [{task['shortcode']}] {err}\n"
+                                    f"任务未标记完成，不会推送「发布完成」")
 
 
 def step_notify(s: Settings, db: Database, task: dict) -> None:

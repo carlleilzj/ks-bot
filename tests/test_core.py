@@ -760,3 +760,26 @@ def test_platform_attach_fields_default_empty(tmp_path):
     assert pc.attach_fallback == ""
     # 2026-11-05 起全局取消封面大字，缺省不再叠字（显式写 true 才开）
     assert pc.cover_title is False
+
+
+# ---------- CI 不能吞掉测试失败 ----------
+
+def test_ci_pytest_step_uses_pipefail():
+    """`pytest ... | tee` 默认只看 tee 的退出码，pytest 失败会变绿灯。
+
+    锁住：pytest 步骤必须是 bash + set -o pipefail。
+    """
+    from pathlib import Path
+
+    import yaml
+
+    ci = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    cfg = yaml.safe_load(ci.read_text(encoding="utf-8"))
+    steps = cfg["jobs"]["test"]["steps"]
+    pytest_steps = [s for s in steps if "pytest" in str(s.get("run", ""))]
+    assert pytest_steps, "CI 里应有 pytest 步骤"
+    for step in pytest_steps:
+        assert "| tee" not in step["run"] or "pipefail" in str(step.get("shell", "")) + step["run"], \
+            "pytest 管道必须带 pipefail，否则失败会被 tee 掩盖"
+        if "pipefail" in step["run"]:
+            assert step.get("shell") == "bash", "pipefail 需要显式 bash shell"

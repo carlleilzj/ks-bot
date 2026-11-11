@@ -8,3 +8,6 @@ data/
 /media/
 logs/
 .DS_Store
+# IG 矩阵号凭据暂存（含明文 token，绝不能入库；2026-11-12 发现未忽略）
+ig-creds*.txt
+*.tmp.txt

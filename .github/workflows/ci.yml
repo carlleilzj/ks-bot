@@ -33,7 +33,12 @@ jobs:
         env:
           # 测试里用本地时区判断发布窗口，统一时区避免 CI 时区差异导致 flaky
           TZ: Asia/Shanghai
-        run: pytest tests/ -v --tb=short 2>&1 | tee pytest-output.txt
+        # shell 必须带 pipefail：默认 shell 只看管道最后一个命令（tee）的退出码，
+        # pytest 失败会被 tee 的成功掩盖，绿灯是假的。
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest tests/ -v --tb=short 2>&1 | tee pytest-output.txt
 
       - name: Upload pytest output on failure
         if: failure()

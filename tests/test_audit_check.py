@@ -169,3 +169,40 @@ class TestReportCompatibility:
         detail = (notice.get("text") or cand.get("reason")
                   or cand.get("title") or "")
         assert detail == ""
+
+
+# ---------- 删除成功后的告警不能因缺 'notice' 键而丢失 ----------
+
+def test_deleted_notification_uses_compatible_detail(monkeypatch):
+    """作品类结果没有 'notice' 键；删除成功通知曾硬取 r['notice'] → KeyError。
+
+    KeyError 被外层 except 静默吃掉，operator 收不到「已自动删除」这条通知。
+    这里锁住：作品类结果删除成功后，通知正文必须带上违规原因。
+    """
+    import bot.publish_worker as pw
+
+    sent: list[str] = []
+
+    class S:
+        publish = type("P", (), {"headless": True})()
+
+    monkeypatch.setattr(pw, "fetch_published", lambda *a, **k: [{"title": "t"}])
+    monkeypatch.setattr(pw, "report_audit", lambda *a, **k: None)
+    monkeypatch.setattr(pw.telegram, "notify_info",
+                        lambda s, text, *a, **k: sent.append(text))
+
+    import bot.audit_check as ac
+    monkeypatch.setattr(ac, "run_audit", lambda *a, **k: [{
+        "matched": {"title": "测试作品", "published_at": "2026-11-01", "task_id": 7,
+                    "shortcode": "sc7"},
+        "cand": {"reason": "状态：流量减少"},
+        "deleted": True,
+    }])
+
+    handled = pw.run_audit_check("http://x", S())
+
+    assert handled == 1
+    assert sent, "删除成功后必须发出通知"
+    joined = "\n".join(sent)
+    assert "已自动删除" in joined
+    assert "流量减少" in joined, "违规原因要来自 cand.reason，不能因缺 notice 丢失"
