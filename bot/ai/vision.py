@@ -23,7 +23,7 @@ import base64
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import Settings
@@ -136,6 +136,22 @@ def _check_real_person_compat(video: Path | None, cover: Path, s: Settings) -> b
         return False
 
 
+def vision_endpoint(s: Settings) -> tuple[str, str]:
+    """视觉调用用的 (base_url, api_key)。
+
+    留空 VISION_BASE_URL 时回退 ai_base_url —— 与旧行为一致（同一家中转站
+    同时供文案与视觉时无需额外配置）。
+
+    为什么单独抽一个函数：端点与 key 必须成对。2026-11-12 把 AI_BASE_URL
+    换成另一家中转站、却留着旧家的 VISION_API_KEY，三个调用点（vision/
+    content_probe/cover_pick）全部 403，而且都只是 WARNING 级别，没人发现——
+    画面探针、封面选优、真人检测静默降级。三处各写一遍就会再错一遍。
+    """
+    base = (getattr(s, "vision_base_url", "") or s.ai_base_url or "").rstrip("/")
+    key = s.vision_api_key or s.ai_api_key
+    return base, key
+
+
 def _vision_candidates(s: Settings) -> list[str]:
     """候选模型：VISION_MODEL 优先，其后主模型 + 常见 vision 模型名兜底。"""
     out: list[str] = []
@@ -213,8 +229,8 @@ def inspect_cover(cover: Path, s: Settings) -> CoverVerdict:
     import httpx
     from openai import OpenAI
 
-    client = OpenAI(base_url=s.ai_base_url,
-                    api_key=s.vision_api_key or s.ai_api_key,
+    _base, _key = vision_endpoint(s)
+    client = OpenAI(base_url=_base, api_key=_key,
                     timeout=httpx.Timeout(60, connect=15))
 
     img_b64 = base64.b64encode(cover.read_bytes()).decode("utf-8")

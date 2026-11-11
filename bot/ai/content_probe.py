@@ -103,10 +103,10 @@ def _ask_vision(frames: list[Path], s: Settings) -> dict:
     import httpx
     from openai import OpenAI
 
-    from .vision import _vision_candidates
+    from .vision import _vision_candidates, vision_endpoint
 
-    client = OpenAI(base_url=s.ai_base_url,
-                    api_key=s.vision_api_key or s.ai_api_key,
+    _base, _key = vision_endpoint(s)
+    client = OpenAI(base_url=_base, api_key=_key,
                     timeout=httpx.Timeout(150, connect=15))
     content: list[dict] = [{"type": "text", "text": _PROMPT.format(n=len(frames))}]
     for f in frames:

@@ -170,6 +170,13 @@ class Settings:
     # 真人检测（vision）：留空回退 ai_api_key/ai_model
     vision_api_key: str = ""
     vision_model: str = ""
+    # vision 专用端点：留空 = 回退 ai_base_url。
+    # 2026-11-12 踩到：把 AI_BASE_URL 从 cpa 换到 wb（换文案供应商）时，
+    # vision 的 base_url 跟着抽走，但 VISION_API_KEY 还是 cpa 家的 key，
+    # 两边指向不同中转站 → 全部 403 Invalid API key，画面探针/封面选优
+    # /真人检测全部静默瘫痪（只打 WARNING）。文案供应商与视觉供应商可以
+    # 不是同一家，所以两者必须能分开配。
+    vision_base_url: str = ""
     # 语音识别
     asr_provider: str = "api"
     asr_model: str = "whisper-1"
@@ -337,6 +344,7 @@ def load_settings() -> Settings:
         ai_model=os.getenv("AI_MODEL", "").strip() or "gpt-4o-mini",
         vision_api_key=os.getenv("VISION_API_KEY", "").strip(),
         vision_model=os.getenv("VISION_MODEL", "").strip(),
+        vision_base_url=os.getenv("VISION_BASE_URL", "").strip(),
         asr_provider=os.getenv("ASR_PROVIDER", "api").strip().lower(),
         asr_model=os.getenv("ASR_MODEL", "whisper-1").strip(),
         asr_language=os.getenv("ASR_LANGUAGE", "zh").strip(),

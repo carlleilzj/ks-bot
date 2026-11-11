@@ -168,9 +168,9 @@ def _vision_rank(frames: list[Path], s) -> list[tuple[Path, float, bool]] | None
     import httpx
     from openai import OpenAI
 
-    from .vision import _vision_candidates  # noqa: PLC0415 —— 复用模型候选链
-    client = OpenAI(base_url=s.ai_base_url,
-                    api_key=s.vision_api_key or s.ai_api_key,
+    from .vision import _vision_candidates, vision_endpoint  # noqa: PLC0415 —— 复用模型候选链
+    _base, _key = vision_endpoint(s)
+    client = OpenAI(base_url=_base, api_key=_key,
                     timeout=httpx.Timeout(90, connect=15))
 
     content: list[dict] = [{"type": "text", "text": _SCORE_PROMPT % len(frames)}]
