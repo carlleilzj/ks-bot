@@ -77,3 +77,66 @@ def test_no_infinite_spin_when_state_unchanged(env, monkeypatch):
 
     main_mod.advance_task(s, db, tid, dry_run=False, headed=False, stage="all")
     assert calls["n"] == 0
+
+
+# ---------- --retry-failed 不能重试永久性失败（2026-11-12） ----------
+
+def test_permanent_failure_reason_detects_youtube_bot_check():
+    from bot.main import permanent_failure_reason
+
+    assert permanent_failure_reason(
+        "ERROR: [youtube] X: Sign in to confirm you're not a bot. Use --cookies")
+    assert permanent_failure_reason(
+        "ERROR: [youtube] X: Sign in to confirm you’re not a bot. (全角撇号)")
+
+
+def test_permanent_failure_reason_detects_format_gone():
+    from bot.main import permanent_failure_reason
+
+    assert permanent_failure_reason("Requested format is not available")
+    assert permanent_failure_reason("No video formats found")
+
+
+def test_permanent_failure_reason_detects_content_moderation():
+    from bot.main import permanent_failure_reason
+
+    assert permanent_failure_reason("文案生成失败（3 次重试后）：接口返回空 choices")
+
+
+def test_permanent_failure_reason_allows_transient_errors():
+    """瞬时错误（网络/超时/限流）必须仍然可重试。"""
+    from bot.main import permanent_failure_reason
+
+    for err in ("Connection reset by peer", "HTTP 500 Internal Server Error",
+                "Read timed out", "429 Too Many Requests", ""):
+        assert permanent_failure_reason(err) == "", f"{err!r} 不该被判永久失败"
+
+
+def test_retry_failed_archives_permanent_instead_of_requeueing(env, monkeypatch):
+    """永久性失败应转 SKIPPED，不能被重新推回流水线。"""
+    db, tid, s = env
+    db.update(tid, state=State.FAILED,
+              error="ERROR: [youtube] X: Sign in to confirm you're not a bot.")
+    db.conn.execute("UPDATE tasks SET media_url='https://youtube.com/watch?v=x' WHERE id=?",
+                    (tid,))
+    db.conn.commit()
+
+    main_mod.cmd_retry_failed(s, db)
+
+    after = db.get(tid)
+    assert after["state"] == State.SKIPPED
+    assert "永久性失败" in (after["error"] or "")
+
+
+def test_retry_failed_requeues_transient_failure(env, monkeypatch):
+    """瞬时失败仍应正常重置并续跑（不能一刀切全归档）。"""
+    db, tid, s = env
+    db.update(tid, state=State.FAILED, error="Connection reset by peer")
+    db.conn.execute("UPDATE tasks SET media_url='https://x/y' WHERE id=?", (tid,))
+    db.conn.commit()
+
+    main_mod.cmd_retry_failed(s, db)
+
+    after = db.get(tid)
+    assert after["state"] != State.SKIPPED, "瞬时失败不该被归档"
+    assert after["retries"] == 0

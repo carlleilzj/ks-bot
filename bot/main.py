@@ -1275,7 +1275,23 @@ def cmd_retry_failed(s: Settings, db: Database) -> None:
     if not tasks:
         print("没有 FAILED 状态的任务。")
         return
+
+    skipped_permanent = 0
     for task in tasks:
+        # 永久性失败不该重跑（2026-11-12）
+        # ----------------------------
+        # ``--retry-failed`` 原本只看本地文件在不在，不看失败原因。于是每次
+        # 运行都会把 YouTube 反爬（Sign in to confirm you're not a bot）、
+        # 源视频已删（format not available）、上游内容审核拦下（空 choices）
+        # 这类不可能自愈的任务重新推入流水线，再失败一次、再变 FAILED，
+        # 无限循环。它们只能人工介入或直接废弃。
+        why = permanent_failure_reason(task.get("error") or "")
+        if why:
+            db.update(task["id"], state=State.SKIPPED,
+                      error=f"永久性失败，不再重跑：{why}")
+            print(f"[{task['shortcode']}] FAILED -> SKIPPED（永久性失败：{why}）")
+            skipped_permanent += 1
+            continue
         if task.get("final_path") and Path(task["final_path"]).exists():
             state = State.SUBTITLED
         elif task.get("work_path") and Path(task["work_path"]).exists():
@@ -1289,7 +1305,35 @@ def cmd_retry_failed(s: Settings, db: Database) -> None:
             continue
         db.update(task["id"], state=state, retries=0, error=None)
         print(f"[{task['shortcode']}] FAILED -> {state}（retries 清零）")
-    print(f"共重置 {len(tasks)} 个失败任务，下次循环会自动续跑。")
+    n = len(tasks) - skipped_permanent
+    print(f"共重置 {n} 个失败任务，下次循环会自动续跑。"
+          + (f"（{skipped_permanent} 个永久性失败已归档为 SKIPPED）" if skipped_permanent else ""))
+
+
+def permanent_failure_reason(error: str) -> str:
+    """判断失败是否属于「重跑也不会好」的永久性错误。返回原因，空串=可重试。
+
+    只收录实测碰到过的、确定不会自愈的类型。宁可漏判（当可重试）也不要
+    误判 —— 把一条其实能救的任务归成 SKIPPED 比多重试一次更糟。
+    """
+    e = (error or "").lower()
+    if not e:
+        return ""
+    rules = [
+        (("confirm you're not a bot", "confirm you’re not a bot", "sign in to confirm"),
+         "YouTube 反爬验证，需人工 cookie"),
+        (("requested format is not available", "no video formats found"),
+         "源视频已删除或格式不可用"),
+        (("私有", "private video", "video unavailable", "has been removed"),
+         "源视频已下架/私有"),
+        (("空 choices", "empty choices"),
+         "上游内容审核拦截（素材被判不合规）"),
+        (("unsupported url",), "链接类型不支持"),
+    ]
+    for needles, reason in rules:
+        if any(n in e for n in needles):
+            return reason
+    return ""
 
 
 # ---------- 入口 ----------
