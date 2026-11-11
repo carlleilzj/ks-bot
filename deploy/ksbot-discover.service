@@ -1,0 +1,18 @@
+[Unit]
+Description=ks-bot 国内发现 worker（B站 寻源 → 协调端入库）
+After=network-online.target ksbot-tunnel.service
+Wants=network-online.target ksbot-tunnel.service
+
+[Service]
+Type=simple
+# 必须跑在阿里云（国内线路）：B站 搜索接口在境外协调端被 412 风控，
+# 在国内线路才返回 200。见 bot/source/discover_worker.py 头部注释。
+User=root
+WorkingDirectory=/opt/ks-bot
+ExecStart=/opt/ks-bot/.venv/bin/python -m bot.source.discover_worker
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
