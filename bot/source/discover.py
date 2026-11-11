@@ -558,24 +558,27 @@ def run_discovery(s, db, force: bool = False) -> dict:
             #   1. 白名单账号（人工确认过质量）
             #   2. IG hashtag / 关键词搜索（题材语义天然对齐）
             #   3. 其它来源（目前只剩停用中的 YouTube）
+            # 多抓一倍候选缓冲：质量闸门与题材校验会淘汰掉不合标准的片子，
+            # 靠缓冲候选补足本轮实际入库上限 lane.per_run。
+            cand_cap = max(lane.per_run * 2, lane.per_run)
             cands = run_whitelist(
                 lane, name,
                 per_account=int(conf.get("whitelist_per_account", 10)),
-                per_run=lane.per_run,
+                per_run=cand_cap,
                 db=db,
             )
-            if len(cands) < lane.per_run:
+            if len(cands) < cand_cap:
                 tags = [str(t) for t in (conf.get("ig_tags") or []) if str(t).strip()]
                 kws = [str(k) for k in (conf.get("ig_keywords") or []) if str(k).strip()]
                 if tags or kws:
                     cands += run_ig_search(
                         tags, kws,
                         limit_per_entry=int(conf.get("ig_limit_per_entry", 24)),
-                        per_run=lane.per_run - len(cands),
+                        per_run=cand_cap - len(cands),
                         pages=int(conf.get("ig_pages", 1)),
                         db=db,
                     )
-            if len(cands) < lane.per_run and srcs:
+            if len(cands) < cand_cap and srcs:
                 cands += run_lane(lane, sources=srcs,
                                   per_query=int(conf.get("per_query", 8)))
             # 合并后去重：白名单与搜索可能命中同一条
@@ -585,7 +588,7 @@ def run_discovery(s, db, force: bool = False) -> dict:
                     continue
                 seen.add(c.url)
                 deduped.append(c)
-            cands = deduped[:lane.per_run]
+            cands = deduped[:cand_cap]
         except Exception as e:
             log.warning("[%s] 发现失败：%s", name, str(e)[:160])
             summary.setdefault(name, {"found": 0, "new": 0,
@@ -594,6 +597,8 @@ def run_discovery(s, db, force: bool = False) -> dict:
 
         added, skipped, errors = 0, 0, []
         for c in cands:
+            if added >= lane.per_run:
+                break
             if db.find_by_source_url(c.url):
                 skipped += 1
                 continue
